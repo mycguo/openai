@@ -93,6 +93,8 @@ def main():
     st.title("OpenAI GoogleDocs Integrations")
     st.header("let the chatbot coming to you")
 
+    st.write("The GoogleDoc Link: https://docs.google.com/document/d/1vbvbDxvKj6LTWKiahK79XTHZsrhfeZpLUfqf1Ocl6RE/edit?tab=t.0 ")
+
 
     button1 = st.button("generate linkedin posts")
     if button1:

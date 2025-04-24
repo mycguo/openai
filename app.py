@@ -106,19 +106,5 @@ def main():
         st.success('Essay generated successfully!')
 
     
-    
-    st.markdown("<div style='height:300px;'></div>", unsafe_allow_html=True)
-    st.markdown(""" \n \n \n \n \n \n \n\n\n\n\n\n
-        # Footnote on tech stack
-        web framework: https://streamlit.io/ \n
-        LLM model: "deepseek-ai/deepseek-r1" \n
-        vector store: FAISS (Facebook AI Similarity Search) \n
-        Embeddings model: GoogleGenerativeAIEmbeddings(model="models/embedding-001") \n
-        LangChain: Connect LLMs for Retrieval-Augmented Generation (RAG), memory, chaining and reasoning. \n
-        PyPDF2 and docx: for importing PDF and Word \n
-        audio: assemblyai https://www.assemblyai.com/ \n
-        Video: moviepy https://zulko.github.io/moviepy/ \n
-    """)    
-
 if __name__ == "__main__":
     main()

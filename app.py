@@ -10,7 +10,7 @@ from openai import AsyncOpenAI
 # ─── Configuration ────────────────────────────────────────────────
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 MODEL = "gpt-3.5-turbo"
-SERVICE_ACCOUNT_FILE = "./api-project-1007544013996-513563ec97dc.json"
+SERVICE_ACCOUNT_FILE = "./service-account.json"
 DOCUMENT_ID = "1vbvbDxvKj6LTWKiahK79XTHZsrhfeZpLUfqf1Ocl6RE"
 
 SCOPES = [
@@ -18,9 +18,11 @@ SCOPES = [
   "https://www.googleapis.com/auth/drive"
 ]
 
-credentials = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE, scopes=SCOPES
+
+credentials = service_account.Credentials.from_service_account_info(
+    st.secrets["gcp_service_account"], scopes=SCOPES
 )
+
 docs_service = build("docs", "v1", credentials=credentials)
 
 

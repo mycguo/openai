@@ -96,7 +96,7 @@ def main():
     st.write("The GoogleDoc Link: https://docs.google.com/document/d/1vbvbDxvKj6LTWKiahK79XTHZsrhfeZpLUfqf1Ocl6RE/edit?tab=t.0 ")
 
 
-    button1 = st.button("generate linkedin posts")
+    button1 = st.button("generate linkedin posts based on the document content")
     if button1:
         generate_linkedin_posts()
         st.success("LinkedIn posts generated and appended to the document.")

@@ -106,7 +106,21 @@ Link: [Registration/Info URL]
 Focus on events in the next 8 days."""
 
     # Task to scrape events
-    task = "Go to https://lu.ma/genai-sf?k=c and extract all AI/GenAI event information for the next 8 days."
+    task = """ Go to https://lu.ma/genai-sf?k=c and extract all AI/GenAI event information for the next 8 days.
+
+    Extract each event's information including the event link/URL. If you find relative URLs (like /event-name), note them as is - they will be converted to full URLs later.
+
+    Format the events in the following format:
+
+    Event Name: [Name]
+    Date: [Date and Time]
+    Location: [Venue/Address]
+    Description: [Brief description]
+    Link: [Event URL or path]
+
+    Focus on events in the next 8 days. Extract all available event information efficiently.
+
+    """
 
     try:
         # Start browser session
@@ -172,20 +186,123 @@ def format_events_for_doc(events_data):
         formatted_text = f"GenAI SF Events - {today.strftime('%B %d, %Y')} to {end_date.strftime('%B %d, %Y')}\n\n"
         formatted_text += "=" * 50 + "\n\n"
 
-        # If events_data is a string, try to extract event information
-        if isinstance(events_data, str):
-            formatted_text += "Events Found:\n\n"
-            formatted_text += events_data
+        # Extract clean event information from agent result
+        events_content = extract_events_from_agent_result(events_data)
+
+        if events_content:
+            formatted_text += events_content
         else:
-            # If it's structured data, format accordingly
-            formatted_text += str(events_data)
+            formatted_text += "No events found or error parsing events data.\n"
 
         formatted_text += "\n\n" + "=" * 50 + "\n"
         formatted_text += f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
 
         return formatted_text
     except Exception as e:
-        return f"Error formatting events: {str(e)}\n\nRaw data:\n{events_data}"
+        return f"Error formatting events: {str(e)}\n\nRaw data:\n{str(events_data)[:500]}..."
+
+
+def extract_events_from_agent_result(agent_result):
+    """Extract clean event information from browser-use agent result"""
+    try:
+        # Convert agent result to string for parsing
+        result_str = str(agent_result)
+
+        # Look for content between <result> tags or extract from extracted_content
+        import re
+
+        # Try to find content in <result> tags
+        result_match = re.search(r'<result>(.*?)</result>', result_str, re.DOTALL)
+        if result_match:
+            content = result_match.group(1).strip()
+            return clean_event_content(content)
+
+        # Try to find extracted_content with events
+        extracted_match = re.search(r"extracted_content='[^']*### AI/GenAI Events[^']*'", result_str)
+        if extracted_match:
+            content = extracted_match.group(0)
+            # Extract the actual content
+            content_match = re.search(r"extracted_content='([^']*)'", content)
+            if content_match:
+                return clean_event_content(content_match.group(1))
+
+        # Try to find any content with "Event Name:" pattern
+        event_pattern = r'Event Name:.*?(?=Event Name:|$)'
+        events = re.findall(event_pattern, result_str, re.DOTALL)
+        if events:
+            return '\n\n'.join(events).strip()
+
+        # If no structured format found, try to extract readable content
+        # Look for lines that contain event-like information
+        lines = result_str.split('\n')
+        event_lines = []
+        for line in lines:
+            line = line.strip()
+            if any(keyword in line.lower() for keyword in ['event', 'date:', 'location:', 'description:', 'link:']):
+                if not line.startswith('ActionResult') and not 'extracted_content=' in line:
+                    event_lines.append(line)
+
+        if event_lines:
+            return '\n'.join(event_lines)
+
+        return "Unable to parse event information from agent result."
+
+    except Exception as e:
+        return f"Error extracting events: {str(e)}"
+
+
+def clean_event_content(content):
+    """Clean up event content for better formatting"""
+    # Remove escape characters and clean up formatting
+    content = content.replace('\\n', '\n').replace('\\t', '\t')
+
+    # Remove extra whitespace and normalize line breaks
+    lines = [line.strip() for line in content.split('\n') if line.strip()]
+
+    # Fix relative URLs to use full lu.ma URLs
+    fixed_lines = []
+    for line in lines:
+        if line.startswith('Link:'):
+            line = fix_relative_urls(line)
+        fixed_lines.append(line)
+
+    return '\n'.join(fixed_lines)
+
+
+def fix_relative_urls(link_line):
+    """Convert relative URLs to full lu.ma URLs"""
+    import re
+
+    # Pattern to match various URL formats in Link: lines
+    url_patterns = [
+        r'Link:\s*(/[^\s]+)',  # Relative path like /event-name
+        r'Link:\s*(https://example\.com/[^\s]+)',  # Example.com URLs
+        r'Link:\s*([a-zA-Z0-9-]+)(?:\s|$)',  # Just the event slug
+    ]
+
+    for pattern in url_patterns:
+        match = re.search(pattern, link_line)
+        if match:
+            url_part = match.group(1)
+            # Convert to full lu.ma URL
+            if url_part.startswith('/'):
+                # Relative path
+                full_url = f"https://lu.ma{url_part}"
+            elif 'example.com' in url_part:
+                # Replace example.com with lu.ma
+                event_id = url_part.split('/')[-1]
+                full_url = f"https://lu.ma/{event_id}"
+            elif not url_part.startswith('http'):
+                # Just a slug
+                full_url = f"https://lu.ma/{url_part}"
+            else:
+                # Already a full URL
+                full_url = url_part
+
+            return f"Link: {full_url}"
+
+    # If no pattern matched, return as is
+    return link_line
 
 
 

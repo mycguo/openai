@@ -2,3 +2,7 @@ openai
 streamlit
 google-api-python-client
 google-auth
+browser-use
+chromium
+playwright
+langchain-openai

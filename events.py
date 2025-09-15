@@ -158,6 +158,34 @@ IMPORTANT: Stop scrolling once you have events for 8 days or after 5 scrolls max
         return None
 
 
+def generate_essay():
+    """Generate an essay based on document content and display it"""
+    try:
+        # Get content from Google Doc
+        selected = get_full_text(DOCUMENT_ID)
+        prompt = f"Generate an essay on {selected}"
+
+        # Generate essay using OpenAI
+        result = generate_from_openai(prompt)
+
+        # Display essay on the page
+        st.subheader("📝 Generated Essay")
+        st.markdown("**Essay based on Google Doc content:**")
+        st.markdown(result)
+
+        # Silently append to Google Doc (hidden from UI)
+        try:
+            append_paragraph(DOCUMENT_ID, f"\n\n--- Generated Essay ---\n{result}")
+            print("✅ Essay generated and saved to Google Doc.")
+        except Exception as e:
+            print(f"⚠️ Failed to save essay to Google Doc: {str(e)}")
+
+        return True, result
+    except Exception as e:
+        st.error(f"Error generating essay: {str(e)}")
+        return False, None
+
+
 def generate_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI SF"):
     """Go to specified URL and get the events for the next 8 days"""
     try:
@@ -419,6 +447,21 @@ def main():
                     st.success("✅ Cerebral Valley events scraped successfully!")
                 else:
                     st.error("❌ Failed to scrape Cerebral Valley events")
+
+    st.divider()
+
+    # Add essay generation section
+    st.subheader("📝 Essay Generation")
+    st.write("Generate an essay based on the current Google Doc content")
+
+    button_essay = st.button("Generate Essay from Doc Content", key="essay_button")
+    if button_essay:
+        with st.spinner("Generating essay from Google Doc content..."):
+            success, essay = generate_essay()
+            if success:
+                st.success("✅ Essay generated successfully!")
+            else:
+                st.error("❌ Failed to generate essay")
 
     st.divider()
 

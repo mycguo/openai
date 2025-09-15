@@ -82,7 +82,7 @@ def generate_linkedin_posts():
 def generate_essay():
     """Mimics generatePrompt(): writes an essay based on doc text."""
     selected = get_full_text(DOCUMENT_ID)
-    prompt = f"Generate an essay on {selected}"
+    prompt = f"Generate an essay on {selected} . This will be used to generate a LinkedIn post. Write in a way that is easy to understand and encourage the reader to attend the event."
     result = generate_from_openai(prompt)
     append_paragraph(DOCUMENT_ID, result)
     print("✅ Appended essay.")

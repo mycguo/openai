@@ -20,6 +20,7 @@ import asyncio
 import json
 import os
 import sys
+import streamlit as st
 
 from dotenv import load_dotenv
 
@@ -242,8 +243,40 @@ async def main():
 	# Step 3: Initialize tools with authenticated service
 	print('\n🔍 Step 3: Registering Gmail actions...')
 
-	tools = Tools()
+	# Restrict the agent to Gmail tools only (disable web navigation actions)
+	tools = Tools(
+		exclude_actions=[
+			# Navigation + browsing
+			'go_to_url',
+			'search_google',
+			# Page interaction
+			'click_element_by_index',
+			'input_text',
+			'scroll',
+			'scroll_to_text',
+			'send_keys',
+			'get_dropdown_options',
+			'select_dropdown_option',
+			'upload_file',
+			# Tabs and history
+			'switch_tab',
+			'close_tab',
+			'go_back',
+			# Timing helpers (not needed here)
+			'wait',
+		]
+	)
 	register_gmail_actions(tools, gmail_service=gmail_service)
+
+	# Debug: list available actions to verify navigation is excluded
+	available = sorted(list(tools.registry.registry.actions.keys()))
+	print('\n🧰 Available actions after registration (navigation excluded):')
+	for name in available:
+		print(f' - {name}')
+	if 'go_to_url' in available or 'search_google' in available:
+		print('⚠️ Navigation actions still present unexpectedly.')
+	else:
+		print('✅ Navigation actions successfully excluded.')
 
 	print('✅ Gmail actions registered with tools')
 	print('Available Gmail actions:')
@@ -251,12 +284,20 @@ async def main():
 	print()
 
 	# Initialize LLM
-	llm = ChatOpenAI(model='gpt-4.1-mini')
+	llm = ChatOpenAI(model='gpt-4.1-mini', api_key=st.secrets["OPENAI_API_KEY"])
 
 	# Step 4: Test Gmail functionality
 	print('🔍 Step 4: Testing Gmail email retrieval...')
 
-	agent = Agent(task='Get recent emails from Gmail to test the integration is working properly', llm=llm, tools=tools)
+	print('\nAgent 1 configuration: directly_open_url=False')
+	agent = Agent(
+		task='Get recent emails from Gmail to test the integration is working properly. Do not browse the web. Use the Gmail tools only (e.g., get_recent_emails).',
+		llm=llm,
+		tools=tools,
+		# Prevent automatic URL extraction/navigation from the task text
+		directly_open_url=False,
+		include_tool_call_examples=True,
+	)
 
 	try:
 		history = await agent.run()
@@ -278,10 +319,13 @@ async def main():
 	# Step 5: Demonstrate 2FA code finding
 	print('🔍 Step 5: Testing 2FA code detection...')
 
+	print('Agent 2 configuration: directly_open_url=False')
 	agent2 = Agent(
-		task='Search for any 2FA verification codes or OTP codes in recent Gmail emails from the last 30 minutes',
+		task='Search for any 2FA verification codes or OTP codes in recent Gmail emails from the last 30 minutes. Do not browse the web. Use the Gmail tools only (e.g., get_recent_emails).',
 		llm=llm,
 		tools=tools,
+		directly_open_url=False,
+		include_tool_call_examples=True,
 	)
 
 	history2 = await agent2.run()
@@ -292,20 +336,24 @@ async def main():
 	# Step 6: Simulate complete login flow
 	print('🔍 Step 6: Demonstrating complete 2FA login flow...')
 
+	print('Agent 3 configuration: directly_open_url=False')
 	agent3 = Agent(
 		task="""
 		Demonstrate a complete 2FA-enabled login flow:
 		1. Check for any existing 2FA codes in recent emails
-		2. Explain how the agent would handle a typical login:
-		   - Navigate to a login page
-		   - Enter credentials
-		   - Wait for 2FA prompt
+		2. Explain how the agent would handle a typical login without actually browsing:
+		   - Describe navigating to a login page (no real navigation)
+		   - Describe entering credentials (no real input)
+		   - Explain waiting for 2FA prompt
 		   - Use get_recent_emails to find the verification code
-		   - Extract and enter the 2FA code
+		   - Extract and present the 2FA code
 		3. Show what types of emails and codes can be detected
+		IMPORTANT: Do not browse the web. Use Gmail tools only.
 		""",
 		llm=llm,
 		tools=tools,
+		directly_open_url=False,
+		include_tool_call_examples=True,
 	)
 
 	history3 = await agent3.run()

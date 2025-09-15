@@ -198,12 +198,11 @@ def generate_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI S
 
             # Display results on the page
             st.subheader(f"📅 {source_name} Events")
-            st.text_area(
-                "Scraped Events:",
-                value=formatted_events,
-                height=400,
-                help="Events scraped and displayed below"
-            )
+            st.markdown("**Scraped Events:**")
+
+            # Display as rendered markdown instead of plain text
+            with st.container():
+                st.markdown(formatted_events)
 
             # Silently append to Google Doc (hidden from UI)
             try:
@@ -450,21 +449,6 @@ def main():
 
     st.divider()
 
-    # Add essay generation section
-    st.subheader("📝 Essay Generation")
-    st.write("Generate an essay based on the current Google Doc content")
-
-    button_essay = st.button("Generate Essay from Doc Content", key="essay_button")
-    if button_essay:
-        with st.spinner("Generating essay from Google Doc content..."):
-            success, essay = generate_essay()
-            if success:
-                st.success("✅ Essay generated successfully!")
-            else:
-                st.error("❌ Failed to generate essay")
-
-    st.divider()
-
     # Add a button to scrape both sources
     st.subheader("🚀 Bulk Actions")
     button_all = st.button("Scrape All Sources", key="all_button", type="primary")
@@ -500,17 +484,17 @@ def main():
 
                     with tab1:
                         st.markdown("**Lu.ma Events**")
-                        st.markdown(f"```\n{all_events[0]}\n```")
+                        st.markdown(all_events[0])
 
                     with tab2:
                         st.markdown("**Cerebral Valley Events**")
-                        st.markdown(f"```\n{all_events[1]}\n```")
+                        st.markdown(all_events[1])
 
                     with tab3:
                         # Combine all events into one view
                         combined_content = "\n\n" + "="*60 + "\n" + "="*60 + "\n\n".join(all_events)
                         st.markdown("**All Events Combined**")
-                        st.markdown(f"```\n{combined_content}\n```")
+                        st.markdown(combined_content)
 
                         # Add download button for combined results
                         st.download_button(
@@ -525,6 +509,21 @@ def main():
 
             st.balloons()
             st.success(f"🎉 Completed! Successfully scraped {success_count}/2 sources")
+
+    st.divider()
+
+    # Add essay generation section
+    st.subheader("📝 Essay Generation")
+    st.write("Generate an essay based on the current Google Doc content")
+
+    button_essay = st.button("Generate Essay from Doc Content", key="essay_button")
+    if button_essay:
+        with st.spinner("Generating essay from Google Doc content https://docs.google.com/document/d/1vbvbDxvKj6LTWKiahK79XTHZsrhfeZpLUfqf1Ocl6RE/edit?tab=t.0 ..."):
+            success, essay = generate_essay()
+            if success:
+                st.success("✅ Essay generated successfully!")
+            else:
+                st.error("❌ Failed to generate essay")
 
 
 

@@ -8,7 +8,6 @@ import asyncio
 from datetime import datetime, timedelta
 
 
-# https://github.com/amrrs/chatgpt-googledocs/blob/main/appscript.js
 # ─── Configuration ────────────────────────────────────────────────
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 MODEL = "gpt-3.5-turbo"
@@ -64,9 +63,9 @@ def append_paragraph(document_id: str, text: str):
 
 
 def generate_from_openai(prompt: str, temperature: float = 0.0, max_tokens: int = 2060) -> str:
-    """Calls ChatCompletions and returns the assistant’s reply."""
+    """Calls ChatCompletions and returns the assistant's reply."""
     client = OpenAI()
-    completion = client.chat.completions.create(model=MODEL, 
+    completion = client.chat.completions.create(model=MODEL,
         messages=[{"role": "user", "content": prompt}], temperature=temperature, max_tokens=max_tokens)
     return completion.choices[0].message.content.strip()
 
@@ -103,7 +102,7 @@ Location: [Venue/Address]
 Description: [Brief description]
 Link: [Event URL or path]
 
-IMPORTANT: Stop scrolling once you have events for 8 days or after 3 scrolls maximum."""
+IMPORTANT: Stop scrolling once you have events for 8 days or after 5 scrolls maximum."""
 
     # Task to scrape events
     task = f"""Go to {url} and extract AI/GenAI event information.
@@ -113,7 +112,7 @@ IMPORTANT: Stop scrolling once you have events for 8 days or after 3 scrolls max
     2. Extract visible events on the initial view
     3. Scroll down ONCE to load more events if needed
     4. Extract any additional events
-    5. STOP after collecting events for the next 8 days OR after 3 scrolls maximum
+    5. STOP after collecting events for the next 8 days OR after 5 scrolls maximum
     6. Return all collected events
 
     DO NOT scroll indefinitely. Focus on efficiently extracting available events.
@@ -166,7 +165,7 @@ def generate_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI S
         events_data = asyncio.run(scrape_events(url, source_name))
 
         if events_data:
-            # Format the events for the Google Doc
+            # Format the events for display and Google Doc
             formatted_events = format_events_for_doc(events_data, source_name)
 
             # Display results on the page
@@ -175,12 +174,17 @@ def generate_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI S
                 "Scraped Events:",
                 value=formatted_events,
                 height=400,
-                help="These events have been added to your Google Doc"
+                help="Events scraped and displayed below"
             )
 
-            # Append to Google Doc
-            append_paragraph(DOCUMENT_ID, formatted_events)
-            print(f"✅ Appended {source_name} events to Google Doc.")
+            # Silently append to Google Doc (hidden from UI)
+            try:
+                append_paragraph(DOCUMENT_ID, formatted_events)
+                print(f"✅ Successfully scraped {source_name} events and saved to Google Doc.")
+            except Exception as e:
+                print(f"⚠️ Failed to save to Google Doc: {str(e)}")
+                # Don't show this error to user, just log it
+
             return True, formatted_events
         else:
             st.error(f"Failed to retrieve events from {source_name}")
@@ -385,10 +389,8 @@ def fix_example_com_urls(line, base_url="https://lu.ma"):
 
 
 def main():
-    st.title("AI Events Scraper & Google Docs Integration")
-    st.header("Automatically extract and save AI events to Google Docs")
-
-    st.write("📄 **Google Doc Link:** https://docs.google.com/document/d/1vbvbDxvKj6LTWKiahK79XTHZsrhfeZpLUfqf1Ocl6RE/edit?tab=t.0")
+    st.title("AI Events Scraper")
+    st.header("Automatically extract and display AI events")
 
     st.divider()
 
@@ -403,7 +405,7 @@ def main():
             with st.spinner("Scraping Lu.ma events..."):
                 success, events = generate_events("https://lu.ma/genai-sf?k=c", "Lu.ma GenAI SF")
                 if success:
-                    st.success("✅ Lu.ma events scraped and added to Google Doc!")
+                    st.success("✅ Lu.ma events scraped successfully!")
                 else:
                     st.error("❌ Failed to scrape Lu.ma events")
 
@@ -414,7 +416,7 @@ def main():
             with st.spinner("Scraping Cerebral Valley events..."):
                 success, events = generate_events("https://cerebralvalley.ai/events", "Cerebral Valley")
                 if success:
-                    st.success("✅ Cerebral Valley events scraped and added to Google Doc!")
+                    st.success("✅ Cerebral Valley events scraped successfully!")
                 else:
                     st.error("❌ Failed to scrape Cerebral Valley events")
 
@@ -447,17 +449,33 @@ def main():
             # Display combined results summary
             if all_events:
                 st.divider()
-                st.subheader("📊 Combined Results Summary")
+                st.subheader("📊 Results Summary")
 
-                # Create tabs for each source
+                # Create tabs for each source plus combined view
                 if len(all_events) == 2:
-                    tab1, tab2 = st.tabs(["Lu.ma Events", "Cerebral Valley Events"])
+                    tab1, tab2, tab3 = st.tabs(["Lu.ma Events", "Cerebral Valley Events", "📋 Combined Results"])
 
                     with tab1:
                         st.text_area("Lu.ma Events", value=all_events[0], height=300, key="luma_results")
 
                     with tab2:
                         st.text_area("Cerebral Valley Events", value=all_events[1], height=300, key="cv_results")
+
+                    with tab3:
+                        # Combine all events into one view
+                        combined_content = "\n\n" + "="*60 + "\n" + "="*60 + "\n\n".join(all_events)
+                        st.text_area("All Events Combined", value=combined_content, height=400, key="combined_results")
+
+                        # Add download button for combined results
+                        st.download_button(
+                            label="📥 Download Combined Events",
+                            data=combined_content,
+                            file_name=f"ai_events_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                            mime="text/plain"
+                        )
+                elif len(all_events) == 1:
+                    # If only one source succeeded
+                    st.text_area("Events", value=all_events[0], height=300)
 
             st.balloons()
             st.success(f"🎉 Completed! Successfully scraped {success_count}/2 sources")

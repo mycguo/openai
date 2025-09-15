@@ -97,25 +97,33 @@ async def scrape_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma Gen
     system_prompt = """You are extracting event information. Format events as:
 
 Event Name: [Name]
-Date: [Date and Time]
-Location: [Venue/Address]
-Description: [Brief description]
-Link: [Event URL or path]
+Date and Time: [Date and Time]
+Location/Venue: [Venue/Address]
+Brief Description: [Brief description including organizer/host]
+Event URL: [ACTUAL URL - click on event to get the full URL like https://lu.ma/event-name, NOT just "Link"]
 
-IMPORTANT: Stop scrolling once you have events for 8 days or after 5 scrolls maximum."""
+IMPORTANT:
+- For Event URL, you MUST click on each event or extract the href attribute to get the ACTUAL URL
+- Never use "Link" as the URL - always get the real URL like https://lu.ma/xyz or https://cerebralvalley.ai/events/abc
+- Stop scrolling once you have events for 8 days or after 3 scrolls maximum."""
 
     # Task to scrape events
     task = f"""Go to {url} and extract AI/GenAI event information.
 
-    INSTRUCTIONS:
+    CRITICAL INSTRUCTIONS:
     1. Load the page
-    2. Extract visible events on the initial view
-    3. Scroll down ONCE to load more events if needed
+    2. Extract ALL visible events from the current view with their ACTUAL URLs (not "Link")
+    3. Scroll down MAXIMUM 2 times to see more events
     4. Extract any additional events
-    5. STOP after collecting events for the next 8 days OR after 5 scrolls maximum
+    5. STOP IMMEDIATELY - do not scroll more than 2 times total
     6. Return all collected events
 
-    DO NOT scroll indefinitely. Focus on efficiently extracting available events.
+    STOP CONDITIONS:
+    - After 2 scrolls maximum
+    - When you have at least 5 events
+    - When no new events appear after scrolling
+
+    DO NOT CONTINUE SCROLLING BEYOND 2 SCROLLS. STOP AND RETURN RESULTS.
 
     For each event, extract:
     - Event Name
@@ -136,7 +144,7 @@ IMPORTANT: Stop scrolling once you have events for 8 days or after 5 scrolls max
             llm=llm,
             browser_session=browser_session,
             system_message=system_prompt,
-            max_actions=20  # Limit actions to prevent infinite loops
+            max_actions=12  # Strict limit to prevent infinite loops
         )
 
         # Run the agent
@@ -352,151 +360,49 @@ def fix_relative_urls(link_line):
 
 
 def parse_and_format_combined_events(all_events):
-    """Parse and format combined events in chronological order"""
-    import re
-    from collections import defaultdict
-    from datetime import datetime, timedelta
+    """Use LLM to combine and format events in chronological order"""
 
-    def parse_events(events_text, source_name):
-        """Parse events from text and return structured data"""
-        events = []
-
-        # Split by "Event Name:" to get individual events
-        event_blocks = re.split(r'Event Name:', events_text)[1:]  # Skip first empty element
-
-        for block in event_blocks:
-            try:
-                # Extract event name - stop at "Date" keyword (Event Name: already split out)
-                name_match = re.search(r'^\s*([^:\n\r]+?)(?:\s+Date|$)', block, re.MULTILINE)
-
-                # Extract date/time - be more specific
-                date_match = re.search(r'Date(?:\s+and\s+Time)?[:\s]*([^\n\r]+?)(?:\s+Location|$)', block, re.IGNORECASE)
-
-                # Extract location - stop at next field
-                location_match = re.search(r'Location(?:/Venue)?[:\s]*([^\n\r]+?)(?:\s+(?:Brief\s+)?Description|$)', block, re.IGNORECASE)
-
-                # Extract description/host - stop at next field
-                desc_match = re.search(r'(?:Brief\s+)?Description[:\s]*([^\n\r]+?)(?:\s+(?:Event\s+)?URL|$)', block, re.IGNORECASE)
-
-                # Extract URL - look for actual URLs or fix relative ones
-                url_match = re.search(r'(?:Event\s+)?URL[:\s]*([^\s\n\r]+)', block, re.IGNORECASE)
-
-                if name_match and date_match:
-                    event_name = name_match.group(1).strip()
-                    location = location_match.group(1).strip() if location_match else 'TBD'
-                    description = desc_match.group(1).strip() if desc_match else source_name
-                    url = url_match.group(1).strip() if url_match else 'TBD'
-
-                    # Fix placeholder URLs
-                    if url == 'Link':
-                        if 'Accelerate Climate Innovation' in event_name:
-                            url = 'https://lu.ma/m5kpakd4'
-                        elif 'Cafe Cursor' in event_name:
-                            url = 'https://lu.ma/cafe-cursor-nb'
-                        elif 'Earth Data & AI' in event_name:
-                            url = 'https://lu.ma/earth-data-ai'
-                        elif 'Silicon Valley AI Hub' in event_name:
-                            url = 'https://cerebralvalley.ai/events/svai-hackathon'
-                        else:
-                            url = 'TBD'
-
-                    event = {
-                        'name': event_name,
-                        'date_time_raw': date_match.group(1).strip(),
-                        'location': location,
-                        'description': description,
-                        'url': url,
-                        'source': source_name
-                    }
-
-                    # Parse date for sorting
-                    parsed_date = parse_date_string(event['date_time_raw'])
-                    if parsed_date:
-                        event['parsed_date'] = parsed_date
-                        events.append(event)
-
-            except Exception as e:
-                continue
-
-        return events
-
-    def parse_date_string(date_str):
-        """Parse various date formats and return datetime object"""
-        try:
-            # Handle "Tomorrow" cases
-            if 'tomorrow' in date_str.lower():
-                tomorrow = datetime.now() + timedelta(days=1)
-                time_match = re.search(r'(\d{1,2}:\d{2}\s*[AP]M)', date_str, re.IGNORECASE)
-                if time_match:
-                    time_str = time_match.group(1)
-                    # For this test, assume tomorrow is Sep 15, 2024
-                    base_date = datetime(2024, 9, 15)
-                    return base_date
-                return tomorrow
-
-            # Handle "Sep 16" format
-            date_match = re.search(r'Sep\s+(\d{1,2})', date_str)
-            if date_match:
-                day = int(date_match.group(1))
-                # Assume current year 2024
-                return datetime(2024, 9, day)
-
-            # Handle "Oct 2" format
-            month_match = re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})', date_str)
-            if month_match:
-                month_name = month_match.group(1)
-                day = int(month_match.group(2))
-                month_num = {
-                    'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
-                    'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
-                }[month_name]
-                year = 2025 if month_num >= 10 else 2024  # Assume future dates
-                return datetime(year, month_num, day)
-
-        except Exception as e:
-            pass
-
-        return None
-
-    # Main function logic
     if not all_events or len(all_events) < 2:
         return "Not enough event sources to combine"
 
-    # Parse events from both sources
-    luma_events = parse_events(all_events[0], "Lu.ma")
-    cv_events = parse_events(all_events[1], "Cerebral Valley")
+    # Combine all events into a single text
+    combined_text = f"""
+Lu.ma Events:
+{all_events[0]}
 
-    # Combine and sort by date
-    all_parsed_events = luma_events + cv_events
-    all_parsed_events.sort(key=lambda x: x['parsed_date'])
+Cerebral Valley Events:
+{all_events[1]}
+"""
 
-    # Group by date
-    events_by_date = defaultdict(list)
-    for event in all_parsed_events:
-        date_key = event['parsed_date'].strftime('%B %d, %Y')
-        events_by_date[date_key].append(event)
+    # Use OpenAI to combine and format the events
+    prompt = """Take all the events from both sources and combine them into a single chronologically ordered list.
+Format the output EXACTLY like this:
 
-    # Format output
-    result = []
-    for date_str in sorted(events_by_date.keys(), key=lambda x: datetime.strptime(x, '%B %d, %Y')):
-        result.append(f"**{date_str}**")
+**[Date in format: Month DD, YYYY]**
 
-        for i, event in enumerate(events_by_date[date_str], 1):
-            # Extract time from raw date string
-            time_match = re.search(r'(\d{1,2}:\d{2}\s*[AP]M)', event['date_time_raw'], re.IGNORECASE)
-            time_str = time_match.group(1) if time_match else "Time TBD"
+1. **[Event Name]**
+   Time: [Time or "Time TBD"]
+   Location: [Location]
+   Host: [Host organization or description]
+   Sign-up URL: [Show the actual URL directly, not "Link". If no URL available, show "TBD"]
 
-            # Extract host from description
-            host = event['description'] if event['description'] != 'No description' else event['source']
+Group all events by date, sort dates chronologically, and number events within each date.
+Make sure to combine events from BOTH sources into single date groups (don't separate by source).
+When you see "Event URL: Link", look for the actual URL that follows or precedes it in the event data.
+If the URL shows as just "Link" with no actual URL, display "TBD" instead.
+Extract the host information from the description field if available.
+Make the Date and Time, Location, Host, and Sign-up URL starting with a new line.
 
-            result.append(f"{i}. **{event['name']}**")
-            result.append(f"   Time: {time_str}")
-            result.append(f"   Location: {event['location']}")
-            result.append(f"   Host: {host}")
-            result.append(f"   Sign-up URL: {event['url']}")
-            result.append("")  # Empty line between events
+IMPORTANT:
+- Combine ALL events from both sources into a single unified list, not two separate sections.
+- Show actual URLs directly (e.g., https://lu.ma/event-name), never just show "Link"
+- If a URL appears as "[text](url)" markdown format, extract and show just the URL"""
 
-    return "\n".join(result)
+    try:
+        result = generate_from_openai(combined_text + "\n\n" + prompt, temperature=0.1, max_tokens=3000)
+        return result
+    except Exception as e:
+        return f"Error combining events: {str(e)}"
 
 
 def fix_example_com_urls(line, base_url="https://lu.ma"):

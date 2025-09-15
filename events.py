@@ -95,30 +95,35 @@ async def scrape_events():
     llm = ChatOpenAI(model='gpt-4o-mini')
 
     # System prompt for formatting
-    system_prompt = """Format the events in the following format:
+    system_prompt = """You are extracting event information. Format events as:
 
 Event Name: [Name]
 Date: [Date and Time]
 Location: [Venue/Address]
 Description: [Brief description]
-Link: [Registration/Info URL]
+Link: [Event URL or path]
 
-Focus on events in the next 8 days."""
+IMPORTANT: Stop scrolling once you have events for 8 days or after 3 scrolls maximum."""
 
     # Task to scrape events
-    task = """ Go to https://lu.ma/genai-sf?k=c and extract all AI/GenAI event information for the next 8 days.
+    task = """Go to https://lu.ma/genai-sf?k=c and extract AI/GenAI event information.
 
-    Extract each event's information including the event link/URL. If you find relative URLs (like /event-name), note them as is - they will be converted to full URLs later.
+    INSTRUCTIONS:
+    1. Load the page
+    2. Extract visible events on the initial view
+    3. Scroll down ONCE to load more events if needed
+    4. Extract any additional events
+    5. STOP after collecting events for the next 8 days OR after 3 scrolls maximum
+    6. Return all collected events
 
-    Format the events in the following format:
+    DO NOT scroll indefinitely. Focus on efficiently extracting available events.
 
-    Event Name: [Name]
-    Date: [Date and Time]
-    Location: [Venue/Address]
-    Description: [Brief description]
-    Link: [Event URL or path]
-
-    Focus on events in the next 8 days. Extract all available event information efficiently.
+    For each event, extract:
+    - Event Name
+    - Date and Time
+    - Location/Venue
+    - Brief Description
+    - Event URL (can be relative path)
 
     """
 
@@ -126,12 +131,13 @@ Focus on events in the next 8 days."""
         # Start browser session
         await browser_session.start()
 
-        # Create the agent
+        # Create the agent with max_actions limit
         agent = Agent(
             task=task,
             llm=llm,
             browser_session=browser_session,
-            system_message=system_prompt
+            system_message=system_prompt,
+            max_actions=20  # Limit actions to prevent infinite loops
         )
 
         # Run the agent
@@ -262,8 +268,9 @@ def clean_event_content(content):
     # Fix relative URLs to use full lu.ma URLs
     fixed_lines = []
     for line in lines:
-        if line.startswith('Link:'):
-            line = fix_relative_urls(line)
+        # Check for any URLs that need fixing (example.com or relative paths)
+        if 'example.com' in line or '[Event Link](/' in line or '**Link:**' in line or 'Link:' in line:
+            line = fix_example_com_urls(line)
         fixed_lines.append(line)
 
     return '\n'.join(fixed_lines)
@@ -275,15 +282,17 @@ def fix_relative_urls(link_line):
 
     # Pattern to match various URL formats in Link: lines
     url_patterns = [
-        r'Link:\s*(/[^\s]+)',  # Relative path like /event-name
-        r'Link:\s*(https://example\.com/[^\s]+)',  # Example.com URLs
-        r'Link:\s*([a-zA-Z0-9-]+)(?:\s|$)',  # Just the event slug
+        r'Link\*?\s*:\s*\[.*?\]\s*\(\s*(https://example\.com/[^\s\)]+)\s*\)',  # Markdown with spaces: [link] ( https://example.com/xyz )
+        r'Link\*?\s*:\s*\[.*?\]\((https://example\.com/[^\)]+)\)',  # Standard markdown: [text](https://example.com/xyz)
+        r'Link\*?\s*:\s*(https://example\.com/[^\s]+)',  # Direct example.com URLs
+        r'Link\*?\s*:\s*(/[^\s]+)',  # Relative path like /event-name
+        r'Link\*?\s*:\s*([a-zA-Z0-9-]+)(?:\s|$)',  # Just the event slug
     ]
 
     for pattern in url_patterns:
         match = re.search(pattern, link_line)
         if match:
-            url_part = match.group(1)
+            url_part = match.group(1).strip()  # Remove any extra whitespace
             # Convert to full lu.ma URL
             if url_part.startswith('/'):
                 # Relative path
@@ -296,13 +305,57 @@ def fix_relative_urls(link_line):
                 # Just a slug
                 full_url = f"https://lu.ma/{url_part}"
             else:
-                # Already a full URL
-                full_url = url_part
+                # Already a full URL, but check if it needs hostname replacement
+                if 'example.com' in url_part:
+                    event_id = url_part.split('/')[-1]
+                    full_url = f"https://lu.ma/{event_id}"
+                else:
+                    full_url = url_part
 
             return f"Link: {full_url}"
 
     # If no pattern matched, return as is
     return link_line
+
+
+def fix_example_com_urls(line):
+    """Replace example.com URLs and relative URLs with lu.ma URLs anywhere in the line"""
+    import re
+
+    # Pattern 1: Markdown links with example.com
+    example_pattern = r'\[([^\]]+)\]\s*\((https://example\.com/[^\)]+)\)'
+
+    def replace_example_url(match):
+        link_text = match.group(1)
+        url = match.group(2)
+        event_id = url.split('/')[-1].strip()
+        return f'[{link_text}](https://lu.ma/{event_id})'
+
+    fixed_line = re.sub(example_pattern, replace_example_url, line)
+
+    # Pattern 2: Markdown links with relative paths (starting with /)
+    relative_pattern = r'\[([^\]]+)\]\s*\((/[^\)]+)\)'
+
+    def replace_relative_url(match):
+        link_text = match.group(1)
+        path = match.group(2)
+        # Remove leading slash if present
+        event_id = path.lstrip('/')
+        return f'[{link_text}](https://lu.ma/{event_id})'
+
+    fixed_line = re.sub(relative_pattern, replace_relative_url, fixed_line)
+
+    # Pattern 3: Plain example.com URLs
+    plain_example = r'https://example\.com/([^\s\)]+)'
+    fixed_line = re.sub(plain_example, r'https://lu.ma/\1', fixed_line)
+
+    # Pattern 4: Plain relative paths in Link: lines
+    if 'Link:' in fixed_line or '**Link:**' in fixed_line:
+        # Match paths like /cgk29a8q
+        plain_relative = r'(\*\*Link:\*\*|\bLink:)\s*(/[^\s]+)'
+        fixed_line = re.sub(plain_relative, r'\1 https://lu.ma\2', fixed_line)
+
+    return fixed_line
 
 
 

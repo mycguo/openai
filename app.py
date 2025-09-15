@@ -10,7 +10,6 @@ from openai import AsyncOpenAI
 # ─── Configuration ────────────────────────────────────────────────
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 MODEL = "gpt-3.5-turbo"
-SERVICE_ACCOUNT_FILE = "./service-account.json"
 DOCUMENT_ID = "1vbvbDxvKj6LTWKiahK79XTHZsrhfeZpLUfqf1Ocl6RE"
 
 SCOPES = [

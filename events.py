@@ -158,28 +158,26 @@ IMPORTANT: Stop scrolling once you have events for 8 days or after 5 scrolls max
         return None
 
 
-def generate_essay():
-    """Generate an essay based on document content and display it"""
+def generate_essay(combined_events_content=None):
+    """Generate an essay based on combined events content and display it"""
     try:
-        # Get content from Google Doc
-        selected = get_full_text(DOCUMENT_ID)
-        prompt = f"Generate an essay on {selected}"
+        if combined_events_content:
+            # Use provided combined events content
+            selected = combined_events_content
+            prompt = f"Generate an engaging essay about the upcoming AI events based on this event information. Write in a way that encourages readers to attend these events and highlights the exciting opportunities in the AI community:\n\n{selected}"
+        else:
+            st.warning("No events data available. Please scrape events first.")
+            return False, None
 
         # Generate essay using OpenAI
-        result = generate_from_openai(prompt)
+        result = generate_from_openai(prompt, temperature=0.7, max_tokens=1500)
 
         # Display essay on the page
         st.subheader("📝 Generated Essay")
-        st.markdown("**Essay based on Google Doc content:**")
+        st.markdown("**Essay based on scraped events:**")
         st.markdown(result)
 
-        # Silently append to Google Doc (hidden from UI)
-        try:
-            append_paragraph(DOCUMENT_ID, f"\n\n--- Generated Essay ---\n{result}")
-            print("✅ Essay generated and saved to Google Doc.")
-        except Exception as e:
-            print(f"⚠️ Failed to save essay to Google Doc: {str(e)}")
-
+        print("✅ Essay generated successfully.")
         return True, result
     except Exception as e:
         st.error(f"Error generating essay: {str(e)}")
@@ -204,13 +202,8 @@ def generate_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI S
             with st.container():
                 st.markdown(formatted_events)
 
-            # Silently append to Google Doc (hidden from UI)
-            try:
-                append_paragraph(DOCUMENT_ID, formatted_events)
-                print(f"✅ Successfully scraped {source_name} events and saved to Google Doc.")
-            except Exception as e:
-                print(f"⚠️ Failed to save to Google Doc: {str(e)}")
-                # Don't show this error to user, just log it
+            # No longer writing to Google Doc
+            print(f"✅ Successfully scraped {source_name} events.")
 
             return True, formatted_events
         else:
@@ -358,6 +351,217 @@ def fix_relative_urls(link_line):
     return link_line
 
 
+def parse_and_format_combined_events(all_events):
+    """Parse and format combined events in chronological order"""
+    import re
+    from collections import defaultdict
+
+    def parse_events_from_content(content, source_name):
+        events = []
+
+        # Split content into individual events using common patterns
+        event_blocks = re.split(r'(?=Event Name:|^\d+\.|\*\*Event Name)', content, flags=re.MULTILINE)
+
+        for block in event_blocks:
+            if not block.strip() or len(block.strip()) < 20:
+                continue
+
+            try:
+                # Extract event name - stop at "Date" keyword
+                name_match = re.search(r'(?:Event Name:|^\d+\.\s*\*?\*?)\s*([^:\n\r]+?)(?:\s+Date|$)', block, re.MULTILINE)
+
+                # Extract date/time - be more specific
+                date_match = re.search(r'Date(?:\s+and\s+Time)?[:\s]*([^\n\r]+?)(?:\s+Location|$)', block, re.IGNORECASE)
+
+                # Extract location - stop at next field
+                location_match = re.search(r'Location(?:/Venue)?[:\s]*([^\n\r]+?)(?:\s+(?:Brief\s+)?Description|$)', block, re.IGNORECASE)
+
+                # Extract description/host - stop at next field
+                desc_patterns = [
+                    r'(?:Brief\s+)?Description[:\s]*([^\n\r]+?)(?:\s+(?:Event\s+)?URL|$)',
+                    r'Host[:\s]*([^\n\r]+?)(?:\s+(?:Event\s+)?URL|$)',
+                    r'By\s+([^\n\r]+?)(?:\s+(?:Event\s+)?URL|$)',
+                ]
+                description = None
+                for pattern in desc_patterns:
+                    desc_match = re.search(pattern, block, re.IGNORECASE)
+                    if desc_match:
+                        description = desc_match.group(1).strip()
+                        # Clean up description - remove extra text
+                        description = re.sub(r'\s*Event\s+URL:.*$', '', description, flags=re.IGNORECASE)
+                        break
+
+                # Extract URL - look for actual URLs or fix relative ones
+                url_patterns = [
+                    r'(?:Event\s+)?URL[:\s]*([^\s\n\r]+)',
+                    r'Link[:\s]*(\[.*?\]\([^\)]+\))',  # Markdown links
+                    r'Sign-up[:\s]*([^\s\n\r]+)',
+                ]
+                url = 'TBD'
+                for pattern in url_patterns:
+                    url_match = re.search(pattern, block, re.IGNORECASE)
+                    if url_match:
+                        url = url_match.group(1).strip()
+                        # Fix relative URLs and markdown links
+                        if url.startswith('[') and '](' in url:
+                            # Extract URL from markdown link
+                            md_url_match = re.search(r'\[.*?\]\(([^\)]+)\)', url)
+                            if md_url_match:
+                                url = md_url_match.group(1)
+
+                        # Fix relative URLs
+                        if url.startswith('/'):
+                            if 'cerebral' in source_name.lower():
+                                url = f"https://cerebralvalley.ai{url}"
+                            else:
+                                url = f"https://lu.ma{url}"
+                        elif url == 'Link':
+                            url = 'TBD'
+                        break
+
+                if name_match and date_match:
+                    event_name = name_match.group(1).strip()
+                    # Clean up event name - remove asterisks and extra whitespace
+                    event_name = re.sub(r'\*+', '', event_name).strip()
+                    # Remove any trailing punctuation or extra text
+                    event_name = re.sub(r'\s+Date.*$', '', event_name, flags=re.IGNORECASE).strip()
+
+                    if len(event_name) > 5:  # Valid event name
+                        # Clean location field
+                        location = location_match.group(1).strip() if location_match else 'TBD'
+                        location = re.sub(r'\s*(?:Brief\s+)?Description.*$', '', location, flags=re.IGNORECASE).strip()
+
+                        event = {
+                            'name': event_name,
+                            'date_time_raw': date_match.group(1).strip(),
+                            'location': location,
+                            'description': description if description else source_name,
+                            'url': url,
+                            'source': source_name
+                        }
+
+                        # Parse date for sorting
+                        parsed_date = parse_date_for_sorting(event['date_time_raw'])
+                        if parsed_date:
+                            event['parsed_date'] = parsed_date
+                            events.append(event)
+
+            except Exception as e:
+                continue
+
+        return events
+
+    def parse_date_for_sorting(date_str):
+        """Parse date string for sorting"""
+        from datetime import datetime, timedelta
+
+        try:
+            current_year = datetime.now().year
+
+            # Handle relative dates
+            if any(word in date_str.lower() for word in ['tomorrow', 'today']):
+                base_date = datetime.now()
+                if 'tomorrow' in date_str.lower():
+                    base_date += timedelta(days=1)
+
+                # Extract time
+                time_match = re.search(r'(\d{1,2}):(\d{2})\s*([AP]M)', date_str, re.IGNORECASE)
+                if time_match:
+                    hour = int(time_match.group(1))
+                    minute = int(time_match.group(2))
+                    ampm = time_match.group(3).upper()
+
+                    if ampm == 'PM' and hour != 12:
+                        hour += 12
+                    elif ampm == 'AM' and hour == 12:
+                        hour = 0
+
+                    return base_date.replace(hour=hour, minute=minute)
+                return base_date
+
+            # Handle month/day formats
+            month_day_match = re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(\d{1,2})', date_str, re.IGNORECASE)
+            if month_day_match:
+                month_names = {
+                    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+                    'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+                }
+                month = month_names[month_day_match.group(1).lower()]
+                day = int(month_day_match.group(2))
+
+                # Determine year
+                year = current_year
+                if month < datetime.now().month or (month == datetime.now().month and day < datetime.now().day):
+                    year += 1
+
+                # Extract time
+                time_match = re.search(r'(\d{1,2}):(\d{2})\s*([AP]M)', date_str, re.IGNORECASE)
+                hour, minute = 12, 0  # Default
+                if time_match:
+                    hour = int(time_match.group(1))
+                    minute = int(time_match.group(2))
+                    ampm = time_match.group(3).upper()
+
+                    if ampm == 'PM' and hour != 12:
+                        hour += 12
+                    elif ampm == 'AM' and hour == 12:
+                        hour = 0
+
+                return datetime(year, month, day, hour, minute)
+
+        except Exception:
+            pass
+
+        return None
+
+    # Parse events from all sources
+    all_parsed_events = []
+
+    for events_content in all_events:
+        # Determine source from content
+        if 'lu.ma' in events_content.lower() or 'luma' in events_content.lower():
+            source = "Lu.ma"
+        elif 'cerebral' in events_content.lower():
+            source = "Cerebral Valley"
+        else:
+            source = "Events"
+
+        parsed_events = parse_events_from_content(events_content, source)
+        all_parsed_events.extend(parsed_events)
+
+    # Sort by date
+    all_parsed_events.sort(key=lambda x: x['parsed_date'])
+
+    # Group by date
+    events_by_date = defaultdict(list)
+    for event in all_parsed_events:
+        date_key = event['parsed_date'].strftime('%B %d, %Y')
+        events_by_date[date_key].append(event)
+
+    # Format output
+    result_lines = []
+
+    for date_str in sorted(events_by_date.keys(), key=lambda x: datetime.strptime(x, '%B %d, %Y')):
+        result_lines.append(f"**{date_str}**")
+        result_lines.append("")
+
+        for i, event in enumerate(events_by_date[date_str], 1):
+            # Extract time from raw date string
+            time_match = re.search(r'(\d{1,2}:\d{2}\s*[AP]M)', event['date_time_raw'], re.IGNORECASE)
+            time_str = time_match.group(1) if time_match else "Time TBD"
+
+            result_lines.append(f"{i}. **{event['name']}**")
+            result_lines.append(f"   Time: {time_str}")
+            result_lines.append(f"   Location: {event['location']}")
+            result_lines.append(f"   Host: {event['description']}")
+            result_lines.append(f"   Sign-up URL: {event['url']}")
+            result_lines.append("")
+
+        result_lines.append("")  # Extra space between dates
+
+    return "\n".join(result_lines)
+
+
 def fix_example_com_urls(line, base_url="https://lu.ma"):
     """Replace example.com URLs and relative URLs with proper base URLs"""
     import re
@@ -491,18 +695,24 @@ def main():
                         st.markdown(all_events[1])
 
                     with tab3:
-                        # Combine all events into one view
-                        combined_content = "\n\n" + "="*60 + "\n" + "="*60 + "\n\n".join(all_events)
-                        st.markdown("**All Events Combined**")
-                        st.markdown(combined_content)
+                        # Parse and sort all events chronologically
+                        formatted_combined = parse_and_format_combined_events(all_events)
+                        st.markdown("**All Events Combined (Chronological Order)**")
 
-                        # Add download button for combined results
-                        st.download_button(
-                            label="📥 Download Combined Events",
-                            data=combined_content,
-                            file_name=f"ai_events_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                            mime="text/plain"
-                        )
+                        # Debug info
+                        if not formatted_combined.strip():
+                            st.warning("No combined events found. Debug info:")
+                            st.write(f"Number of event sources: {len(all_events)}")
+                            for i, events in enumerate(all_events):
+                                st.write(f"Source {i+1} length: {len(events) if events else 0}")
+                                if events:
+                                    st.text_area(f"Source {i+1} raw content (first 500 chars)", events[:500])
+                        else:
+                            st.markdown(formatted_combined)
+
+                        # Store combined events in session state for essay generation
+                        st.session_state.combined_events = formatted_combined
+
                 elif len(all_events) == 1:
                     # If only one source succeeded
                     st.text_area("Events", value=all_events[0], height=300)
@@ -514,16 +724,21 @@ def main():
 
     # Add essay generation section
     st.subheader("📝 Essay Generation")
-    st.write("Generate an essay based on the current Google Doc content")
+    st.write("Generate an essay based on the scraped events")
 
-    button_essay = st.button("Generate Essay from Doc Content", key="essay_button")
-    if button_essay:
-        with st.spinner("Generating essay from Google Doc content https://docs.google.com/document/d/1vbvbDxvKj6LTWKiahK79XTHZsrhfeZpLUfqf1Ocl6RE/edit?tab=t.0 ..."):
-            success, essay = generate_essay()
-            if success:
-                st.success("✅ Essay generated successfully!")
-            else:
-                st.error("❌ Failed to generate essay")
+    # Check if we have combined events data in session state
+    if 'combined_events' in st.session_state:
+        button_essay = st.button("Generate Essay from Scraped Events", key="essay_button")
+        if button_essay:
+            with st.spinner("Generating essay from scraped events..."):
+                success, _ = generate_essay(st.session_state.combined_events)
+                if success:
+                    st.success("✅ Essay generated successfully!")
+                else:
+                    st.error("❌ Failed to generate essay")
+    else:
+        st.info("📋 Please scrape events first using 'Scrape All Sources' to generate an essay.")
+        st.button("Generate Essay from Scraped Events", key="essay_button", disabled=True)
 
 
 

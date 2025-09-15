@@ -72,7 +72,7 @@ def generate_from_openai(prompt: str, temperature: float = 0.0, max_tokens: int 
 
 
 # ─── Main features ─────────────────────────────────────────────────
-async def scrape_events():
+async def scrape_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI SF"):
     """Use browser-use to scrape events from lu.ma/genai-sf"""
     from browser_use import ChatOpenAI
     from browser_use.agent.service import Agent
@@ -106,7 +106,7 @@ Link: [Event URL or path]
 IMPORTANT: Stop scrolling once you have events for 8 days or after 3 scrolls maximum."""
 
     # Task to scrape events
-    task = """Go to https://lu.ma/genai-sf?k=c and extract AI/GenAI event information.
+    task = f"""Go to {url} and extract AI/GenAI event information.
 
     INSTRUCTIONS:
     1. Load the page
@@ -159,29 +159,38 @@ IMPORTANT: Stop scrolling once you have events for 8 days or after 3 scrolls max
         return None
 
 
-def generate_events():
-    """Go to lu.ma page and get the events for the next 8 days"""
+def generate_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI SF"):
+    """Go to specified URL and get the events for the next 8 days"""
     try:
         # Run the async scraping function
-        events_data = asyncio.run(scrape_events())
+        events_data = asyncio.run(scrape_events(url, source_name))
 
         if events_data:
             # Format the events for the Google Doc
-            formatted_events = format_events_for_doc(events_data)
+            formatted_events = format_events_for_doc(events_data, source_name)
+
+            # Display results on the page
+            st.subheader(f"📅 {source_name} Events")
+            st.text_area(
+                "Scraped Events:",
+                value=formatted_events,
+                height=400,
+                help="These events have been added to your Google Doc"
+            )
 
             # Append to Google Doc
             append_paragraph(DOCUMENT_ID, formatted_events)
-            print("✅ Appended events to Google Doc.")
-            return True
+            print(f"✅ Appended {source_name} events to Google Doc.")
+            return True, formatted_events
         else:
-            st.error("Failed to retrieve events")
-            return False
+            st.error(f"Failed to retrieve events from {source_name}")
+            return False, None
     except Exception as e:
         st.error(f"Error in generate_events: {str(e)}")
-        return False
+        return False, None
 
 
-def format_events_for_doc(events_data):
+def format_events_for_doc(events_data, source_name="Events"):
     """Format the scraped events into a readable document format"""
     try:
         # Get current date and next 8 days
@@ -189,7 +198,7 @@ def format_events_for_doc(events_data):
         end_date = today + timedelta(days=8)
 
         # Create header
-        formatted_text = f"GenAI SF Events - {today.strftime('%B %d, %Y')} to {end_date.strftime('%B %d, %Y')}\n\n"
+        formatted_text = f"{source_name} Events - {today.strftime('%B %d, %Y')} to {end_date.strftime('%B %d, %Y')}\n\n"
         formatted_text += "=" * 50 + "\n\n"
 
         # Extract clean event information from agent result
@@ -318,9 +327,13 @@ def fix_relative_urls(link_line):
     return link_line
 
 
-def fix_example_com_urls(line):
-    """Replace example.com URLs and relative URLs with lu.ma URLs anywhere in the line"""
+def fix_example_com_urls(line, base_url="https://lu.ma"):
+    """Replace example.com URLs and relative URLs with proper base URLs"""
     import re
+
+    # Determine base domain from context
+    if 'cerebralvalley' in line.lower():
+        base_url = "https://cerebralvalley.ai"
 
     # Pattern 1: Markdown links with example.com
     example_pattern = r'\[([^\]]+)\]\s*\((https://example\.com/[^\)]+)\)'
@@ -329,7 +342,11 @@ def fix_example_com_urls(line):
         link_text = match.group(1)
         url = match.group(2)
         event_id = url.split('/')[-1].strip()
-        return f'[{link_text}](https://lu.ma/{event_id})'
+        # For lu.ma, use just the ID; for others, might need /events/ prefix
+        if base_url == "https://lu.ma":
+            return f'[{link_text}]({base_url}/{event_id})'
+        else:
+            return f'[{link_text}]({base_url}/events/{event_id})'
 
     fixed_line = re.sub(example_pattern, replace_example_url, line)
 
@@ -339,40 +356,114 @@ def fix_example_com_urls(line):
     def replace_relative_url(match):
         link_text = match.group(1)
         path = match.group(2)
-        # Remove leading slash if present
-        event_id = path.lstrip('/')
-        return f'[{link_text}](https://lu.ma/{event_id})'
+        # For lu.ma, remove leading slash; for others, keep the path structure
+        if base_url == "https://lu.ma":
+            event_id = path.lstrip('/')
+            return f'[{link_text}]({base_url}/{event_id})'
+        else:
+            return f'[{link_text}]({base_url}{path})'
 
     fixed_line = re.sub(relative_pattern, replace_relative_url, fixed_line)
 
     # Pattern 3: Plain example.com URLs
     plain_example = r'https://example\.com/([^\s\)]+)'
-    fixed_line = re.sub(plain_example, r'https://lu.ma/\1', fixed_line)
+    if base_url == "https://lu.ma":
+        fixed_line = re.sub(plain_example, r'https://lu.ma/\1', fixed_line)
+    else:
+        fixed_line = re.sub(plain_example, base_url + r'/events/\1', fixed_line)
 
     # Pattern 4: Plain relative paths in Link: lines
     if 'Link:' in fixed_line or '**Link:**' in fixed_line:
-        # Match paths like /cgk29a8q
         plain_relative = r'(\*\*Link:\*\*|\bLink:)\s*(/[^\s]+)'
-        fixed_line = re.sub(plain_relative, r'\1 https://lu.ma\2', fixed_line)
+        if base_url == "https://lu.ma":
+            fixed_line = re.sub(plain_relative, r'\1 https://lu.ma\2', fixed_line)
+        else:
+            fixed_line = re.sub(plain_relative, r'\1 ' + base_url + r'\2', fixed_line)
 
     return fixed_line
 
 
 
 def main():
-    st.title("OpenAI GoogleDocs Integrations")
-    st.header("let the chatbot coming to you")
+    st.title("AI Events Scraper & Google Docs Integration")
+    st.header("Automatically extract and save AI events to Google Docs")
 
-    st.write("The GoogleDoc Link: https://docs.google.com/document/d/1vbvbDxvKj6LTWKiahK79XTHZsrhfeZpLUfqf1Ocl6RE/edit?tab=t.0 ")
+    st.write("📄 **Google Doc Link:** https://docs.google.com/document/d/1vbvbDxvKj6LTWKiahK79XTHZsrhfeZpLUfqf1Ocl6RE/edit?tab=t.0")
+
+    st.divider()
+
+    st.subheader("🎯 Event Sources")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.write("**Lu.ma GenAI SF Events**")
+        button1 = st.button("Scrape Lu.ma GenAI SF", key="luma_button")
+        if button1:
+            with st.spinner("Scraping Lu.ma events..."):
+                success, events = generate_events("https://lu.ma/genai-sf?k=c", "Lu.ma GenAI SF")
+                if success:
+                    st.success("✅ Lu.ma events scraped and added to Google Doc!")
+                else:
+                    st.error("❌ Failed to scrape Lu.ma events")
+
+    with col2:
+        st.write("**Cerebral Valley Events**")
+        button2 = st.button("Scrape Cerebral Valley", key="cv_button")
+        if button2:
+            with st.spinner("Scraping Cerebral Valley events..."):
+                success, events = generate_events("https://cerebralvalley.ai/events", "Cerebral Valley")
+                if success:
+                    st.success("✅ Cerebral Valley events scraped and added to Google Doc!")
+                else:
+                    st.error("❌ Failed to scrape Cerebral Valley events")
+
+    st.divider()
+
+    # Add a button to scrape both sources
+    st.subheader("🚀 Bulk Actions")
+    button_all = st.button("Scrape All Sources", key="all_button", type="primary")
+    if button_all:
+        with st.spinner("Scraping all event sources..."):
+            success_count = 0
+            all_events = []
+
+            # Scrape Lu.ma
+            st.write("1️⃣ Scraping Lu.ma...")
+            success, events = generate_events("https://lu.ma/genai-sf?k=c", "Lu.ma GenAI SF")
+            if success:
+                success_count += 1
+                all_events.append(events)
+                st.success("✅ Lu.ma done!")
+
+            # Scrape Cerebral Valley
+            st.write("2️⃣ Scraping Cerebral Valley...")
+            success, events = generate_events("https://cerebralvalley.ai/events", "Cerebral Valley")
+            if success:
+                success_count += 1
+                all_events.append(events)
+                st.success("✅ Cerebral Valley done!")
+
+            # Display combined results summary
+            if all_events:
+                st.divider()
+                st.subheader("📊 Combined Results Summary")
+
+                # Create tabs for each source
+                if len(all_events) == 2:
+                    tab1, tab2 = st.tabs(["Lu.ma Events", "Cerebral Valley Events"])
+
+                    with tab1:
+                        st.text_area("Lu.ma Events", value=all_events[0], height=300, key="luma_results")
+
+                    with tab2:
+                        st.text_area("Cerebral Valley Events", value=all_events[1], height=300, key="cv_results")
+
+            st.balloons()
+            st.success(f"🎉 Completed! Successfully scraped {success_count}/2 sources")
 
 
-    button1 = st.button("go to https://lu.ma/genai-sf?k=c and get the events for the next 8 days")
-    if button1:
-        generate_events()
-        st.success("Events generated and appended to the document.")
 
-    
 
-    
 if __name__ == "__main__":
     main()

@@ -456,15 +456,18 @@ def main():
                     tab1, tab2, tab3 = st.tabs(["Lu.ma Events", "Cerebral Valley Events", "📋 Combined Results"])
 
                     with tab1:
-                        st.text_area("Lu.ma Events", value=all_events[0], height=300, key="luma_results")
+                        st.markdown("**Lu.ma Events**")
+                        st.markdown(f"```\n{all_events[0]}\n```")
 
                     with tab2:
-                        st.text_area("Cerebral Valley Events", value=all_events[1], height=300, key="cv_results")
+                        st.markdown("**Cerebral Valley Events**")
+                        st.markdown(f"```\n{all_events[1]}\n```")
 
                     with tab3:
                         # Combine all events into one view
                         combined_content = "\n\n" + "="*60 + "\n" + "="*60 + "\n\n".join(all_events)
-                        st.text_area("All Events Combined", value=combined_content, height=400, key="combined_results")
+                        st.markdown("**All Events Combined**")
+                        st.markdown(f"```\n{combined_content}\n```")
 
                         # Add download button for combined results
                         st.download_button(

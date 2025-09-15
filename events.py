@@ -376,7 +376,7 @@ Cerebral Valley Events:
 
     # Use OpenAI to combine and format the events
     prompt = """Take all the events from both sources and combine them into a single chronologically ordered list.
-Format the output EXACTLY like this:
+Format the output EXACTLY like this (each field on its own line):
 
 **[Date in format: Month DD, YYYY]**
 
@@ -386,12 +386,20 @@ Format the output EXACTLY like this:
    Host: [Host organization or description]
    Sign-up URL: [Show the actual URL directly, not "Link". If no URL available, show "TBD"]
 
-Group all events by date, sort dates chronologically, and number events within each date.
-Make sure to combine events from BOTH sources into single date groups (don't separate by source).
-When you see "Event URL: Link", look for the actual URL that follows or precedes it in the event data.
-If the URL shows as just "Link" with no actual URL, display "TBD" instead.
-Extract the host information from the description field if available.
-Make the Date and Time, Location, Host, and Sign-up URL starting with a new line.
+2. **[Next Event Name]**
+   Time: [Time]
+   Location: [Location]
+   Host: [Host]
+   Sign-up URL: [URL]
+
+IMPORTANT FORMATTING RULES:
+- Each event field (Time, Location, Host, Sign-up URL) MUST be on its own line
+- Add two spaces at the end of each line to create proper line breaks in markdown
+- Leave a blank line between events for readability
+- Group all events by date, sort dates chronologically
+- Combine events from BOTH sources into single date groups (don't separate by source)
+- When you see "Event URL: Link", extract the actual URL
+- If the URL shows as just "Link" with no actual URL, display "TBD" instead
 
 IMPORTANT:
 - Combine ALL events from both sources into a single unified list, not two separate sections.
@@ -520,6 +528,10 @@ def main():
                 all_events.append(events)
                 st.success("✅ Cerebral Valley done!")
 
+            # Store all events in session state for persistence
+            if all_events:
+                st.session_state.all_events = all_events
+
             # Display combined results summary
             if all_events:
                 st.divider()
@@ -562,6 +574,38 @@ def main():
 
             st.balloons()
             st.success(f"🎉 Completed! Successfully scraped {success_count}/2 sources")
+
+    # Display stored events if they exist (persists after page rerun)
+    if 'all_events' in st.session_state and st.session_state.all_events:
+        st.divider()
+        st.subheader("📊 Stored Results")
+
+        # Create tabs for each source plus combined view
+        if len(st.session_state.all_events) == 2:
+            tab1, tab2, tab3 = st.tabs(["Lu.ma Events", "Cerebral Valley Events", "All Events Combined"])
+
+            with tab1:
+                st.markdown("**Lu.ma Events**")
+                st.markdown(st.session_state.all_events[0])
+
+            with tab2:
+                st.markdown("**Cerebral Valley Events**")
+                st.markdown(st.session_state.all_events[1])
+
+            with tab3:
+                # Parse and sort all events chronologically
+                formatted_combined = parse_and_format_combined_events(st.session_state.all_events)
+                st.markdown("**All Events Combined (Chronological Order)**")
+
+                if formatted_combined.strip():
+                    st.markdown(formatted_combined)
+                    # Store combined events for essay generation
+                    st.session_state.combined_events = formatted_combined
+                else:
+                    st.warning("No combined events found.")
+        elif len(st.session_state.all_events) == 1:
+            st.markdown("**Scraped Events**")
+            st.markdown(st.session_state.all_events[0])
 
     st.divider()
 

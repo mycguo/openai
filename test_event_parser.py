@@ -23,7 +23,7 @@ Cerebral Valley Events:
 
     # Use OpenAI to combine and format the events
     prompt = """Take all the events from both sources and combine them into a single chronologically ordered list.
-Format the output EXACTLY like this:
+Format the output EXACTLY like this (each field on its own line):
 
 **[Date in format: Month DD, YYYY]**
 
@@ -33,11 +33,20 @@ Format the output EXACTLY like this:
    Host: [Host organization or description]
    Sign-up URL: [Show the actual URL directly, not "Link". If no URL available, show "TBD"]
 
-Group all events by date, sort dates chronologically, and number events within each date.
-Make sure to combine events from BOTH sources into single date groups (don't separate by source).
-When you see "Event URL: Link", look for the actual URL that follows or precedes it in the event data.
-If the URL shows as just "Link" with no actual URL, display "TBD" instead.
-Extract the host information from the description field if available.
+2. **[Next Event Name]**
+   Time: [Time]
+   Location: [Location]
+   Host: [Host]
+   Sign-up URL: [URL]
+
+IMPORTANT FORMATTING RULES:
+- Each event field (Time, Location, Host, Sign-up URL) MUST be on its own line
+- Add two spaces at the end of each line to create proper line breaks in markdown
+- Leave a blank line between events for readability
+- Group all events by date, sort dates chronologically
+- Combine events from BOTH sources into single date groups (don't separate by source)
+- When you see "Event URL: Link", extract the actual URL
+- If the URL shows as just "Link" with no actual URL, display "TBD" instead
 
 IMPORTANT:
 - Combine ALL events from both sources into a single unified list, not two separate sections.

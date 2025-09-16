@@ -376,7 +376,8 @@ Cerebral Valley Events:
 
     # Use OpenAI to combine and format the events
     prompt = """Take all the events from both sources and combine them into a single chronologically ordered list.
-Format the output EXACTLY like this (each field on its own line):
+
+CRITICAL: Use EXACTLY this format with NEWLINES after each field:
 
 **[Date in format: Month DD, YYYY]**
 
@@ -384,7 +385,7 @@ Format the output EXACTLY like this (each field on its own line):
    Time: [Time or "Time TBD"]
    Location: [Location]
    Host: [Host organization or description]
-   Sign-up URL: [Show the actual URL directly, not "Link". If no URL available, show "TBD"]
+   Sign-up URL: [URL]
 
 2. **[Next Event Name]**
    Time: [Time]
@@ -392,14 +393,26 @@ Format the output EXACTLY like this (each field on its own line):
    Host: [Host]
    Sign-up URL: [URL]
 
-IMPORTANT FORMATTING RULES:
-- Each event field (Time, Location, Host, Sign-up URL) MUST be on its own line
-- Add two spaces at the end of each line to create proper line breaks in markdown
-- Leave a blank line between events for readability
+ABSOLUTELY REQUIRED:
+- Put each field on a NEW LINE (press Enter after each field)
+- Add TWO SPACES at the end of each line before the newline
+- Insert a BLANK LINE between each event
+- Do NOT put all fields on the same line
+
+Example of CORRECT formatting:
+1. **AI Summit 2024**
+   Time: 10:00 AM
+   Location: San Francisco, CA
+   Host: Tech Organization
+   Sign-up URL: https://example.com/event
+
+Example of WRONG formatting (DO NOT DO THIS):
+1. **AI Summit 2024** Time: 10:00 AM Location: San Francisco, CA Host: Tech Organization Sign-up URL: https://example.com/event
+
+Additional rules:
 - Group all events by date, sort dates chronologically
-- Combine events from BOTH sources into single date groups (don't separate by source)
-- When you see "Event URL: Link", extract the actual URL
-- If the URL shows as just "Link" with no actual URL, display "TBD" instead
+- Combine events from BOTH sources into single date groups
+- Extract actual URLs, never show just "Link"
 
 IMPORTANT:
 - Combine ALL events from both sources into a single unified list, not two separate sections.

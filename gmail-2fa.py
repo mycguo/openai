@@ -29,7 +29,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 load_dotenv()
 
-from browser_use import Agent, ChatOpenAI, Tools
+from browser_use import Agent, ChatOpenAI, Tools, BrowserProfile, BrowserSession
 from browser_use.config import CONFIG
 from browser_use.integrations.gmail import GmailService, register_gmail_actions
 
@@ -286,17 +286,23 @@ async def main():
 	# Initialize LLM
 	llm = ChatOpenAI(model='gpt-4.1-mini', api_key=st.secrets["OPENAI_API_KEY"])
 
+	# Create a headless browser profile to avoid opening a window
+	headless_profile = BrowserProfile(headless=True)
+
 	# Step 4: Test Gmail functionality
 	print('🔍 Step 4: Testing Gmail email retrieval...')
 
-	print('\nAgent 1 configuration: directly_open_url=False')
+	print('\nAgent 1 configuration: directly_open_url=False, headless browser')
+	# Create browser session with headless profile
+	browser_session = BrowserSession(browser_profile=headless_profile)
 	agent = Agent(
-		task='Get recent emails from Gmail to test the integration is working properly. Do not browse the web. Use the Gmail tools only (e.g., get_recent_emails).',
+		task='Get recent emails from Gmail to test the integration is working properly. Do not browse the web. Use the Gmail tools only (e.g., get_recent_emails). Print out the content of the first email',
 		llm=llm,
 		tools=tools,
 		# Prevent automatic URL extraction/navigation from the task text
 		directly_open_url=False,
 		include_tool_call_examples=True,
+		browser_session=browser_session,
 	)
 
 	try:
@@ -319,13 +325,16 @@ async def main():
 	# Step 5: Demonstrate 2FA code finding
 	print('🔍 Step 5: Testing 2FA code detection...')
 
-	print('Agent 2 configuration: directly_open_url=False')
+	print('Agent 2 configuration: directly_open_url=False, headless browser')
+	# Create browser session with headless profile
+	browser_session2 = BrowserSession(browser_profile=headless_profile)
 	agent2 = Agent(
 		task='Search for any 2FA verification codes or OTP codes in recent Gmail emails from the last 30 minutes. Do not browse the web. Use the Gmail tools only (e.g., get_recent_emails).',
 		llm=llm,
 		tools=tools,
 		directly_open_url=False,
 		include_tool_call_examples=True,
+		browser_session=browser_session2,
 	)
 
 	history2 = await agent2.run()
@@ -336,7 +345,9 @@ async def main():
 	# Step 6: Simulate complete login flow
 	print('🔍 Step 6: Demonstrating complete 2FA login flow...')
 
-	print('Agent 3 configuration: directly_open_url=False')
+	print('Agent 3 configuration: directly_open_url=False, headless browser')
+	# Create browser session with headless profile
+	browser_session3 = BrowserSession(browser_profile=headless_profile)
 	agent3 = Agent(
 		task="""
 		Demonstrate a complete 2FA-enabled login flow:
@@ -354,6 +365,7 @@ async def main():
 		tools=tools,
 		directly_open_url=False,
 		include_tool_call_examples=True,
+		browser_session=browser_session3,
 	)
 
 	history3 = await agent3.run()

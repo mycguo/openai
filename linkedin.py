@@ -2,28 +2,8 @@ import streamlit as st
 import asyncio
 from browser_use import Agent
 from browser_use import BrowserSession, BrowserProfile
-from langchain_openai import ChatOpenAI
-
-# Compatibility wrapper for browser_use
-class CompatibleChatOpenAI(ChatOpenAI):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Add attributes that browser_use expects
-        object.__setattr__(self, 'provider', 'openai')
-
-    def __setattr__(self, name, value):
-        if name in ['ainvoke', 'provider']:
-            # Allow browser_use to add these methods/attributes
-            object.__setattr__(self, name, value)
-        else:
-            super().__setattr__(name, value)
-
-    def __getattr__(self, name):
-        if name == 'provider':
-            return 'openai'
-        elif name == 'model':
-            return getattr(self, 'model_name', 'gpt-3.5-turbo')
-        return super().__getattribute__(name)
+from browser_use.llm.openai.chat import ChatOpenAI as BrowserUseChatOpenAI
+from langchain_openai import ChatOpenAI as LangChainChatOpenAI
 import re
 from datetime import datetime
 import json
@@ -80,28 +60,39 @@ async def scrape_linkedin_jobs(resume_text: str, num_jobs: int = 100) -> str:
         keep_alive=True
     )
     browser_session = BrowserSession(browser_profile=browser_profile)
-    job_search_url = "https://www.linkedin.com/jobs/search/?keywords=AI%20artificial%20intelligence"
+    job_search_url = "https://www.linkedin.com/jobs/collections/gen-ai/"
 
     task = f"""
-    Collect up to {num_jobs} current LinkedIn job postings related to AI or artificial intelligence.
+    Extract LinkedIn job postings in a specific format. You are already logged in.
 
-    You are already logged in (the user completed authentication manually). Follow these steps:
-    1. Make sure the browser is on {job_search_url} (navigate there if needed).
-    2. Let the page settle, then scroll and paginate if needed until you have seen about {num_jobs} items.
-    3. Capture details for each unique job you see:
-       - Job title
-       - Company name
-       - Location
-       - Posted time
-       - Brief description
-       - Direct job URL
+    1. Navigate to {job_search_url} if not already there
+    2. Scroll down several times to load {num_jobs} job listings
+    3. For each job listing visible on the page, extract the following information and format it EXACTLY like this:
 
-    Work carefully: wait for content to load before extracting and avoid triggering any new logins.
-    Return the collected jobs as clear text entries that include every requested field.
+    JOB_START
+    Title: [Exact job title from the heading]
+    Company: [Company name]
+    Location: [Location text like "San Francisco, CA" or "Remote"]
+    Posted: [Time posted like "2 weeks ago" or "3 days ago"]
+    Description: [The job description]
+    URL: [Full LinkedIn job URL - look for href links to /jobs/view/]
+    JOB_END
+
+    Example format:
+    JOB_START
+    Title: Tech Lead Manager, Safeguards ML Infrastructure
+    Company: Anthropic
+    Location: San Francisco, CA
+    Posted: 2 weeks ago
+    Description: Anthropic's mission is to create reliable, interpretable, and steerable AI systems. We want AI to be safe and beneficial for our users and for society as a whole. Our team is a quickly growing group of committed researchers, engineers, policy experts...
+    URL: https://www.linkedin.com/jobs/view/4255922706
+    JOB_END
+
+    Extract exactly {num_jobs} jobs in this format. Be precise with the formatting.
     """
 
-    llm = CompatibleChatOpenAI(
-        model="gpt-3.5-turbo",
+    agent_llm = BrowserUseChatOpenAI(
+        model="gpt-4.1-mini",
         temperature=0.1,
         api_key=st.secrets["OPENAI_API_KEY"]
     )
@@ -109,7 +100,7 @@ async def scrape_linkedin_jobs(resume_text: str, num_jobs: int = 100) -> str:
     # Agent with basic stability settings
     agent = Agent(
         task=task,
-        llm=llm,
+        llm=agent_llm,
         browser_session=browser_session,
         max_actions=20,
         max_failures=5
@@ -172,51 +163,80 @@ def parse_linkedin_jobs(raw_content) -> List[Dict]:
     if not isinstance(raw_content, str):
         raw_content = str(raw_content)
 
-    job_blocks = re.split(r'(?=(?:^|\n)(?:\d+\.|Job \d+|"))', raw_content)
+    # Look for the new structured format first (JOB_START...JOB_END)
+    job_blocks = re.findall(r'JOB_START(.*?)JOB_END', raw_content, re.DOTALL)
 
-    for block in job_blocks:
-        if len(block.strip()) < 50:
-            continue
+    if job_blocks:
+        # Parse the new structured format
+        for block in job_blocks:
+            job = {}
 
-        job = {}
+            # Extract each field using the structured format
+            title_match = re.search(r'Title:\s*(.+?)(?:\n|$)', block)
+            company_match = re.search(r'Company:\s*(.+?)(?:\n|$)', block)
+            location_match = re.search(r'Location:\s*(.+?)(?:\n|$)', block)
+            posted_match = re.search(r'Posted:\s*(.+?)(?:\n|$)', block)
+            description_match = re.search(r'Description:\s*(.+?)(?:\n(?:URL|$))', block, re.DOTALL)
+            url_match = re.search(r'URL:\s*(https?://[^\s\n]+)', block)
 
-        title_match = re.search(r'(?:Title|Position|Role):\s*(.+?)(?:\n|$)', block, re.IGNORECASE)
-        if not title_match:
-            title_match = re.search(r'^([^:\n]+(?:Engineer|Developer|Scientist|Manager|Analyst|Designer|Lead|Architect|Specialist|Consultant)[^:\n]*)', block, re.IGNORECASE | re.MULTILINE)
+            if title_match:
+                job['title'] = title_match.group(1).strip()
+                job['company'] = company_match.group(1).strip() if company_match else 'Company not specified'
+                job['location'] = location_match.group(1).strip() if location_match else 'Location not specified'
+                job['posted'] = posted_match.group(1).strip() if posted_match else 'Recently posted'
+                job['description'] = description_match.group(1).strip()[:500] if description_match else ''
+                job['link'] = url_match.group(1).strip() if url_match else f"https://www.linkedin.com/jobs/search/?keywords={job.get('title', '').replace(' ', '%20')}"
+                job['raw_content'] = block[:1000]
 
-        company_match = re.search(r'(?:Company|Organization|Employer):\s*(.+?)(?:\n|$)', block, re.IGNORECASE)
-        if not company_match:
-            company_match = re.search(r'(?:at|@)\s+([A-Z][A-Za-z0-9\s&,.\-]+?)(?:\n|$|"|\||Location)', block)
+                jobs.append(job)
 
-        location_match = re.search(r'(?:Location|Where):\s*(.+?)(?:\n|$)', block, re.IGNORECASE)
-        if not location_match:
-            location_match = re.search(r'(?:in|📍)\s+([A-Za-z\s,]+(?:Remote|Hybrid|On-site)?)', block, re.IGNORECASE)
+    # Fallback to old parsing logic if new format not found
+    else:
+        job_blocks = re.split(r'(?=(?:^|\n)(?:\d+\.|Job \d+|"))', raw_content)
 
-        posted_match = re.search(r'(?:Posted|Published|Added):\s*(.+?)(?:\n|$)', block, re.IGNORECASE)
-        if not posted_match:
-            posted_match = re.search(r'(\d+\s*(?:hour|day|week|month)s?\s*ago)', block, re.IGNORECASE)
+        for block in job_blocks:
+            if len(block.strip()) < 50:
+                continue
 
-        description_match = re.search(r'(?:Description|About|Overview|Summary):\s*(.+?)(?:\n\n|$)', block, re.IGNORECASE | re.DOTALL)
-        if not description_match:
-            lines = block.split('\n')
-            desc_lines = [l for l in lines if len(l) > 50 and not re.match(r'^(Title|Company|Location|Posted|Link)', l, re.IGNORECASE)]
-            if desc_lines:
-                description_match = type('obj', (), {'group': lambda x: ' '.join(desc_lines[:3])})()
+            job = {}
 
-        link_match = re.search(r'(?:Link|URL|href):\s*(https?://[^\s\n]+)', block, re.IGNORECASE)
-        if not link_match:
-            link_match = re.search(r'(https?://(?:www\.)?linkedin\.com/jobs/[^\s\n]+)', block)
+            title_match = re.search(r'(?:Title|Position|Role):\s*(.+?)(?:\n|$)', block, re.IGNORECASE)
+            if not title_match:
+                title_match = re.search(r'^([^:\n]+(?:Engineer|Developer|Scientist|Manager|Analyst|Designer|Lead|Architect|Specialist|Consultant)[^:\n]*)', block, re.IGNORECASE | re.MULTILINE)
 
-        if title_match:
-            job['title'] = title_match.group(1).strip()
-            job['company'] = company_match.group(1).strip() if company_match else 'Company not specified'
-            job['location'] = location_match.group(1).strip() if location_match else 'Location not specified'
-            job['posted'] = posted_match.group(1).strip() if posted_match else 'Recently posted'
-            job['description'] = description_match.group(1).strip()[:500] if description_match else ''
-            job['link'] = link_match.group(1).strip() if link_match else f"https://www.linkedin.com/jobs/search/?keywords={job.get('title', '').replace(' ', '%20')}"
-            job['raw_content'] = block[:1000]
+            company_match = re.search(r'(?:Company|Organization|Employer):\s*(.+?)(?:\n|$)', block, re.IGNORECASE)
+            if not company_match:
+                company_match = re.search(r'(?:at|@)\s+([A-Z][A-Za-z0-9\s&,.\-]+?)(?:\n|$|"|\||Location)', block)
 
-            jobs.append(job)
+            location_match = re.search(r'(?:Location|Where):\s*(.+?)(?:\n|$)', block, re.IGNORECASE)
+            if not location_match:
+                location_match = re.search(r'(?:in|📍)\s+([A-Za-z\s,]+(?:Remote|Hybrid|On-site)?)', block, re.IGNORECASE)
+
+            posted_match = re.search(r'(?:Posted|Published|Added):\s*(.+?)(?:\n|$)', block, re.IGNORECASE)
+            if not posted_match:
+                posted_match = re.search(r'(\d+\s*(?:hour|day|week|month)s?\s*ago)', block, re.IGNORECASE)
+
+            description_match = re.search(r'(?:Description|About|Overview|Summary):\s*(.+?)(?:\n\n|$)', block, re.IGNORECASE | re.DOTALL)
+            if not description_match:
+                lines = block.split('\n')
+                desc_lines = [l for l in lines if len(l) > 50 and not re.match(r'^(Title|Company|Location|Posted|Link)', l, re.IGNORECASE)]
+                if desc_lines:
+                    description_match = type('obj', (), {'group': lambda x: ' '.join(desc_lines[:3])})()
+
+            link_match = re.search(r'(?:Link|URL|href):\s*(https?://[^\s\n]+)', block, re.IGNORECASE)
+            if not link_match:
+                link_match = re.search(r'(https?://(?:www\.)?linkedin\.com/jobs/[^\s\n]+)', block)
+
+            if title_match:
+                job['title'] = title_match.group(1).strip()
+                job['company'] = company_match.group(1).strip() if company_match else 'Company not specified'
+                job['location'] = location_match.group(1).strip() if location_match else 'Location not specified'
+                job['posted'] = posted_match.group(1).strip() if posted_match else 'Recently posted'
+                job['description'] = description_match.group(1).strip()[:500] if description_match else ''
+                job['link'] = link_match.group(1).strip() if link_match else f"https://www.linkedin.com/jobs/search/?keywords={job.get('title', '').replace(' ', '%20')}"
+                job['raw_content'] = block[:1000]
+
+                jobs.append(job)
 
     return jobs
 
@@ -226,7 +246,7 @@ def rank_jobs_by_resume(jobs: List[Dict], resume_text: str) -> List[Tuple[Dict, 
     if not jobs:
         return []
 
-    llm = CompatibleChatOpenAI(
+    llm = LangChainChatOpenAI(
         model="gpt-3.5-turbo",
         temperature=0.1,
         api_key=st.secrets["OPENAI_API_KEY"]

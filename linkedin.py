@@ -241,7 +241,7 @@ def parse_linkedin_jobs(raw_content) -> List[Dict]:
     return jobs
 
 def rank_jobs_by_resume(jobs: List[Dict], resume_text: str) -> List[Tuple[Dict, float, str]]:
-    """Rank jobs based on resume match using OpenAI"""
+    """Rank jobs based on resume match using OpenAI one posting at a time."""
 
     if not jobs:
         return []
@@ -252,74 +252,73 @@ def rank_jobs_by_resume(jobs: List[Dict], resume_text: str) -> List[Tuple[Dict, 
         api_key=st.secrets["OPENAI_API_KEY"]
     )
 
-    # Limit to first 50 jobs for ranking to avoid token limits
     jobs_to_rank = jobs[:min(50, len(jobs))]
-    job_descriptions = "\n\n".join([
-        f"Job {i+1}:\nTitle: {job.get('title', 'N/A')}\n"
-        f"Company: {job.get('company', 'N/A')}\n"
-        f"Location: {job.get('location', 'N/A')}\n"
-        f"Description: {job.get('description', 'No description available')[:300]}"
-        for i, job in enumerate(jobs_to_rank)
-    ])
 
-    prompt = f"""
-    Given this resume:
-    {resume_text[:3000]}
+    progress_bar = st.progress(0.0)
+    status_placeholder = st.empty()
 
-    And these job postings:
-    {job_descriptions}
+    ranked_jobs: List[Tuple[Dict, float, str]] = []
 
-    Please rank these jobs from 1 to {len(jobs_to_rank)} based on how well they match the candidate's background.
+    truncated_resume = resume_text[:3000]
 
-    For each job, provide:
-    1. A match score from 0 to 100
-    2. A brief explanation of why it's a good/bad match (2-3 sentences)
+    for idx, job in enumerate(jobs_to_rank, start=1):
+        status_placeholder.info(
+            f"Scoring job {idx}/{len(jobs_to_rank)}: {job.get('title', 'Unknown Title')}"
+        )
 
-    Return your response as a JSON array with this structure:
-    [
-        {{"job_number": 1, "score": 85, "explanation": "Strong match because..."}},
-        ...
-    ]
+        job_summary = (
+            f"Title: {job.get('title', 'N/A')}\n"
+            f"Company: {job.get('company', 'N/A')}\n"
+            f"Location: {job.get('location', 'N/A')}\n"
+            f"Posted: {job.get('posted', 'Recently')}\n"
+            f"Description: {job.get('description', 'No description available')[:600]}"
+        )
 
-    Focus on:
-    - Skills alignment
-    - Experience level match
-    - Industry/domain relevance
-    - Role responsibilities fit
+        prompt = f"""
+        You are an AI assistant expert in candidate-job matching.
 
-    Return ONLY the JSON array, no other text.
-    """
+        Candidate resume:
+        {truncated_resume}
 
-    try:
-        response = llm.invoke(prompt)
-        rankings_text = response.content.strip()
+        Job details:
+        {job_summary}
 
-        rankings_text = re.sub(r'^```json\s*', '', rankings_text)
-        rankings_text = re.sub(r'\s*```$', '', rankings_text)
+        Evaluate how well this candidate matches the job. Respond ONLY with JSON using this schema:
+        {{"score": <integer 0-100>, "explanation": "short reasoning (2 sentences max)"}}
 
-        rankings = json.loads(rankings_text)
+        Focus on alignment between key skills, experience seniority, and industry/domain. Penalize large gaps.
+        """
 
-        ranked_jobs = []
-        for ranking in rankings:
-            job_idx = ranking['job_number'] - 1
-            if 0 <= job_idx < len(jobs_to_rank):
-                ranked_jobs.append((
-                    jobs_to_rank[job_idx],
-                    ranking['score'],
-                    ranking['explanation']
-                ))
+        try:
+            response = llm.invoke(prompt)
+            response_text = getattr(response, 'content', str(response)).strip()
+            response_text = re.sub(r'^```json\s*', '', response_text)
+            response_text = re.sub(r'```$', '', response_text)
 
-        ranked_jobs.sort(key=lambda x: x[1], reverse=True)
+            data = json.loads(response_text)
+            score = float(data.get('score', 0))
+            explanation = str(data.get('explanation', '')).strip()
 
-        remaining_jobs = [job for job in jobs if job not in [rj[0] for rj in ranked_jobs]]
-        for job in remaining_jobs:
-            ranked_jobs.append((job, 50, "Not analyzed in detail"))
+        except Exception as error:
+            st.warning(
+                f"Ranking error for job '{job.get('title', 'Unknown Title')}': {error}"
+            )
+            score = 50.0
+            explanation = "Could not evaluate precisely; default score applied."
 
-        return ranked_jobs
+        ranked_jobs.append((job, max(0.0, min(score, 100.0)), explanation))
 
-    except Exception as e:
-        st.error(f"Error ranking jobs: {str(e)}")
-        return [(job, 50, "Error in ranking") for job in jobs]
+        progress_bar.progress(idx / len(jobs_to_rank))
+
+    status_placeholder.empty()
+
+    ranked_jobs.sort(key=lambda item: item[1], reverse=True)
+
+    remaining_jobs = [job for job in jobs if job not in [rj[0] for rj in ranked_jobs]]
+    for job in remaining_jobs:
+        ranked_jobs.append((job, 50.0, "Not analyzed in detail"))
+
+    return ranked_jobs
 
 def main():
     if 'scraped_jobs' not in st.session_state:
@@ -373,6 +372,26 @@ def main():
     with col2:
         st.header("🔍 LinkedIn AI Jobs")
 
+        with st.expander("Reuse previously scraped jobs", expanded=False):
+            uploaded_jobs_file = st.file_uploader(
+                "Upload saved LinkedIn jobs JSON",
+                type=["json"],
+                accept_multiple_files=False,
+                key="uploaded_jobs_file",
+                help="Load jobs from a previous scraping session (downloaded from this app)."
+            )
+
+            if uploaded_jobs_file is not None:
+                try:
+                    loaded_jobs = json.load(uploaded_jobs_file)
+                    if isinstance(loaded_jobs, list) and all(isinstance(item, dict) for item in loaded_jobs):
+                        st.session_state.scraped_jobs = loaded_jobs
+                        st.success(f"Loaded {len(loaded_jobs)} jobs from uploaded file.")
+                    else:
+                        st.error("Uploaded file must be a JSON array of job objects.")
+                except Exception as load_error:
+                    st.error(f"Could not load jobs file: {load_error}")
+
         # Configuration options
         col2a, col2b = st.columns([1, 1])
         with col2a:
@@ -418,6 +437,14 @@ def main():
 
         if st.session_state.scraped_jobs:
             st.info(f"===== {len(st.session_state.scraped_jobs)} jobs scraped from LinkedIn")
+
+            st.download_button(
+                "💾 Download scraped jobs as JSON",
+                data=json.dumps(st.session_state.scraped_jobs, indent=2),
+                file_name="linkedin_jobs.json",
+                mime="application/json",
+                use_container_width=True
+            )
 
             if st.button("  Rank Jobs by Resume Match"):
                 with st.spinner("Analyzing job matches with your resume..."):

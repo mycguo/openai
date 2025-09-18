@@ -6,3 +6,4 @@ browser-use
 chromium
 playwright
 langchain-openai
+PyPDF2

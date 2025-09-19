@@ -1,5 +1,6 @@
 import streamlit as st
 import asyncio
+import logging
 from browser_use import Agent
 from browser_use import BrowserSession, BrowserProfile
 from browser_use.llm.openai.chat import ChatOpenAI as BrowserUseChatOpenAI
@@ -11,6 +12,60 @@ from typing import List, Dict, Tuple, Optional
 import time
 import PyPDF2
 import io
+
+LOG_STATE_KEY = "linkedin_agent_logs"
+
+
+class StreamlitLogHandler(logging.Handler):
+    """Logging handler that streams log records into a Streamlit container."""
+
+    def __init__(self, state_key: str, container: "st.delta_generator.DeltaGenerator"):
+        super().__init__()
+        self.state_key = state_key
+        self.container = container
+        if self.state_key not in st.session_state:
+            st.session_state[self.state_key] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record)
+        except Exception:
+            msg = record.getMessage()
+
+        log_buffer = st.session_state.setdefault(self.state_key, [])
+        log_buffer.append(msg)
+        # Keep the last 500 log lines to avoid unbounded growth
+        if len(log_buffer) > 500:
+            del log_buffer[:-500]
+
+        # Render the newest buffer contents in the Streamlit container
+        if self.container is not None:
+            self.container.text("\n".join(log_buffer))
+
+
+def setup_streamlit_logging(container: "st.delta_generator.DeltaGenerator") -> logging.Logger:
+    """Configure or refresh the Streamlit log handler and return the logger."""
+
+    logger = logging.getLogger("linkedin_agent")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    handler = None
+    for existing in logger.handlers:
+        if getattr(existing, "name", "") == "streamlit_log_handler":
+            handler = existing
+            break
+
+    if handler is None:
+        handler = StreamlitLogHandler(LOG_STATE_KEY, container)
+        handler.setFormatter(logging.Formatter("%(asctime)s — %(levelname)s — %(message)s"))
+        handler.name = "streamlit_log_handler"
+        logger.addHandler(handler)
+    else:
+        handler.container = container
+
+    return logger
+
 
 st.set_page_config(
     page_title="LinkedIn AI Jobs Matcher",
@@ -24,6 +79,8 @@ st.markdown("Upload your resume and find the best matching AI/GenAI jobs from Li
 async def scrape_linkedin_jobs(resume_text: str, num_jobs: int = 100, job_search_url: str = "https://www.linkedin.com/jobs/collections/gen-ai/") -> str:
     """Scrape LinkedIn AI jobs using browser-use"""
 
+    logger = logging.getLogger("linkedin_agent")
+
     async def wait_for_linkedin_login(browser_session: BrowserSession, timeout: int = 300, poll_interval: float = 3.0) -> str:
         """Poll the active page until LinkedIn login appears complete."""
 
@@ -34,7 +91,7 @@ async def scrape_linkedin_jobs(resume_text: str, num_jobs: int = 100, job_search
             try:
                 current_url = await browser_session.get_current_page_url()
             except Exception as url_error:  # pragma: no cover - defensive logging
-                print(f"Waiting for LinkedIn login: unable to read current URL ({url_error})")
+                logger.warning("Waiting for LinkedIn login: unable to read current URL (%s)", url_error)
                 current_url = ""
 
             normalized_url = current_url.lower() if current_url else ""
@@ -42,11 +99,11 @@ async def scrape_linkedin_jobs(resume_text: str, num_jobs: int = 100, job_search
             if normalized_url and "linkedin.com" in normalized_url and not any(
                 blocked in normalized_url for blocked in ["/login", "checkpoint", "authwall", "uas/login"]
             ):
-                print(f"Detected LinkedIn login completion at {current_url}")
+                logger.info("Detected LinkedIn login completion at %s", current_url)
                 return current_url
 
             if current_url and current_url != last_url:
-                print(f"Still waiting for LinkedIn login... current page: {current_url}")
+                logger.info("Still waiting for LinkedIn login... current page: %s", current_url)
                 last_url = current_url
 
             await asyncio.sleep(poll_interval)
@@ -65,16 +122,23 @@ async def scrape_linkedin_jobs(resume_text: str, num_jobs: int = 100, job_search
     Look at this LinkedIn jobs page and list {num_jobs} job postings you can see.
 
     RULES:
-    - Maximum 5 actions total (scroll, click)
-    - Do NOT use extract_structured_data
+    - Maximum 20 actions total (scroll, click, open share modal, close share modal, go back)
+    - You may use extract_structured_data AT MOST ONCE per job detail pane (set extract_links=True) to retrieve the job posting URL and summary. Do NOT call it on the listings page.
     - Do NOT create files
-    - After 5 actions, STOP and provide your answer
+    - After 20 actions, STOP and provide your answer
+    - Remain on the job listings page. If you open a job detail or company profile, immediately use the browser BACK action to return before continuing.
+    - Avoid navigating to company profile pages unless required to capture a job URL.
+    - Each job entry MUST include the unique job posting URL (e.g., https://www.linkedin.com/jobs/view/123). After opening a job card, either use the job detail pane's "Share" / "Copy link" option (three-dot menu or share icon) OR a single extract_structured_data call to retrieve the canonical URL. Close any share modal before moving on.
+    - Keep track of the jobs you've already collected (by title/company). Do not click the same job card more than once.
+    - If you ever land on any URL other than {job_search_url}, immediately navigate back to {job_search_url} before continuing.
 
     STEPS:
-    1. Look at job titles and companies visible on the page
-    2. Scroll ONCE to see more jobs if needed
-    3. Click on 1-2 jobs to see details if needed
-    4. IMMEDIATELY provide your final answer with job information
+    1. Review the visible job cards and note unique title/company pairs.
+    2. Click a job card once to load its details in the right-side pane.
+    3. Within the job detail pane, either open the Share/Copy link option OR run one extract_structured_data call with extract_links=True to capture the canonical job URL (contains /jobs/view/...). Read the URL that appears and include it in your notes. Close any modal afterwards.
+    4. Record the job title, company, location, posted time, short description, and URL.
+    5. Move to the next unseen job card. Scroll the listings pane as needed to reveal more jobs.
+    6. After collecting the requested number of jobs, provide your final answer immediately using the required format.
 
     FORMAT YOUR FINAL RESPONSE EXACTLY LIKE THIS:
 
@@ -110,54 +174,77 @@ async def scrape_linkedin_jobs(resume_text: str, num_jobs: int = 100, job_search
         task=task,
         llm=agent_llm,
         browser_session=browser_session,
-        max_actions=25,  # Enough for navigation + scrolling + reading
-        max_failures=2   # Fewer retries to prevent extract_structured_data loops
+        max_actions=40,  # Provide extra room for navigation and backtracking
+        max_failures=6   # Allow more retries when recovering from navigation issues
     )
 
     try:
-        print("Starting browser session...")
+        logger.info("Starting browser session...")
         await browser_session.start()
 
-        print("Navigating to LinkedIn login page...")
+        logger.info("Navigating to LinkedIn login page...")
         await browser_session.navigate_to("https://www.linkedin.com/login")
 
-        print("Waiting for manual LinkedIn login...")
+        logger.info("Waiting for manual LinkedIn login...")
         try:
             await wait_for_linkedin_login(browser_session)
         except TimeoutError as timeout_error:
             error_msg = str(timeout_error)
-            print(error_msg)
+            logger.error(error_msg)
             st.error(error_msg)
             return None
 
-        print("Login detected. Navigating to job search page...")
+        logger.info("Login detected. Navigating to job search page...")
         await browser_session.navigate_to(job_search_url)
         await asyncio.sleep(3)
 
         # Run the agent after login is confirmed
-        print("Running agent...")
+        logger.info("Running agent...")
         result = await agent.run()
 
-        print(f"Agent completed. Result type: {type(result)}")
+        logger.info("Agent completed. Result type: %s", type(result))
 
         # Extract content from browser_use result
         content = ""
-        print(f"DEBUG: Result has all_results: {hasattr(result, 'all_results')}")
+        logger.debug("Result has all_results: %s", hasattr(result, 'all_results'))
 
         # Multiple extraction strategies
-        if hasattr(result, 'all_results') and result.all_results:
-            print(f"DEBUG: Found {len(result.all_results)} action results")
+        action_results = []
 
-            for i, action_result in enumerate(result.all_results):
-                print(f"DEBUG: Action result {i} type: {type(action_result)}")
-                print(f"DEBUG: Action result {i} attributes: {[attr for attr in dir(action_result) if not attr.startswith('_')]}")
+        if hasattr(result, 'all_results') and getattr(result, 'all_results'):
+            action_results = list(result.all_results)
+            logger.debug("Found %s action results via all_results attribute", len(action_results))
+        else:
+            maybe_action_results = getattr(result, 'action_results', None)
+            try:
+                if callable(maybe_action_results):
+                    action_results = maybe_action_results() or []
+                    logger.debug(
+                        "Found %s action results via action_results() method",
+                        len(action_results)
+                    )
+            except Exception as action_error:  # pragma: no cover - guard against SDK changes
+                logger.warning("Error retrieving action results: %s", action_error)
+
+        if action_results:
+            for i, action_result in enumerate(action_results):
+                logger.debug("Action result %s type: %s", i, type(action_result))
+                logger.debug(
+                    "Action result %s attributes: %s",
+                    i,
+                    [attr for attr in dir(action_result) if not attr.startswith('_')]
+                )
 
                 # Check for attachments
                 if hasattr(action_result, 'attachments') and action_result.attachments:
-                    print(f"Found {len(action_result.attachments)} attachments in action {i}")
+                    logger.debug("Found %s attachments in action %s", len(action_result.attachments), i)
                     for j, attachment in enumerate(action_result.attachments):
-                        print(f"DEBUG: Attachment {j} type: {type(attachment)}")
-                        print(f"DEBUG: Attachment {j} attributes: {[attr for attr in dir(attachment) if not attr.startswith('_')]}")
+                        logger.debug("Attachment %s type: %s", j, type(attachment))
+                        logger.debug(
+                            "Attachment %s attributes: %s",
+                            j,
+                            [attr for attr in dir(attachment) if not attr.startswith('_')]
+                        )
 
                         # Try different path attributes
                         path = None
@@ -170,19 +257,19 @@ async def scrape_linkedin_jobs(resume_text: str, num_jobs: int = 100, job_search
 
                         if path:
                             try:
-                                print(f"Reading attachment: {path}")
+                                logger.info("Reading attachment: %s", path)
                                 with open(path, 'r', encoding='utf-8') as f:
                                     file_content = f.read()
                                     content += file_content + "\n"
-                                    print(f"Read {len(file_content)} characters from attachment")
+                                    logger.debug("Read %s characters from attachment", len(file_content))
                             except Exception as file_error:
-                                print(f"Error reading attachment {path}: {file_error}")
+                                logger.warning("Error reading attachment %s: %s", path, file_error)
 
                 # Check for extracted_content
                 if hasattr(action_result, 'extracted_content') and action_result.extracted_content:
                     extracted = str(action_result.extracted_content)
                     content += extracted + "\n"
-                    print(f"Added {len(extracted)} characters from extracted_content")
+                    logger.debug("Added %s characters from extracted_content", len(extracted))
 
                 # Check for other content fields
                 for attr in ['content', 'result', 'output', 'text']:
@@ -190,55 +277,86 @@ async def scrape_linkedin_jobs(resume_text: str, num_jobs: int = 100, job_search
                         attr_value = getattr(action_result, attr)
                         if attr_value and isinstance(attr_value, str):
                             content += attr_value + "\n"
-                            print(f"Added {len(attr_value)} characters from {attr}")
+                            logger.debug("Added %s characters from %s", len(attr_value), attr)
 
         # Check result itself for content
-        if hasattr(result, 'extracted_content') and result.extracted_content:
-            content += str(result.extracted_content) + "\n"
-            print(f"Added content from result.extracted_content")
+        attributes_extracted_content = getattr(result, 'extracted_content', None)
+        if attributes_extracted_content and not callable(attributes_extracted_content):
+            if isinstance(attributes_extracted_content, (list, tuple, set)):
+                joined_attr_content = "\n".join(str(chunk) for chunk in attributes_extracted_content if chunk)
+                content += joined_attr_content + "\n"
+                logger.debug(
+                    "Added %s chunks from result.extracted_content attribute",
+                    len(attributes_extracted_content)
+                )
+            else:
+                content += str(attributes_extracted_content) + "\n"
+                logger.debug("Added 1 chunk from result.extracted_content attribute")
+
+        maybe_extracted_content = getattr(result, 'extracted_content', None)
+        if callable(maybe_extracted_content):
+            try:
+                extracted_chunks = maybe_extracted_content() or []
+                if extracted_chunks:
+                    content += "\n".join(str(chunk) for chunk in extracted_chunks)
+                    logger.debug(
+                        "Added %s extracted content chunks via method", len(extracted_chunks)
+                    )
+            except Exception as extracted_error:  # pragma: no cover - defensive
+                logger.warning("Error retrieving extracted content: %s", extracted_error)
 
         # Check if result has a final response or message
         if hasattr(result, 'final_response') and result.final_response:
             content += str(result.final_response) + "\n"
-            print(f"Added content from result.final_response")
+            logger.debug("Added content from result.final_response")
+
+        maybe_final_result = getattr(result, 'final_result', None)
+        if callable(maybe_final_result):
+            try:
+                final_result = maybe_final_result()
+                if final_result and final_result not in content:
+                    content += str(final_result) + "\n"
+                    logger.debug("Added content from result.final_result()")
+            except Exception as final_error:  # pragma: no cover - defensive
+                logger.warning("Error retrieving final result: %s", final_error)
 
         # Also check the last action result for the agent's final response
-        if hasattr(result, 'all_results') and result.all_results:
-            last_result = result.all_results[-1]
+        if action_results:
+            last_result = action_results[-1]
             if hasattr(last_result, 'extracted_content') and last_result.extracted_content:
                 last_content = str(last_result.extracted_content)
                 if 'JOB_START' in last_content and last_content not in content:
                     content += last_content + "\n"
-                    print(f"Added job data from last action result: {len(last_content)} characters")
+                    logger.debug("Added job data from last action result: %s characters", len(last_content))
 
         # Fallback to string conversion if no content found
         if not content:
             content = str(result)
-            print(f"Using fallback string conversion: {len(content)} characters")
+            logger.debug("Using fallback string conversion: %s characters", len(content))
 
         # Extract job data from the full result string if needed
         if not content or 'JOB_START' not in content:
             result_str = str(result)
             if 'JOB_START' in result_str:
                 content = result_str
-                print(f"Found job data in full result string: {len(content)} characters")
+                logger.debug("Found job data in full result string: %s characters", len(content))
 
-        print(f"Final extracted content length: {len(content) if content else 0}")
-        print(f"Content preview: {content[:500] if content else 'None'}")
+        logger.info("Final extracted content length: %s", len(content) if content else 0)
+        logger.debug("Content preview: %s", content[:500] if content else 'None')
 
         return content
 
     except Exception as e:
         error_msg = f"Error during scraping: {str(e)}"
-        print(error_msg)
+        logger.exception("Error during scraping: %s", e)
         st.error(error_msg)
         return None
     finally:
         try:
             await browser_session.kill()
-            print("Browser session closed")
+            logger.info("Browser session closed")
         except Exception as cleanup_error:
-            print(f"Cleanup error: {cleanup_error}")
+            logger.warning("Cleanup error: %s", cleanup_error)
 
 PLACEHOLDER_TOKENS = {
     '[exact job title]',
@@ -250,6 +368,10 @@ PLACEHOLDER_TOKENS = {
 }
 
 MAX_DESCRIPTION_CHARS = 4000
+
+JOB_URL_REGEX = re.compile(
+    r"https://www\.linkedin\.com/(?:jobs|jobs-guest)/view/[^\s\"'>]+"
+)
 
 
 def _value_is_placeholder(value: Optional[str]) -> bool:
@@ -328,7 +450,17 @@ def _parse_job_block(block: str) -> Optional[Dict]:
         return None
 
     if not job.get('link') and job.get('title'):
-        job['link'] = f"https://www.linkedin.com/jobs/search/?keywords={job['title'].replace(' ', '%20')}"
+        url_match = JOB_URL_REGEX.search(block)
+
+        if url_match:
+            job['link'] = url_match.group(0)
+        else:
+            job['link'] = f"https://www.linkedin.com/jobs/search/?keywords={job['title'].replace(' ', '%20')}"
+
+    if job.get('link') and 'jobs/search' in job['link']:
+        fallback_match = JOB_URL_REGEX.search(block)
+        if fallback_match:
+            job['link'] = fallback_match.group(0)
 
     job['raw_content'] = block[:1000]
     return job
@@ -337,50 +469,59 @@ def _parse_job_block(block: str) -> Optional[Dict]:
 def parse_linkedin_jobs(raw_content, max_jobs: int = None) -> List[Dict]:
     """Parse the raw scraped content into structured job data and drop placeholders."""
 
-    print(f"DEBUG: parse_linkedin_jobs called with content length: {len(raw_content) if raw_content else 0}")
-    print(f"DEBUG: max_jobs: {max_jobs}")
+    logger = logging.getLogger("linkedin_agent")
+
+    logger.debug(
+        "parse_linkedin_jobs called with content length: %s",
+        len(raw_content) if raw_content else 0
+    )
+    logger.debug("max_jobs: %s", max_jobs)
 
     if not raw_content:
-        print("DEBUG: No raw content provided")
+        logger.debug("No raw content provided")
         return []
 
     if not isinstance(raw_content, str):
         raw_content = str(raw_content)
 
-    print(f"DEBUG: Raw content preview: {raw_content[:300]}...")
+    logger.debug("Raw content preview: %s...", raw_content[:300])
 
     # Look for JOB_START...JOB_END blocks
     blocks = re.findall(r'JOB_START(.*?)JOB_END', raw_content, flags=re.DOTALL)
-    print(f"DEBUG: Found {len(blocks)} JOB_START...JOB_END blocks")
+    logger.debug("Found %s JOB_START...JOB_END blocks", len(blocks))
 
     if not blocks:
-        print("DEBUG: No JOB_START blocks found, trying fallback parsing")
+        logger.debug("No JOB_START blocks found, trying fallback parsing")
         rough_blocks = re.split(r'\n\s*\n', raw_content)
         blocks = [block for block in rough_blocks if 'Title:' in block and 'Company:' in block]
-        print(f"DEBUG: Fallback found {len(blocks)} blocks with Title: and Company:")
+        logger.debug("Fallback found %s blocks with Title: and Company:", len(blocks))
 
     parsed: List[Dict] = []
     seen_links: set[str] = set()
 
     for i, block in enumerate(blocks):
-        print(f"DEBUG: Processing block {i+1}/{len(blocks)}")
-        print(f"DEBUG: Block preview: {block[:100]}...")
+        logger.debug("Processing block %s/%s", i + 1, len(blocks))
+        logger.debug("Block preview: %s...", block[:100])
 
         # Stop if we've reached the maximum number of jobs
         if max_jobs and len(parsed) >= max_jobs:
-            print(f"DEBUG: Reached max_jobs limit ({max_jobs}), stopping")
+            logger.debug("Reached max_jobs limit (%s), stopping", max_jobs)
             break
 
         job = _parse_job_block(block)
         if not job:
-            print(f"DEBUG: Block {i+1} failed to parse")
+            logger.debug("Block %s failed to parse", i + 1)
             continue
 
-        print(f"DEBUG: Parsed job: {job.get('title', 'No title')} at {job.get('company', 'No company')}")
+        logger.debug(
+            "Parsed job: %s at %s",
+            job.get('title', 'No title'),
+            job.get('company', 'No company')
+        )
 
         link = job.get('link')
         if link and link in seen_links:
-            print(f"DEBUG: Duplicate link found, skipping: {link}")
+            logger.debug("Duplicate link found, skipping: %s", link)
             continue
 
         seen_links.add(link)
@@ -388,10 +529,50 @@ def parse_linkedin_jobs(raw_content, max_jobs: int = None) -> List[Dict]:
 
         # Stop if we've reached the maximum after adding this job
         if max_jobs and len(parsed) >= max_jobs:
-            print(f"DEBUG: Reached max_jobs limit ({max_jobs}) after adding job, stopping")
+            logger.debug(
+                "Reached max_jobs limit (%s) after adding job, stopping",
+                max_jobs
+            )
             break
 
-    print(f"DEBUG: Final parsed jobs count: {len(parsed)}")
+    if parsed:
+        logger.debug("Attempting to backfill canonical job URLs if missing")
+        all_links_in_content = [link for link in JOB_URL_REGEX.findall(raw_content or "")]
+        logger.debug("Found %s candidate job URLs in raw content", len(all_links_in_content))
+
+        allocated_links: set[str] = {
+            job['link']
+            for job in parsed
+            if isinstance(job.get('link'), str) and 'jobs/view' in job['link']
+        }
+
+        for job in parsed:
+            needs_link = not job.get('link') or 'jobs/search' in job['link'] or _value_is_placeholder(job.get('link'))
+            if not needs_link:
+                continue
+
+            replacement = None
+            for candidate in all_links_in_content:
+                if candidate not in allocated_links:
+                    replacement = candidate
+                    break
+
+            if replacement:
+                logger.debug(
+                    "Updated job '%s' with canonical URL %s",
+                    job.get('title', 'Unknown title'),
+                    replacement
+                )
+                job['link'] = replacement
+                allocated_links.add(replacement)
+            else:
+                logger.debug(
+                    "No canonical URL available for job '%s'; keeping fallback %s",
+                    job.get('title', 'Unknown title'),
+                    job.get('link')
+                )
+
+    logger.debug("Final parsed jobs count: %s", len(parsed))
     return parsed
 
 def rank_jobs_by_resume(jobs: List[Dict], resume_text: str) -> List[Tuple[Dict, float, str]]:
@@ -481,6 +662,23 @@ def main():
         st.session_state.ranked_jobs = None
     if 'resume_text' not in st.session_state:
         st.session_state.resume_text = None
+
+    log_expander = st.expander("🤖 Agent Logs", expanded=False)
+    with log_expander:
+        col_log_left, col_log_right = st.columns([3, 1])
+        with col_log_right:
+            if st.button("Clear logs", key="clear_agent_logs", use_container_width=True):
+                st.session_state[LOG_STATE_KEY] = []
+        log_placeholder = col_log_left.empty()
+
+    setup_streamlit_logging(log_placeholder)
+
+    # Ensure the latest logs render on the current run
+    existing_log_lines = st.session_state.get(LOG_STATE_KEY, [])
+    if existing_log_lines:
+        log_placeholder.text("\n".join(existing_log_lines))
+    else:
+        log_placeholder.text("No agent logs yet. Run a scrape to populate this panel.")
 
     col1, col2 = st.columns([1, 2])
 

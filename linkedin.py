@@ -1,6 +1,8 @@
 import streamlit as st
 import asyncio
 import logging
+import os
+from pathlib import Path
 from browser_use import Agent
 from browser_use import BrowserSession, BrowserProfile
 from browser_use.llm.openai.chat import ChatOpenAI as BrowserUseChatOpenAI
@@ -110,11 +112,31 @@ async def scrape_linkedin_jobs(resume_text: str, num_jobs: int = 100, job_search
 
         raise TimeoutError("LinkedIn login was not detected within the allotted time (5 minutes).")
 
+    # Configure browser path/headless mode for local vs. Streamlit deployments
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
+
+    browser_executable_env = os.environ.get("LINKEDIN_BROWSER_EXECUTABLE", "/usr/bin/chromium-browser")
+    executable_path = Path(browser_executable_env)
+    executable_path_str = str(executable_path) if executable_path.exists() else None
+
+    if executable_path_str:
+        logger.info("Using Chromium executable at %s", executable_path_str)
+    else:
+        logger.info(
+            "Chromium executable not found at %s; falling back to default lookup",
+            browser_executable_env
+        )
+
+    default_headless = "true" if os.environ.get("STREAMLIT_RUNTIME") else "false"
+    headless_flag = os.environ.get("LINKEDIN_BROWSER_HEADLESS", default_headless).lower()
+    headless = headless_flag in {"1", "true", "yes", "on"}
+    logger.info("Launching browser with headless=%s", headless)
+
     # Try with explicit browser profile to avoid CDP issues
     browser_profile = BrowserProfile(
-        headless=False,
-        driver_type="chromium",
-        keep_alive=True
+        headless=headless,
+        keep_alive=True,
+        executable_path=executable_path_str
     )
     browser_session = BrowserSession(browser_profile=browser_profile)
 

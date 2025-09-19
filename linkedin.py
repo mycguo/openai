@@ -7,7 +7,7 @@ from langchain_openai import ChatOpenAI as LangChainChatOpenAI
 import re
 from datetime import datetime
 import json
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import time
 import PyPDF2
 import io
@@ -21,7 +21,7 @@ st.set_page_config(
 st.title("💼 LinkedIn AI Jobs Matcher")
 st.markdown("Upload your resume and find the best matching AI/GenAI jobs from LinkedIn")
 
-async def scrape_linkedin_jobs(resume_text: str, num_jobs: int = 100) -> str:
+async def scrape_linkedin_jobs(resume_text: str, num_jobs: int = 100, job_search_url: str = "https://www.linkedin.com/jobs/collections/gen-ai/") -> str:
     """Scrape LinkedIn AI jobs using browser-use"""
 
     async def wait_for_linkedin_login(browser_session: BrowserSession, timeout: int = 300, poll_interval: float = 3.0) -> str:
@@ -60,35 +60,43 @@ async def scrape_linkedin_jobs(resume_text: str, num_jobs: int = 100) -> str:
         keep_alive=True
     )
     browser_session = BrowserSession(browser_profile=browser_profile)
-    job_search_url = "https://www.linkedin.com/jobs/collections/gen-ai/"
 
     task = f"""
-    Extract LinkedIn job postings in a specific format. You are already logged in.
+    Look at this LinkedIn jobs page and list {num_jobs} job postings you can see.
 
-    1. Navigate to {job_search_url} if not already there
-    2. Scroll down several times to load {num_jobs} job listings
-    3. For each job listing visible on the page, extract the following information and format it EXACTLY like this:
+    RULES:
+    - Maximum 5 actions total (scroll, click)
+    - Do NOT use extract_structured_data
+    - Do NOT create files
+    - After 5 actions, STOP and provide your answer
+
+    STEPS:
+    1. Look at job titles and companies visible on the page
+    2. Scroll ONCE to see more jobs if needed
+    3. Click on 1-2 jobs to see details if needed
+    4. IMMEDIATELY provide your final answer with job information
+
+    FORMAT YOUR FINAL RESPONSE EXACTLY LIKE THIS:
 
     JOB_START
-    Title: [Exact job title from the heading]
-    Company: [Company name]
-    Location: [Location text like "San Francisco, CA" or "Remote"]
-    Posted: [Time posted like "2 weeks ago" or "3 days ago"]
-    Description: [The job description]
-    URL: [Full LinkedIn job URL - look for href links to /jobs/view/]
-    JOB_END
-
-    Example format:
-    JOB_START
-    Title: Tech Lead Manager, Safeguards ML Infrastructure
-    Company: Anthropic
+    Title: Senior AI Engineer
+    Company: OpenAI
     Location: San Francisco, CA
-    Posted: 2 weeks ago
-    Description: Anthropic's mission is to create reliable, interpretable, and steerable AI systems. We want AI to be safe and beneficial for our users and for society as a whole. Our team is a quickly growing group of committed researchers, engineers, policy experts...
-    URL: https://www.linkedin.com/jobs/view/4255922706
+    Posted: 3 days ago
+    Description: Build AI systems...
+    URL: https://linkedin.com/jobs/view/123
     JOB_END
 
-    Extract exactly {num_jobs} jobs in this format. Be precise with the formatting.
+    JOB_START
+    Title: Machine Learning Engineer
+    Company: Google
+    Location: Mountain View, CA
+    Posted: 1 week ago
+    Description: Develop ML models...
+    URL: https://linkedin.com/jobs/view/456
+    JOB_END
+
+    List {num_jobs} jobs total. Start collecting job information NOW.
     """
 
     agent_llm = BrowserUseChatOpenAI(
@@ -97,13 +105,13 @@ async def scrape_linkedin_jobs(resume_text: str, num_jobs: int = 100) -> str:
         api_key=st.secrets["OPENAI_API_KEY"]
     )
 
-    # Agent with basic stability settings
+    # Agent with simplified action settings
     agent = Agent(
         task=task,
         llm=agent_llm,
         browser_session=browser_session,
-        max_actions=20,
-        max_failures=5
+        max_actions=25,  # Enough for navigation + scrolling + reading
+        max_failures=2   # Fewer retries to prevent extract_structured_data loops
     )
 
     try:
@@ -132,11 +140,91 @@ async def scrape_linkedin_jobs(resume_text: str, num_jobs: int = 100) -> str:
 
         print(f"Agent completed. Result type: {type(result)}")
 
-        # Simple string extraction - try the most direct approach first
-        content = str(result)
+        # Extract content from browser_use result
+        content = ""
+        print(f"DEBUG: Result has all_results: {hasattr(result, 'all_results')}")
 
-        print(f"Extracted content length: {len(content) if content else 0}")
-        print(f"Content preview: {content[:200] if content else 'None'}")
+        # Multiple extraction strategies
+        if hasattr(result, 'all_results') and result.all_results:
+            print(f"DEBUG: Found {len(result.all_results)} action results")
+
+            for i, action_result in enumerate(result.all_results):
+                print(f"DEBUG: Action result {i} type: {type(action_result)}")
+                print(f"DEBUG: Action result {i} attributes: {[attr for attr in dir(action_result) if not attr.startswith('_')]}")
+
+                # Check for attachments
+                if hasattr(action_result, 'attachments') and action_result.attachments:
+                    print(f"Found {len(action_result.attachments)} attachments in action {i}")
+                    for j, attachment in enumerate(action_result.attachments):
+                        print(f"DEBUG: Attachment {j} type: {type(attachment)}")
+                        print(f"DEBUG: Attachment {j} attributes: {[attr for attr in dir(attachment) if not attr.startswith('_')]}")
+
+                        # Try different path attributes
+                        path = None
+                        if hasattr(attachment, 'path') and attachment.path:
+                            path = attachment.path
+                        elif hasattr(attachment, 'file_path') and attachment.file_path:
+                            path = attachment.file_path
+                        elif hasattr(attachment, 'filepath') and attachment.filepath:
+                            path = attachment.filepath
+
+                        if path:
+                            try:
+                                print(f"Reading attachment: {path}")
+                                with open(path, 'r', encoding='utf-8') as f:
+                                    file_content = f.read()
+                                    content += file_content + "\n"
+                                    print(f"Read {len(file_content)} characters from attachment")
+                            except Exception as file_error:
+                                print(f"Error reading attachment {path}: {file_error}")
+
+                # Check for extracted_content
+                if hasattr(action_result, 'extracted_content') and action_result.extracted_content:
+                    extracted = str(action_result.extracted_content)
+                    content += extracted + "\n"
+                    print(f"Added {len(extracted)} characters from extracted_content")
+
+                # Check for other content fields
+                for attr in ['content', 'result', 'output', 'text']:
+                    if hasattr(action_result, attr):
+                        attr_value = getattr(action_result, attr)
+                        if attr_value and isinstance(attr_value, str):
+                            content += attr_value + "\n"
+                            print(f"Added {len(attr_value)} characters from {attr}")
+
+        # Check result itself for content
+        if hasattr(result, 'extracted_content') and result.extracted_content:
+            content += str(result.extracted_content) + "\n"
+            print(f"Added content from result.extracted_content")
+
+        # Check if result has a final response or message
+        if hasattr(result, 'final_response') and result.final_response:
+            content += str(result.final_response) + "\n"
+            print(f"Added content from result.final_response")
+
+        # Also check the last action result for the agent's final response
+        if hasattr(result, 'all_results') and result.all_results:
+            last_result = result.all_results[-1]
+            if hasattr(last_result, 'extracted_content') and last_result.extracted_content:
+                last_content = str(last_result.extracted_content)
+                if 'JOB_START' in last_content and last_content not in content:
+                    content += last_content + "\n"
+                    print(f"Added job data from last action result: {len(last_content)} characters")
+
+        # Fallback to string conversion if no content found
+        if not content:
+            content = str(result)
+            print(f"Using fallback string conversion: {len(content)} characters")
+
+        # Extract job data from the full result string if needed
+        if not content or 'JOB_START' not in content:
+            result_str = str(result)
+            if 'JOB_START' in result_str:
+                content = result_str
+                print(f"Found job data in full result string: {len(content)} characters")
+
+        print(f"Final extracted content length: {len(content) if content else 0}")
+        print(f"Content preview: {content[:500] if content else 'None'}")
 
         return content
 
@@ -152,93 +240,159 @@ async def scrape_linkedin_jobs(resume_text: str, num_jobs: int = 100) -> str:
         except Exception as cleanup_error:
             print(f"Cleanup error: {cleanup_error}")
 
-def parse_linkedin_jobs(raw_content) -> List[Dict]:
-    """Parse the raw scraped content into structured job data"""
-    jobs = []
+PLACEHOLDER_TOKENS = {
+    '[exact job title]',
+    '[company name]',
+    '[location]',
+    '[posted time]',
+    '[full description text]',
+    '[full linkedin job url]'
+}
+
+MAX_DESCRIPTION_CHARS = 4000
+
+
+def _value_is_placeholder(value: Optional[str]) -> bool:
+    if not value:
+        return True
+
+    lowered = value.lower()
+    if '[' in lowered and any(token in lowered for token in PLACEHOLDER_TOKENS):
+        return True
+
+    return False
+
+
+def _parse_job_block(block: str) -> Optional[Dict]:
+    lines = [line.strip() for line in block.splitlines() if line.strip()]
+    if not lines:
+        return None
+
+    job: Dict[str, str] = {}
+    description_lines: List[str] = []
+    capturing_description = False
+
+    for line in lines:
+        lowered = line.lower()
+
+        if lowered.startswith('job_start') or lowered.startswith('job_end'):
+            continue
+
+        if lowered.startswith('title') and ':' in line:
+            job['title'] = line.split(':', 1)[1].strip()
+            capturing_description = False
+            continue
+
+        if lowered.startswith('company') and ':' in line:
+            job['company'] = line.split(':', 1)[1].strip()
+            capturing_description = False
+            continue
+
+        if lowered.startswith('location') and ':' in line:
+            job['location'] = line.split(':', 1)[1].strip()
+            capturing_description = False
+            continue
+
+        if lowered.startswith('posted') and ':' in line:
+            job['posted'] = line.split(':', 1)[1].strip()
+            capturing_description = False
+            continue
+
+        if lowered.startswith('description') and ':' in line:
+            description_lines = [line.split(':', 1)[1].strip()]
+            capturing_description = True
+            continue
+
+        if lowered.startswith('url') and ':' in line:
+            job['link'] = line.split(':', 1)[1].strip()
+            capturing_description = False
+            continue
+
+        if capturing_description:
+            description_lines.append(line)
+
+    if description_lines:
+        description_text = ' '.join(description_lines).strip()
+        job['description'] = description_text[:MAX_DESCRIPTION_CHARS]
+    else:
+        job.setdefault('description', '')
+
+    job.setdefault('posted', 'Recently posted')
+
+    essential_fields = ['title', 'company', 'location']
+    for field in essential_fields:
+        if _value_is_placeholder(job.get(field)):
+            return None
+
+    if not job.get('title') or not job.get('company'):
+        return None
+
+    if not job.get('link') and job.get('title'):
+        job['link'] = f"https://www.linkedin.com/jobs/search/?keywords={job['title'].replace(' ', '%20')}"
+
+    job['raw_content'] = block[:1000]
+    return job
+
+
+def parse_linkedin_jobs(raw_content, max_jobs: int = None) -> List[Dict]:
+    """Parse the raw scraped content into structured job data and drop placeholders."""
+
+    print(f"DEBUG: parse_linkedin_jobs called with content length: {len(raw_content) if raw_content else 0}")
+    print(f"DEBUG: max_jobs: {max_jobs}")
 
     if not raw_content:
-        return jobs
+        print("DEBUG: No raw content provided")
+        return []
 
-    # Ensure raw_content is a string
     if not isinstance(raw_content, str):
         raw_content = str(raw_content)
 
-    # Look for the new structured format first (JOB_START...JOB_END)
-    job_blocks = re.findall(r'JOB_START(.*?)JOB_END', raw_content, re.DOTALL)
+    print(f"DEBUG: Raw content preview: {raw_content[:300]}...")
 
-    if job_blocks:
-        # Parse the new structured format
-        for block in job_blocks:
-            job = {}
+    # Look for JOB_START...JOB_END blocks
+    blocks = re.findall(r'JOB_START(.*?)JOB_END', raw_content, flags=re.DOTALL)
+    print(f"DEBUG: Found {len(blocks)} JOB_START...JOB_END blocks")
 
-            # Extract each field using the structured format
-            title_match = re.search(r'Title:\s*(.+?)(?:\n|$)', block)
-            company_match = re.search(r'Company:\s*(.+?)(?:\n|$)', block)
-            location_match = re.search(r'Location:\s*(.+?)(?:\n|$)', block)
-            posted_match = re.search(r'Posted:\s*(.+?)(?:\n|$)', block)
-            description_match = re.search(r'Description:\s*(.+?)(?:\n(?:URL|$))', block, re.DOTALL)
-            url_match = re.search(r'URL:\s*(https?://[^\s\n]+)', block)
+    if not blocks:
+        print("DEBUG: No JOB_START blocks found, trying fallback parsing")
+        rough_blocks = re.split(r'\n\s*\n', raw_content)
+        blocks = [block for block in rough_blocks if 'Title:' in block and 'Company:' in block]
+        print(f"DEBUG: Fallback found {len(blocks)} blocks with Title: and Company:")
 
-            if title_match:
-                job['title'] = title_match.group(1).strip()
-                job['company'] = company_match.group(1).strip() if company_match else 'Company not specified'
-                job['location'] = location_match.group(1).strip() if location_match else 'Location not specified'
-                job['posted'] = posted_match.group(1).strip() if posted_match else 'Recently posted'
-                job['description'] = description_match.group(1).strip()[:500] if description_match else ''
-                job['link'] = url_match.group(1).strip() if url_match else f"https://www.linkedin.com/jobs/search/?keywords={job.get('title', '').replace(' ', '%20')}"
-                job['raw_content'] = block[:1000]
+    parsed: List[Dict] = []
+    seen_links: set[str] = set()
 
-                jobs.append(job)
+    for i, block in enumerate(blocks):
+        print(f"DEBUG: Processing block {i+1}/{len(blocks)}")
+        print(f"DEBUG: Block preview: {block[:100]}...")
 
-    # Fallback to old parsing logic if new format not found
-    else:
-        job_blocks = re.split(r'(?=(?:^|\n)(?:\d+\.|Job \d+|"))', raw_content)
+        # Stop if we've reached the maximum number of jobs
+        if max_jobs and len(parsed) >= max_jobs:
+            print(f"DEBUG: Reached max_jobs limit ({max_jobs}), stopping")
+            break
 
-        for block in job_blocks:
-            if len(block.strip()) < 50:
-                continue
+        job = _parse_job_block(block)
+        if not job:
+            print(f"DEBUG: Block {i+1} failed to parse")
+            continue
 
-            job = {}
+        print(f"DEBUG: Parsed job: {job.get('title', 'No title')} at {job.get('company', 'No company')}")
 
-            title_match = re.search(r'(?:Title|Position|Role):\s*(.+?)(?:\n|$)', block, re.IGNORECASE)
-            if not title_match:
-                title_match = re.search(r'^([^:\n]+(?:Engineer|Developer|Scientist|Manager|Analyst|Designer|Lead|Architect|Specialist|Consultant)[^:\n]*)', block, re.IGNORECASE | re.MULTILINE)
+        link = job.get('link')
+        if link and link in seen_links:
+            print(f"DEBUG: Duplicate link found, skipping: {link}")
+            continue
 
-            company_match = re.search(r'(?:Company|Organization|Employer):\s*(.+?)(?:\n|$)', block, re.IGNORECASE)
-            if not company_match:
-                company_match = re.search(r'(?:at|@)\s+([A-Z][A-Za-z0-9\s&,.\-]+?)(?:\n|$|"|\||Location)', block)
+        seen_links.add(link)
+        parsed.append(job)
 
-            location_match = re.search(r'(?:Location|Where):\s*(.+?)(?:\n|$)', block, re.IGNORECASE)
-            if not location_match:
-                location_match = re.search(r'(?:in|📍)\s+([A-Za-z\s,]+(?:Remote|Hybrid|On-site)?)', block, re.IGNORECASE)
+        # Stop if we've reached the maximum after adding this job
+        if max_jobs and len(parsed) >= max_jobs:
+            print(f"DEBUG: Reached max_jobs limit ({max_jobs}) after adding job, stopping")
+            break
 
-            posted_match = re.search(r'(?:Posted|Published|Added):\s*(.+?)(?:\n|$)', block, re.IGNORECASE)
-            if not posted_match:
-                posted_match = re.search(r'(\d+\s*(?:hour|day|week|month)s?\s*ago)', block, re.IGNORECASE)
-
-            description_match = re.search(r'(?:Description|About|Overview|Summary):\s*(.+?)(?:\n\n|$)', block, re.IGNORECASE | re.DOTALL)
-            if not description_match:
-                lines = block.split('\n')
-                desc_lines = [l for l in lines if len(l) > 50 and not re.match(r'^(Title|Company|Location|Posted|Link)', l, re.IGNORECASE)]
-                if desc_lines:
-                    description_match = type('obj', (), {'group': lambda x: ' '.join(desc_lines[:3])})()
-
-            link_match = re.search(r'(?:Link|URL|href):\s*(https?://[^\s\n]+)', block, re.IGNORECASE)
-            if not link_match:
-                link_match = re.search(r'(https?://(?:www\.)?linkedin\.com/jobs/[^\s\n]+)', block)
-
-            if title_match:
-                job['title'] = title_match.group(1).strip()
-                job['company'] = company_match.group(1).strip() if company_match else 'Company not specified'
-                job['location'] = location_match.group(1).strip() if location_match else 'Location not specified'
-                job['posted'] = posted_match.group(1).strip() if posted_match else 'Recently posted'
-                job['description'] = description_match.group(1).strip()[:500] if description_match else ''
-                job['link'] = link_match.group(1).strip() if link_match else f"https://www.linkedin.com/jobs/search/?keywords={job.get('title', '').replace(' ', '%20')}"
-                job['raw_content'] = block[:1000]
-
-                jobs.append(job)
-
-    return jobs
+    print(f"DEBUG: Final parsed jobs count: {len(parsed)}")
+    return parsed
 
 def rank_jobs_by_resume(jobs: List[Dict], resume_text: str) -> List[Tuple[Dict, float, str]]:
     """Rank jobs based on resume match using OpenAI one posting at a time."""
@@ -393,19 +547,56 @@ def main():
                     st.error(f"Could not load jobs file: {load_error}")
 
         # Configuration options
+        st.subheader("⚙️ Scraping Configuration")
+
         col2a, col2b = st.columns([1, 1])
         with col2a:
             num_jobs = st.number_input(
                 "Number of jobs to scrape",
                 min_value=10,
                 max_value=500,
-                value=100,
+                value=10,
                 step=10,
                 help="Choose how many jobs to scrape (10-500)"
             )
         with col2b:
-            st.write("")  # Empty space for alignment
             st.caption(f"📊 Will scrape up to {num_jobs} jobs")
+
+        # URL configuration
+        st.markdown("**LinkedIn Search URL:**")
+        url_option = st.selectbox(
+            "Choose job search type:",
+            options=[
+                "AI/GenAI Jobs",
+                "Software Engineering Jobs",
+                "Data Science Jobs",
+                "Product Management Jobs",
+                "Custom URL"
+            ],
+            index=0,
+            help="Select the type of jobs to search for"
+        )
+
+        # Map selections to URLs
+        url_mapping = {
+            "AI/GenAI Jobs": "https://www.linkedin.com/jobs/collections/gen-ai/",
+            "Software Engineering Jobs": "https://www.linkedin.com/jobs/search/?keywords=software%20engineer",
+            "Data Science Jobs": "https://www.linkedin.com/jobs/search/?keywords=data%20scientist",
+            "Product Management Jobs": "https://www.linkedin.com/jobs/search/?keywords=product%20manager",
+            "Custom URL": ""
+        }
+
+        if url_option == "Custom URL":
+            job_search_url = st.text_input(
+                "Enter custom LinkedIn jobs URL:",
+                value="https://www.linkedin.com/jobs/search/?keywords=",
+                help="Enter any LinkedIn jobs search URL"
+            )
+        else:
+            job_search_url = url_mapping[url_option]
+            st.code(job_search_url, language="text")
+
+        st.markdown("---")
 
         if st.button("🔍 Scrape LinkedIn AI Jobs", type="primary", disabled=not resume_text):
             st.info("📝 **Instructions for LinkedIn Login:**")
@@ -418,10 +609,10 @@ def main():
             with st.spinner("Opening browser for LinkedIn login... Please log in manually when the browser opens."):
                 start_time = time.time()
 
-                raw_content = asyncio.run(scrape_linkedin_jobs(resume_text, num_jobs))
+                raw_content = asyncio.run(scrape_linkedin_jobs(resume_text, num_jobs, job_search_url))
 
                 if raw_content:
-                    st.session_state.scraped_jobs = parse_linkedin_jobs(raw_content)
+                    st.session_state.scraped_jobs = parse_linkedin_jobs(raw_content, num_jobs)
 
                     elapsed = time.time() - start_time
                     st.success(f" Found {len(st.session_state.scraped_jobs)} jobs in {elapsed:.1f} seconds")

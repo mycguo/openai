@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
+import shutil
 from browser_use import Agent
 from browser_use import BrowserSession, BrowserProfile
 from browser_use.llm.openai.chat import ChatOpenAI as BrowserUseChatOpenAI
@@ -113,19 +114,38 @@ async def scrape_linkedin_jobs(resume_text: str, num_jobs: int = 100, job_search
         raise TimeoutError("LinkedIn login was not detected within the allotted time (5 minutes).")
 
     # Configure browser path/headless mode for local vs. Streamlit deployments
-    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
+    browser_executable_env = os.environ.get("LINKEDIN_BROWSER_EXECUTABLE")
 
-    browser_executable_env = os.environ.get("LINKEDIN_BROWSER_EXECUTABLE", "/usr/bin/chromium-browser")
-    executable_path = Path(browser_executable_env)
-    executable_path_str = str(executable_path) if executable_path.exists() else None
+    candidate_paths: List[str] = []
+    if browser_executable_env:
+        candidate_paths.append(browser_executable_env)
+
+    # Common Chromium/Chrome names that might be installed via packages.txt or Playwright cache
+    for name in [
+        "chromium-browser",
+        "chromium",
+        "google-chrome-stable",
+        "google-chrome",
+        "chrome"
+    ]:
+        detected = shutil.which(name)
+        if detected:
+            candidate_paths.append(detected)
+
+    # Playwright cache location (default install path) if it exists
+    default_playwright_cache = Path.home() / ".cache/ms-playwright"
+    if default_playwright_cache.exists():
+        candidate_paths.extend(
+            str(path)
+            for path in sorted(default_playwright_cache.glob("chromium-*/chrome-linux/chrome"))
+        )
+
+    executable_path_str = next((path for path in candidate_paths if path and Path(path).exists()), None)
 
     if executable_path_str:
         logger.info("Using Chromium executable at %s", executable_path_str)
     else:
-        logger.info(
-            "Chromium executable not found at %s; falling back to default lookup",
-            browser_executable_env
-        )
+        logger.info("No explicit Chromium executable found; relying on browser_use defaults")
 
     default_headless = "true" if os.environ.get("STREAMLIT_RUNTIME") else "false"
     headless_flag = os.environ.get("LINKEDIN_BROWSER_HEADLESS", default_headless).lower()

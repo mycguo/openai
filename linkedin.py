@@ -794,10 +794,10 @@ def main():
             num_jobs = st.number_input(
                 "Number of jobs to scrape",
                 min_value=10,
-                max_value=500,
+                max_value=20,
                 value=10,
-                step=10,
-                help="Choose how many jobs to scrape (10-500)"
+                step=2,
+                help="Choose how many jobs to scrape (10-20)"
             )
         with col2b:
             st.caption(f"📊 Will scrape up to {num_jobs} jobs")

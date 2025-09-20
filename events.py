@@ -1,4 +1,5 @@
 import os
+import re
 from openai import OpenAI
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
@@ -166,13 +167,71 @@ IMPORTANT:
         return None
 
 
+def _extract_event_links(events_block: str):
+    """Return (event_name, url) tuples from the combined events block."""
+    if not events_block:
+        return []
+
+    pattern = re.compile(r"\*\*(?P<name>[^*]+)\*\*.*?Sign-up URL:\s*(?P<url>https?://\S+)", re.DOTALL)
+    matches = []
+    for match in pattern.finditer(events_block):
+        name = match.group("name").strip()
+        url = match.group("url").strip().rstrip('.,)')
+        if name and url:
+            matches.append((name, url))
+
+    # Fallback: look for less-structured "Sign-up URL" lines and capture the preceding line as the name
+    if not matches:
+        lines = events_block.splitlines()
+        for idx, line in enumerate(lines):
+            if "Sign-up URL:" in line:
+                url_match = re.search(r"(https?://\S+)", line)
+                if not url_match:
+                    continue
+                url = url_match.group(1).rstrip('.,)')
+                if url.startswith("http") and idx > 0:
+                    name_line = lines[idx - 1].strip()
+                    # Remove numbering like "1." and markdown bullets
+                    name = re.sub(r"^[\s\d\.-]*", "", name_line)
+                    name = name.replace("**", "").strip()
+                    if name and url:
+                        matches.append((name, url))
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_matches = []
+    for name, url in matches:
+        key = (name, url)
+        if key not in seen:
+            seen.add(key)
+            unique_matches.append((name, url))
+
+    return unique_matches
+
+
 def generate_essay(combined_events_content=None):
     """Generate an essay based on combined events content and display it"""
     try:
         if combined_events_content:
             # Use provided combined events content
             selected = combined_events_content
-            prompt = f"Generate an engaging essay about the upcoming AI events based on this event information. Write in a way that encourages readers to attend these events and highlights the exciting opportunities in the AI community:\n\n{selected}"
+            event_links = _extract_event_links(selected)
+            links_guidance = ""
+            if event_links:
+                formatted_links = "\n".join(f"- {name}: {url}" for name, url in event_links)
+                links_guidance = (
+                    "Here is the list of events with their required URLs. Use these exact names and URLs and do not invent new ones.\n"
+                    f"{formatted_links}\n\n"
+                )
+
+            prompt = (
+                "Generate an engaging essay about the upcoming AI events using the provided information. "
+                "Write in a way that encourages readers to attend these events and highlights the exciting opportunities in the AI community. "
+                "Every time you mention an event by name, immediately include its sign-up URL in parentheses right after the event name, e.g., 'AI Summit (https://example.com)'. "
+                "Do not reference an event without its URL, and only use URLs supplied below or in the source content.\n\n"
+                f"{links_guidance}"
+                f"Event source material:\n{selected}"
+            )
         else:
             st.warning("No events data available. Please scrape events first.")
             return False, None
@@ -619,6 +678,44 @@ def main():
         elif len(st.session_state.all_events) == 1:
             st.markdown("**Scraped Events**")
             st.markdown(st.session_state.all_events[0])
+
+    st.divider()
+
+    st.subheader("💽 Save Current Events")
+    combined_events_raw = st.session_state.get('combined_events', '') if 'combined_events' in st.session_state else ''
+    if combined_events_raw.strip():
+        st.download_button(
+            "Download Combined Events",
+            data=combined_events_raw,
+            file_name="combined_events.txt",
+            mime="text/plain",
+            help="Save the latest combined events to reuse later without scraping."
+        )
+    else:
+        st.info("No combined events available to save yet. Scrape or load events first.")
+
+    st.divider()
+
+    st.subheader("💾 Load Saved Events")
+    st.write("Upload previously saved events to skip scraping.")
+    uploaded_events_file = st.file_uploader(
+        "Load saved events file",
+        type=["txt", "json"],
+        key="upload_saved_events",
+        help="Upload a file previously saved from this app to reuse event data."
+    )
+    if uploaded_events_file is not None:
+        try:
+            uploaded_content = uploaded_events_file.getvalue().decode("utf-8")
+            if uploaded_content.strip():
+                st.session_state.combined_events = uploaded_content
+                st.session_state.loaded_events_source = "Uploaded file"
+                st.success("Saved events loaded successfully. You can generate an essay without scraping.")
+                st.text_area("Loaded Events", uploaded_content, height=250)
+            else:
+                st.warning("Uploaded file is empty.")
+        except Exception as exc:
+            st.error(f"Unable to read uploaded file: {exc}")
 
     st.divider()
 

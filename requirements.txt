@@ -13,3 +13,4 @@ nltk
 numpy
 oauthlib
 python-docx
+pypdf

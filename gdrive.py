@@ -37,6 +37,10 @@ try:
     from docx import Document as DocxDocument
 except ImportError:  # pragma: no cover - optional dependency
     DocxDocument = None
+try:
+    from pypdf import PdfReader
+except ImportError:  # pragma: no cover - optional dependency
+    PdfReader = None
 
 
 logger = logging.getLogger(__name__)
@@ -154,7 +158,8 @@ class RagGoogleDoc:
             f"'{folder_id}' in parents "
             "and trashed = false "
             "and (mimeType='application/vnd.google-apps.document' "
-            "or mimeType='application/vnd.openxmlformats-officedocument.wordprocessingml.document')"
+            "or mimeType='application/vnd.openxmlformats-officedocument.wordprocessingml.document' "
+            "or mimeType='application/pdf')"
         )
         if drive_id is None:
             folder_meta = self._resolve_drive_context(folder_id)
@@ -196,6 +201,8 @@ class RagGoogleDoc:
                     text = self.get_google_docs_text(doc_id)
                 elif mime_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
                     text = self.get_docx_text(doc_id, doc_name)
+                elif mime_type == 'application/pdf':
+                    text = self.get_pdf_text(doc_id, doc_name)
                 else:
                     logger.warning("Skipping unsupported mime type %s for %s", mime_type, doc_name)
                     continue
@@ -242,6 +249,8 @@ class RagGoogleDoc:
                         text = self.get_google_docs_text(doc_id)
                     elif mime_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
                         text = self.get_docx_text(doc_id, doc_name)
+                    elif mime_type == 'application/pdf':
+                        text = self.get_pdf_text(doc_id, doc_name)
                     else:
                         logger.warning("Skipping unsupported mime type %s for %s", mime_type, doc_name)
                         continue
@@ -295,6 +304,39 @@ class RagGoogleDoc:
         text = "\n".join(paragraph.text for paragraph in doc.paragraphs if paragraph.text)
         logger.info("Extracted %d chars from DOCX %s", len(text), file_name)
         return text
+
+    def get_pdf_text(self, file_id: str, file_name: str) -> str:
+        if PdfReader is None:
+            raise RuntimeError(
+                "pypdf is required to process PDF files. Please install pypdf."
+            )
+
+        logger.info("Downloading PDF file %s", file_name)
+        request = self.drive_service.files().get_media(fileId=file_id, supportsAllDrives=True)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+            if status:
+                logger.debug("Download progress %s%% for %s", int(status.progress() * 100), file_name)
+
+        fh.seek(0)
+        reader = PdfReader(fh)
+        text_parts = []
+        for page_num, page in enumerate(reader.pages):
+            try:
+                page_text = page.extract_text() or ""
+            except Exception as exc:  # pragma: no cover - fallback for malformed PDFs
+                logger.warning("Failed to extract text from page %d of %s: %s", page_num, file_name, exc)
+                page_text = ""
+            if page_text:
+                text_parts.append(page_text)
+
+        combined_text = "\n".join(text_parts)
+        logger.info("Extracted %d chars from PDF %s", len(combined_text), file_name)
+        return combined_text
 
     def save_documents(self, documents):
         if not os.path.exists(self.local_dir_docs):

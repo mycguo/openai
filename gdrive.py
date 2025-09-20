@@ -5,7 +5,7 @@ import io
 import json
 import logging
 import os
-from typing import Optional
+from typing import Optional, List
 
 import streamlit as st
 
@@ -22,14 +22,6 @@ except ImportError:  # pragma: no cover - newer versions expose nodes under data
         from llama_index.core.data_structs import Node
     except ImportError:  # pragma: no cover - fallback for engine indices
         from llama_index.core.schema import Node
-# SimpleVectorStore moved in newer llama_index releases; import with fallbacks for compatibility
-try:  # pragma: no cover - import shim
-    from llama_index.core import SimpleVectorStore  # type: ignore
-except ImportError:  # pragma: no cover - new package layout
-    try:
-        from llama_index.core.vector_stores import SimpleVectorStore  # type: ignore
-    except ImportError:  # pragma: no cover - legacy simple module path
-        from llama_index.core.vector_stores.simple import SimpleVectorStore  # type: ignore
 from llama_index.core.storage.storage_context import StorageContext
 from googleapiclient.http import MediaIoBaseDownload
 
@@ -44,6 +36,12 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 logger = logging.getLogger(__name__)
+
+
+DEFAULT_FOLDER_IDS: List[str] = [
+    '1aVf1BtyWByR9zeEC-EiK9k4wQfmZzbZW',
+]
+DEFAULT_QUESTION = "What are the advancements in reinforcement learning?"
 
 
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
@@ -85,7 +83,7 @@ def custom_chunk_splitter(documents):
 
 
 class RagGoogleDoc:
-    def __init__(self, folder_ids, local_dir_docs='Data/Docs', save_index_address=None):
+    def __init__(self, folder_ids, local_dir_docs='Data/Docs', save_index_address=None, progress_callback=None):
         creds = service_account.Credentials.from_service_account_info(
             st.secrets["gcp_service_account"], scopes=SCOPES
         )
@@ -97,9 +95,49 @@ class RagGoogleDoc:
         self.folder_ids = [folder_ids] if isinstance(folder_ids, str) else folder_ids
         self.local_dir_docs = local_dir_docs
         self.save_index_address = save_index_address
+        self.progress_callback = progress_callback
+        self.summary_data = {
+            'folders': {}
+        }
 
         self.drive_service = build('drive', 'v3', credentials=creds)
         self.docs_service = build('docs', 'v1', credentials=creds)
+
+    def _report(self, message: str):
+        logger.info(message)
+        if self.progress_callback:
+            try:
+                self.progress_callback(message)
+            except Exception:
+                logger.exception("Progress callback failed for message: %s", message)
+
+    def _register_folder(self, folder_id: str, folder_name: str, parent: Optional[str] = None):
+        entry = self.summary_data['folders'].setdefault(
+            folder_id,
+            {'name': folder_name, 'parent': parent, 'files': []}
+        )
+        entry['name'] = folder_name
+        entry['parent'] = parent
+        return entry
+
+    def _record_file(
+        self,
+        folder_id: str,
+        folder_name: str,
+        file_name: str,
+        mime_type: str,
+        char_count: int,
+        parent: Optional[str] = None,
+    ):
+        folder_entry = self._register_folder(folder_id, folder_name, parent)
+        folder_entry['files'].append({
+            'name': file_name,
+            'mime': mime_type,
+            'chars': char_count,
+        })
+        self._report(
+            "Fetched doc '%s' (%d chars) from folder '%s'" % (file_name, char_count, folder_name)
+        )
 
     def _resolve_drive_context(self, folder_id: str):
         """Fetch metadata for a folder to determine drive context."""
@@ -109,10 +147,11 @@ class RagGoogleDoc:
                 fields='id, name, driveId',
                 supportsAllDrives=True,
             ).execute()
-            logger.info(
-                "Resolved folder '%s' (driveId=%s)",
-                meta.get('name', folder_id),
-                meta.get('driveId') or 'user-drive',
+            self._report(
+                "Resolved folder '%s' (driveId=%s)" % (
+                    meta.get('name', folder_id),
+                    meta.get('driveId') or 'user-drive',
+                )
             )
             return meta
         except Exception as exc:
@@ -144,7 +183,7 @@ class RagGoogleDoc:
 
             batch = response.get('files', [])
             items.extend(batch)
-            logger.info("Retrieved %d %s (running total=%d)", len(batch), item_desc, len(items))
+            self._report("Retrieved %d %s (running total=%d)" % (len(batch), item_desc, len(items)))
 
             page_token = response.get('nextPageToken')
             if not page_token:
@@ -167,20 +206,20 @@ class RagGoogleDoc:
             folder_name = folder_meta.get('name', folder_name)
         files = self._list_drive_items(files_query, f"docs in {folder_name}", drive_id=drive_id)
         if not files:
-            logger.info("No docs found in folder '%s'", folder_name)
+            self._report("No docs found in folder '%s'" % folder_name)
         return files
 
     def get_document_and_texts(self):
-        """
-        Fetch Google Docs files only from the first level of subdirectories under the given folder_id.
-        """
+        """Fetch Google Docs, DOCX, and PDF files under the configured folders."""
         documents = []
 
         for folder_id in self.folder_ids:
             folder_meta = self._resolve_drive_context(folder_id)
             drive_id = folder_meta.get('driveId')
             folder_name = folder_meta.get('name', folder_id)
-            logger.info("Fetching subfolders for folder '%s'", folder_name)
+            self._register_folder(folder_id, folder_name, parent=None)
+            self._report("Fetching subfolders for folder '%s'" % folder_name)
+
             # Fetch first-level subdirectories
             subfolders_query = (
                 f"'{folder_id}' in parents "
@@ -189,13 +228,14 @@ class RagGoogleDoc:
                 "or mimeType='application/vnd.google-apps.shortcut')"
             )
             subfolders = self._list_drive_items(subfolders_query, "subfolders", drive_id=drive_id)
-            logger.info("Found %d subfolders", len(subfolders))
+            self._report("Found %d subfolders" % len(subfolders))
 
+            # Fetch direct files within the folder
             direct_files = self._fetch_docs_for_folder(folder_id, folder_name, drive_id=drive_id)
             for file in direct_files:
                 doc_id = file['id']
                 doc_name = file['name']
-                print(f"Fetching document: {doc_name}")
+                self._report("Fetching top-level document: %s" % doc_name)
                 mime_type = file.get('mimeType', '')
                 if mime_type == 'application/vnd.google-apps.document':
                     text = self.get_google_docs_text(doc_id)
@@ -207,10 +247,17 @@ class RagGoogleDoc:
                     logger.warning("Skipping unsupported mime type %s for %s", mime_type, doc_name)
                     continue
                 documents.append({"name": doc_name, "content": text})
-                logger.info("Fetched doc '%s' (%d chars) from top-level folder", doc_name, len(text))
+                self._record_file(
+                    folder_id,
+                    folder_name,
+                    doc_name,
+                    mime_type,
+                    len(text),
+                    parent=None,
+                )
 
             if not subfolders:
-                logger.info("No subfolders to process under '%s'", folder_name)
+                self._report("No subfolders to process under '%s'" % folder_name)
                 continue
 
             # For each subdirectory, fetch its Google Docs files
@@ -218,15 +265,14 @@ class RagGoogleDoc:
                 subfolder_id = subfolder['id']
                 subfolder_name = subfolder['name']
                 mime_type = subfolder.get('mimeType')
+                parent_name = folder_name
                 if mime_type == 'application/vnd.google-apps.shortcut':
                     shortcut_details = subfolder.get('shortcutDetails', {})
                     target_id = shortcut_details.get('targetId')
                     target_mime = shortcut_details.get('targetMimeType')
                     if target_mime == 'application/vnd.google-apps.folder' and target_id:
-                        logger.info(
-                            "Resolving folder shortcut '%s' -> %s",
-                            subfolder_name,
-                            target_id,
+                        self._report(
+                            "Resolving folder shortcut '%s' -> %s" % (subfolder_name, target_id)
                         )
                         subfolder_id = target_id
                     else:
@@ -237,14 +283,16 @@ class RagGoogleDoc:
                             target_mime,
                         )
                         continue
-                print(f"Processing subfolder: {subfolder_name}")
+
+                self._register_folder(subfolder_id, subfolder_name, parent=parent_name)
+                self._report("Processing subfolder: %s" % subfolder_name)
                 files = self._fetch_docs_for_folder(subfolder_id, subfolder_name, drive_id=drive_id)
 
                 for file in files:
                     doc_id = file['id']
                     doc_name = file['name']
                     mime_type = file.get('mimeType', '')
-                    print(f"Fetching document: {doc_name}")
+                    self._report("Fetching document: %s" % doc_name)
                     if mime_type == 'application/vnd.google-apps.document':
                         text = self.get_google_docs_text(doc_id)
                     elif mime_type == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document':
@@ -255,7 +303,14 @@ class RagGoogleDoc:
                         logger.warning("Skipping unsupported mime type %s for %s", mime_type, doc_name)
                         continue
                     documents.append({"name": doc_name, "content": text})
-                    logger.info("Fetched doc '%s' (%d chars)", doc_name, len(text))
+                    self._record_file(
+                        subfolder_id,
+                        subfolder_name,
+                        doc_name,
+                        mime_type,
+                        len(text),
+                        parent=parent_name,
+                    )
 
         return documents
 
@@ -372,18 +427,31 @@ class RagGoogleDoc:
 
         storage_context = StorageContext.from_defaults()
 
-        index = VectorStoreIndex.from_documents(
-            documents=custom_chunks,
+        index = VectorStoreIndex(
+            nodes=custom_chunks,
             storage_context=storage_context,
         )
         logger.info("VectorStoreIndex built with %d nodes", len(custom_chunks))
-        logger.info("VectorStoreIndex built")
 
         if self.save_index_address:
             storage_context.persist(persist_dir=self.save_index_address)
             logger.info("Persisted index to %s", self.save_index_address)
 
         return index
+
+    def get_summary(self):
+        summary_list = []
+        for folder_id, data in self.summary_data['folders'].items():
+            summary_list.append({
+                'folder_id': folder_id,
+                'folder_name': data['name'],
+                'parent': data['parent'],
+                'files': data['files'],
+                'file_count': len(data['files']),
+            })
+
+        summary_list.sort(key=lambda item: ((item['parent'] or ''), item['folder_name']))
+        return summary_list
 
 
 # Step 5: Query the RAG system
@@ -399,25 +467,196 @@ def query_index(query, index):
         logger.warning("Query returned an empty response")
     return response
 
+def configure_logging():
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-folder_ids = [
-    '1aVf1BtyWByR9zeEC-EiK9k4wQfmZzbZW', # Colab Notebooks
-    # '12HEHe7876pCtuL5Z4makI-5E5cd2fLx4'
-]
+
+def build_index(
+    folder_ids: List[str],
+    save_index_path: str = 'Data/google_doc_index',
+    progress_callback=None,
+) -> tuple[VectorStoreIndex, list[dict]]:
+    if not folder_ids:
+        raise ValueError("At least one folder ID is required.")
+
+    logger.info("Building index with %d folder(s)", len(folder_ids))
+    rag = RagGoogleDoc(
+        folder_ids,
+        save_index_address=save_index_path,
+        progress_callback=progress_callback,
+    )
+    index = rag.run()
+    summary = rag.get_summary()
+    return index, summary
+
+
+def render_ingest_summary(summary):
+    if not summary:
+        st.info("No documents were ingested.")
+        return
+
+    st.markdown("### 📁 Ingested Content Summary")
+    lines = []
+    for entry in summary:
+        parent_note = f" (parent: {entry['parent']})" if entry['parent'] else ""
+        lines.append(
+            f"- **{entry['folder_name']}** (`{entry['folder_id']}`){parent_note} — {entry['file_count']} file(s)"
+        )
+        for file_info in entry['files']:
+            lines.append(
+                f"    - {file_info['name']} — {file_info['mime']} ({file_info['chars']} chars)"
+            )
+
+    st.markdown("\n".join(lines))
+
+
+def run_rag_pipeline(
+    folder_ids: List[str],
+    question: str,
+    save_index_path: str = 'Data/google_doc_index',
+    index: Optional[VectorStoreIndex] = None,
+) -> str:
+    if not folder_ids:
+        raise ValueError("At least one folder ID is required.")
+    if not question.strip():
+        raise ValueError("Question cannot be empty.")
+
+    if index is None:
+        index, _ = build_index(folder_ids, save_index_path)
+
+    response = query_index(question, index)
+    answer_text = getattr(response, "response", str(response)).strip()
+    if not answer_text:
+        logger.warning("Final answer was empty")
+        return "[empty]"
+    return answer_text
+
+
+def is_running_with_streamlit() -> bool:
+    if os.environ.get("STREAMLIT_SERVER_PORT") or os.environ.get("STREAMLIT_RUNTIME"):
+        return True
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx  # type: ignore
+        return get_script_run_ctx() is not None
+    except Exception:
+        return False
+
+
+def render_app():
+    configure_logging()
+    st.set_page_config(page_title="Google Drive RAG", page_icon="📂", layout="wide")
+
+    st.title("📂 Google Drive RAG Explorer")
+    st.markdown(
+        "Provide Google Drive folder IDs (one per line or comma-separated). The pipeline will recurse the first level, "
+        "download Google Docs, DOCX, and PDF files, build a vector index, and answer your question using RAG."
+    )
+
+    default_folder_input = "\n".join(DEFAULT_FOLDER_IDS)
+    folder_input = st.text_area(
+        "Google Drive Folder IDs",
+        value=default_folder_input,
+        help="Enter one folder ID per line.",
+        height=120,
+    )
+
+    parsed_folder_ids = [fid.strip() for fid in folder_input.replace(',', '\n').splitlines() if fid.strip()]
+
+    ingest_button = st.button("Ingest Data", type="primary")
+
+    if ingest_button:
+        if not parsed_folder_ids:
+            st.error("Please provide at least one folder ID before ingesting.")
+        else:
+            save_index_path = 'Data/google_doc_index'
+            with st.status("Ingesting documents and building index...", expanded=True) as status:
+                try:
+                    def progress_update(message: str):
+                        status.write(message)
+
+                    index, summary = build_index(
+                        parsed_folder_ids,
+                        save_index_path,
+                        progress_callback=progress_update,
+                    )
+                    st.session_state['rag_index'] = index
+                    st.session_state['ingested_folders'] = parsed_folder_ids
+                    st.session_state['index_path'] = save_index_path
+                    st.session_state['ingest_summary'] = summary
+                    status.update(label="Ingestion complete.", state="complete")
+                    st.success("Ingestion complete. You can now run retrieval.")
+                    st.caption(f"Index persisted to `{save_index_path}`.")
+                    if summary:
+                        render_ingest_summary(summary)
+                except Exception as exc:
+                    logger.exception("Ingestion failed: %s", exc)
+                    status.write(f"Error: {exc}")
+                    status.update(label="Ingestion failed.", state="error")
+                    st.error(f"Ingestion failed: {exc}")
+
+    st.divider()
+
+    question = st.text_area(
+        "Question",
+        value=DEFAULT_QUESTION,
+        height=140,
+    )
+
+    run_button = st.button("Submit", type="primary")
+
+    if run_button:
+        if not parsed_folder_ids:
+            st.error("Please provide at least one folder ID before running retrieval.")
+            return
+        if not question.strip():
+            st.error("Please enter a question.")
+            return
+
+        save_index_path = 'Data/google_doc_index'
+
+        existing_index = st.session_state.get('rag_index')
+        ingested_folders = st.session_state.get('ingested_folders') or []
+        ingested_path = st.session_state.get('index_path')
+
+        if existing_index is None:
+            st.error("Please ingest data first.")
+            return
+
+        if ingested_folders != parsed_folder_ids:
+            st.error("Folder IDs changed. Please click 'Ingest Data' again before retrieval.")
+            return
+
+        if ingested_path != save_index_path:
+            st.error("Index configuration changed. Please re-ingest before retrieval.")
+            return
+
+        with st.spinner("Running retrieval..."):
+            try:
+                answer_text = run_rag_pipeline(
+                    parsed_folder_ids,
+                    question,
+                    save_index_path,
+                    index=existing_index,
+                )
+
+                st.success("Retrieval complete")
+                st.markdown("### ✅ Answer")
+                st.markdown(answer_text)
+                st.caption(f"Index persisted to `{save_index_path}`.")
+                summary = st.session_state.get('ingest_summary')
+                if summary:
+                    render_ingest_summary(summary)
+            except Exception as exc:
+                logger.exception("Retrieval failed: %s", exc)
+                st.error(f"Retrieval failed: {exc}")
+
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    try:
-        logger.info("Starting RAG pipeline")
-        index = RagGoogleDoc(folder_ids[0], save_index_address='Data/google_doc_index').run()
-        question = "What are the advancements in reinforcement learning?"
-        response = query_index(question, index)
-        answer_text = getattr(response, "response", str(response)).strip()
-        if not answer_text:
-            answer_text = "[empty]"
-        logger.info("Final answer: %s", answer_text)
-        print("\nAnswer:", answer_text)
-    except Exception as exc:
-        logger.exception("gdrive pipeline failed: %s", exc)
-        raise
+    if is_running_with_streamlit():
+        render_app()
+    else:
+        configure_logging()
+        logger.info("Detected CLI execution; please use `streamlit run gdrive.py` to launch the app.")
+        print("This script is now a Streamlit app. Run it with `streamlit run gdrive.py`.")

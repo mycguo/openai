@@ -86,7 +86,7 @@ async def scrape_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma Gen
     browser_session = BrowserSession(
         browser_profile=BrowserProfile(
             keep_alive=False,
-            headless=False,  # Show browser window during scraping
+            headless=True,  # Show browser window during scraping
             record_video_dir=None,
         )
     )

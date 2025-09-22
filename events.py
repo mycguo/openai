@@ -20,7 +20,7 @@ def generate_from_openai(prompt: str, temperature: float = 0.0, max_tokens: int 
 
 
 # ─── Main features ─────────────────────────────────────────────────
-async def scrape_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI SF"):
+async def scrape_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI SF", days=8):
     """Use browser-use to scrape events from lu.ma/genai-sf"""
     from browser_use import ChatOpenAI
     from browser_use.agent.service import Agent
@@ -54,22 +54,22 @@ Event URL: [ACTUAL URL - click on event to get the full URL like https://lu.ma/e
 IMPORTANT:
 - For Event URL, you MUST click on each event or extract the href attribute to get the ACTUAL URL
 - Never use "Link" as the URL - always get the real URL like https://lu.ma/xyz or https://cerebralvalley.ai/events/abc
-- Stop scrolling once you have events for 8 days or after 3 scrolls maximum."""
+- Stop scrolling once you have events for {days} days or after 3 scrolls maximum.""".format(days=days)
 
     # Task to scrape events
-    task = f"""Go to {url} and extract AI/GenAI event information.
+    task = f"""Go to {url} and extract AI/GenAI event information for the next {days} days.
 
     CRITICAL INSTRUCTIONS:
     1. Load the page
     2. Extract ALL visible events from the current view with their ACTUAL URLs (not "Link")
     3. Scroll down MAXIMUM 2 times to see more events
-    4. Extract any additional events
+    4. Extract any additional events for the next {days} days
     5. STOP IMMEDIATELY - do not scroll more than 2 times total
     6. Return all collected events
 
     STOP CONDITIONS:
     - After 2 scrolls maximum
-    - When you have at least 5 events
+    - When you have events for the next {days} days
     - When no new events appear after scrolling
 
     DO NOT CONTINUE SCROLLING BEYOND 2 SCROLLS. STOP AND RETURN RESULTS.
@@ -199,15 +199,15 @@ def generate_essay(combined_events_content=None):
         return False, None
 
 
-def generate_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI SF"):
-    """Go to specified URL and get the events for the next 8 days"""
+def generate_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI SF", days=8):
+    """Go to specified URL and get the events for the specified number of days"""
     try:
         # Run the async scraping function
-        events_data = asyncio.run(scrape_events(url, source_name))
+        events_data = asyncio.run(scrape_events(url, source_name, days))
 
         if events_data:
             # Format the events for display and Google Doc
-            formatted_events = format_events_for_doc(events_data, source_name)
+            formatted_events = format_events_for_doc(events_data, source_name, days)
 
             # Display results on the page
             st.subheader(f"📅 {source_name} Events")
@@ -229,12 +229,12 @@ def generate_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI S
         return False, None
 
 
-def format_events_for_doc(events_data, source_name="Events"):
+def format_events_for_doc(events_data, source_name="Events", days=8):
     """Format the scraped events into a readable document format"""
     try:
-        # Get current date and next 8 days
+        # Get current date and next specified days
         today = datetime.now()
-        end_date = today + timedelta(days=8)
+        end_date = today + timedelta(days=days)
 
         # Create header
         formatted_text = f"{source_name} Events - {today.strftime('%B %d, %Y')} to {end_date.strftime('%B %d, %Y')}\n\n"
@@ -496,6 +496,22 @@ def main():
 
     st.divider()
 
+    # Configuration section
+    st.subheader("⚙️ Configuration")
+    col_config1, col_config2 = st.columns([1, 3])
+    with col_config1:
+        days_to_scrape = st.number_input(
+            "Days to scrape",
+            min_value=1,
+            max_value=30,
+            value=8,
+            help="Number of days ahead to scrape events for"
+        )
+    with col_config2:
+        st.info(f"Will scrape events for the next {days_to_scrape} days")
+
+    st.divider()
+
     st.subheader("🎯 Event Sources")
 
     col1, col2 = st.columns(2)
@@ -505,7 +521,7 @@ def main():
         button1 = st.button("Scrape Lu.ma GenAI SF", key="luma_button")
         if button1:
             with st.spinner("Scraping Lu.ma events..."):
-                success, events = generate_events("https://lu.ma/genai-sf?k=c", "Lu.ma GenAI SF")
+                success, events = generate_events("https://lu.ma/genai-sf?k=c", "Lu.ma GenAI SF", days_to_scrape)
                 if success:
                     st.success("✅ Lu.ma events scraped successfully!")
                 else:
@@ -516,7 +532,7 @@ def main():
         button2 = st.button("Scrape Cerebral Valley", key="cv_button")
         if button2:
             with st.spinner("Scraping Cerebral Valley events..."):
-                success, events = generate_events("https://cerebralvalley.ai/events", "Cerebral Valley")
+                success, events = generate_events("https://cerebralvalley.ai/events", "Cerebral Valley", days_to_scrape)
                 if success:
                     st.success("✅ Cerebral Valley events scraped successfully!")
                 else:

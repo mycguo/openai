@@ -1,8 +1,6 @@
 import os
 import re
 from openai import OpenAI
-from googleapiclient.discovery import build
-from google.oauth2 import service_account
 import streamlit as st
 from openai import AsyncOpenAI
 import asyncio
@@ -12,56 +10,6 @@ from datetime import datetime, timedelta
 # ─── Configuration ────────────────────────────────────────────────
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 MODEL = "gpt-3.5-turbo"
-SERVICE_ACCOUNT_FILE = "./service-account.json"
-DOCUMENT_ID = "1vbvbDxvKj6LTWKiahK79XTHZsrhfeZpLUfqf1Ocl6RE"
-
-SCOPES = [
-  "https://www.googleapis.com/auth/documents",
-  "https://www.googleapis.com/auth/drive"
-]
-
-
-credentials = service_account.Credentials.from_service_account_info(
-    st.secrets["gcp_service_account"], scopes=SCOPES
-)
-
-docs_service = build("docs", "v1", credentials=credentials)
-
-
-# ─── Helpers ──────────────────────────────────────────────────────
-def get_full_text(document_id: str) -> str:
-    """Fetches the entire body text of the document."""
-    doc = docs_service.documents().get(documentId=document_id).execute()
-    pieces = doc.get("body", {}).get("content", [])
-    text = []
-    for el in pieces:
-        if "paragraph" in el:
-            for run in el["paragraph"]["elements"]:
-                txt = run.get("textRun", {}).get("content")
-                if txt:
-                    text.append(txt)
-    return "".join(text).strip()
-
-
-def append_paragraph(document_id: str, text: str):
-    """Appends a new paragraph at the end of the document."""
-    # Fetch the document to get the current end index
-    doc = docs_service.documents().get(documentId=document_id).execute()
-    end_index = doc.get("body", {}).get("content", [])[-1].get("endIndex", 1)
-
-    # Create the request to insert text at the end of the document
-    requests = [
-        {
-            "insertText": {
-                "location": {"index": end_index - 1},  # Use the valid end index
-                "text": text + "\n",
-            }
-        }
-    ]
-    docs_service.documents().batchUpdate(
-        documentId=document_id, body={"requests": requests}
-    ).execute()
-
 
 def generate_from_openai(prompt: str, temperature: float = 0.0, max_tokens: int = 2060) -> str:
     """Calls ChatCompletions and returns the assistant's reply."""

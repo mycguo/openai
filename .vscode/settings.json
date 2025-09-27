@@ -1,0 +1,10 @@
+{
+    "files.encoding": "utf8",
+    "files.autoGuessEncoding": false,
+    "files.defaultLanguage": "python",
+    "editor.fontFamily": "'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace",
+    "terminal.integrated.fontFamily": "'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace",
+    "files.associations": {
+        "*.py": "python"
+    }
+}

@@ -31,7 +31,7 @@ def get_linkedin_config():
         ```toml
         LINKEDIN_CLIENT_ID = "your-linkedin-app-client-id"
         LINKEDIN_CLIENT_SECRET = "your-linkedin-app-client-secret"
-        LINKEDIN_REDIRECT_URI = "http://localhost:8501/callback"
+        LINKEDIN_REDIRECT_URI = "http://localhost:8501"
         ```
 
         To get these credentials:
@@ -48,29 +48,52 @@ def generate_auth_url(config):
         "response_type": "code",
         "client_id": config["client_id"],
         "redirect_uri": config["redirect_uri"],
-        "scope": "w_member_social",
+        "scope": "w_member_social openid email profile",
         "state": "linkedin_post_app"  # CSRF protection
     }
     return f"{LINKEDIN_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
+
+def get_query_param_value(params, key):
+    """Return the first value for a query parameter irrespective of Streamlit API version."""
+    if params is None:
+        return None
+
+    value = None
+
+    if isinstance(params, dict):
+        value = params.get(key)
+    else:
+        getter = getattr(params, "get", None)
+        if callable(getter):
+            try:
+                value = getter(key)
+            except TypeError:
+                value = getter(key, None)
+
+    if isinstance(value, (list, tuple)):
+        return value[0] if value else None
+
+    return value
+
 def exchange_code_for_token(code, config):
     """Exchange authorization code for access token"""
-    data = {
-        "grant_type": "authorization_code",
-        "code": code,
-        "client_id": config["client_id"],
-        "client_secret": config["client_secret"],
-        "redirect_uri": config["redirect_uri"]
-    }
-
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded"
+    params = {
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': config["redirect_uri"],
+        'client_id': config["client_id"],
+        'client_secret': config["client_secret"]
     }
 
     try:
-        response = requests.post(LINKEDIN_TOKEN_URL, data=data, headers=headers)
-        response.raise_for_status()
-        return response.json()
+        response = requests.post(LINKEDIN_TOKEN_URL, data=params)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            st.error(f"Token exchange failed: {response.status_code} - {response.text}")
+            return None
     except requests.RequestException as e:
         st.error(f"Failed to get access token: {e}")
         return None
@@ -122,15 +145,18 @@ def main():
     try:
         # Try the new method first
         query_params = st.query_params
-        code_param = query_params.get("code")
-        state_param = query_params.get("state")
     except AttributeError:
         # Fallback to experimental method for older Streamlit versions
         query_params = st.experimental_get_query_params()
-        code_param = query_params.get("code", [None])[0]
-        state_param = query_params.get("state", [None])[0]
 
-    if code_param and state_param == "linkedin_post_app":
+    code_param = get_query_param_value(query_params, "code")
+    state_param = get_query_param_value(query_params, "state")
+    token_active = (
+        "linkedin_token" in st.session_state
+        and time.time() < st.session_state.get("token_expires", 0)
+    )
+
+    if code_param and state_param == "linkedin_post_app" and not token_active:
         code = code_param
 
         with st.spinner("Exchanging authorization code for access token..."):
@@ -142,6 +168,12 @@ def main():
 
                 # For posting, we'll use "~" as the author which represents the authenticated user
                 st.session_state.author_id = "~"
+
+                try:
+                    st.query_params.clear()
+                except AttributeError:
+                    st.experimental_set_query_params()
+
                 st.success("✅ Successfully connected to LinkedIn!")
                 try:
                     st.rerun()
@@ -154,7 +186,7 @@ def main():
     if "linkedin_token" not in st.session_state or time.time() > st.session_state.get("token_expires", 0):
         st.info("🔐 Please connect your LinkedIn account to start posting")
 
-        col1, col2, col3 = st.columns([1, 2, 1])
+        col1, col2, _ = st.columns([1, 2, 1])
         with col2:
             if st.button("🔗 Connect LinkedIn Account", type="primary", use_container_width=True):
                 auth_url = generate_auth_url(config)
@@ -165,12 +197,13 @@ def main():
         st.markdown("### 📋 Setup Instructions")
         st.markdown("""
         1. **Create LinkedIn App**: Go to [LinkedIn Developers](https://www.linkedin.com/developers/apps) and create a new app
-        2. **Add Permissions**: Enable `w_member_social` permission for posting
-        3. **Set Redirect URI**: Add your Streamlit app URL + `/callback` (e.g., `http://localhost:8501/callback`)
+        2. **Add Permissions**: Enable the following permissions: `w_member_social`, `openid`, `email`, `profile`
+        3. **Set Redirect URI**: Add your Streamlit app URL (e.g., `http://localhost:8501`)
         4. **Configure Secrets**: Add your app credentials to `.streamlit/secrets.toml`
 
-        **Required Permission**:
+        **Required Permissions**:
         - `w_member_social`: For posting content to LinkedIn
+        - `openid`, `email`, `profile`: For user authentication and identification
         """)
         return
 
@@ -213,12 +246,12 @@ def main():
         st.subheader("👀 Preview")
         with st.container():
             st.markdown("**LinkedIn Post Preview:**")
-            st.text_area("", value=post_content, height=100, disabled=True, label_visibility="collapsed")
+            st.text_area("Post Preview", value=post_content, height=100, disabled=True, label_visibility="collapsed")
 
     st.divider()
 
     # Post button
-    col1, col2, col3 = st.columns([1, 2, 1])
+    col1, col2, _ = st.columns([1, 2, 1])
     with col2:
         if st.button(
             "📤 Post to LinkedIn",
@@ -249,9 +282,9 @@ def main():
                 # Clear the content after successful post
                 if st.button("Create Another Post"):
                     try:
-                    st.rerun()
-                except AttributeError:
-                    st.experimental_rerun()
+                        st.rerun()
+                    except AttributeError:
+                        st.experimental_rerun()
             else:
                 st.error(f"❌ Failed to post to LinkedIn: {result}")
                 st.info("Please check your connection and try again.")

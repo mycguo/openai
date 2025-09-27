@@ -7,6 +7,8 @@ import time
 LINKEDIN_API_URL = "https://api.linkedin.com/v2/ugcPosts"
 LINKEDIN_AUTH_URL = "https://www.linkedin.com/oauth/v2/authorization"
 LINKEDIN_TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
+LINKEDIN_ME_URL = "https://api.linkedin.com/v2/me"
+LINKEDIN_USERINFO_URL = "https://api.linkedin.com/v2/userinfo"
 
 # Page configuration
 st.set_page_config(
@@ -99,6 +101,67 @@ def exchange_code_for_token(code, config):
         return None
 
 
+def fetch_authenticated_member_urn(access_token):
+    """Fetch the authenticated member's URN using OpenID userinfo or /me fallback."""
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "X-Restli-Protocol-Version": "2.0.0",
+        "LinkedIn-Version": "202404"
+    }
+
+    params = {"projection": "(id)"}
+
+    try:
+        userinfo_response = requests.get(
+            LINKEDIN_USERINFO_URL,
+            headers={"Authorization": f"Bearer {access_token}"}
+        )
+
+        if userinfo_response.status_code == 200:
+            userinfo = userinfo_response.json()
+            subject = userinfo.get("sub") or userinfo.get("id")
+
+            if subject:
+                subject = str(subject)
+                if subject.startswith("urn:li:person:"):
+                    return subject
+                return f"urn:li:person:{subject}"
+
+        elif userinfo_response.status_code == 403:
+            st.warning(
+                "Connected to LinkedIn, but profile details are unavailable. "
+                "Ensure your LinkedIn app grants the `profile` OpenID scope."
+            )
+        elif userinfo_response.status_code >= 400:
+            st.info(
+                f"LinkedIn userinfo request returned {userinfo_response.status_code}: {userinfo_response.text}"
+            )
+
+        response = requests.get(LINKEDIN_ME_URL, headers=headers, params=params)
+
+        if response.status_code == 200:
+            data = response.json()
+            member_id = data.get("id")
+
+            if member_id:
+                return f"urn:li:person:{member_id}"
+
+            st.error("LinkedIn profile response did not include a member ID.")
+            return None
+
+        if response.status_code == 403:
+            st.info(
+                "LinkedIn profile API denied access. If available, add the `r_liteprofile` permission to your app."
+            )
+            return None
+
+        st.error(f"Failed to fetch LinkedIn profile: {response.status_code} - {response.text}")
+        return None
+    except requests.RequestException as e:
+        st.error(f"Failed to fetch LinkedIn profile: {e}")
+        return None
+
+
 def post_to_linkedin(content, access_token, author_id):
     """Post content to LinkedIn using UGC Post API"""
     headers = {
@@ -108,9 +171,16 @@ def post_to_linkedin(content, access_token, author_id):
     }
 
     # Construct the post payload according to LinkedIn UGC Post API
-    # Use "~" to represent the authenticated user
+    if not author_id:
+        return False, "Missing LinkedIn author ID. Please reconnect your account."
+
+    author_urn = author_id if author_id.startswith("urn:") else f"urn:li:person:{author_id}"
+
+    if author_urn.endswith(":~"):
+        return False, "Invalid LinkedIn author identifier. Please reconnect your account."
+
     payload = {
-        "author": "urn:li:person:~" if author_id == "~" else f"urn:li:person:{author_id}",
+        "author": author_urn,
         "lifecycleState": "PUBLISHED",
         "specificContent": {
             "com.linkedin.ugc.ShareContent": {
@@ -166,8 +236,16 @@ def main():
                 st.session_state.linkedin_token = token_data["access_token"]
                 st.session_state.token_expires = time.time() + token_data.get("expires_in", 5184000)
 
-                # For posting, we'll use "~" as the author which represents the authenticated user
-                st.session_state.author_id = "~"
+                member_urn = fetch_authenticated_member_urn(st.session_state.linkedin_token)
+
+                if not member_urn:
+                    for key in ["linkedin_token", "token_expires"]:
+                        if key in st.session_state:
+                            del st.session_state[key]
+                    st.error("Unable to determine LinkedIn member profile. Please try connecting again.")
+                    return
+
+                st.session_state.author_id = member_urn
 
                 try:
                     st.query_params.clear()
@@ -209,6 +287,13 @@ def main():
 
     # Show connected user
     if "linkedin_token" in st.session_state:
+        if "author_id" not in st.session_state or not str(st.session_state.author_id).startswith("urn:"):
+            member_urn = fetch_authenticated_member_urn(st.session_state.linkedin_token)
+            if member_urn:
+                st.session_state.author_id = member_urn
+            else:
+                st.warning("Connected to LinkedIn, but unable to verify your profile. Try reconnecting if posting fails.")
+
         st.success("✅ Connected to LinkedIn account!")
 
     st.divider()

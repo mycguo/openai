@@ -24,9 +24,7 @@ def generate_summary(transcript: str, temperature: float = 0.0, max_tokens: int 
 
     1. **Main Topics**: Key subjects discussed
     2. **Key Insights**: Important points and takeaways
-    3. **Notable Quotes**: Memorable statements or insights
-    4. **Discussion Highlights**: Major discussion points or debates
-    5. **Actionable Items**: Any recommendations or actionable advice mentioned
+    3. **Discussion Highlights**: Major discussion points or debates
 
     Format the summary in clear sections with bullet points where appropriate.
 

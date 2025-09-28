@@ -7,6 +7,7 @@ from typing import Iterable, List, Optional
 import requests
 import streamlit as st
 import yt_dlp
+from openai import OpenAI
 
 
 st.set_page_config(
@@ -17,10 +18,13 @@ st.set_page_config(
 
 
 ASSEMBLYAI_API_KEY = st.secrets.get("ASSEMBLYAI_API_KEY")
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
 
 UPLOAD_ENDPOINT = "https://api.assemblyai.com/v2/upload"
 TRANSCRIPT_ENDPOINT = "https://api.assemblyai.com/v2/transcript"
 CHUNK_SIZE = 5_242_880  # 5 MB
+
+TRANSCRIPTS_DIR = os.path.join("Data", "transcripts")
 
 
 @dataclass
@@ -83,7 +87,7 @@ def _request_transcription(audio_url: str) -> str:
     payload = {
         "audio_url": audio_url,
         "auto_highlights": False,
-        "speaker_labels": False,
+        "speaker_labels": True,
         "language_detection": False,
         "punctuate": True,
     }
@@ -160,6 +164,56 @@ def _segments_from_words(words: Optional[Iterable[dict]], max_duration: float = 
     return segments
 
 
+def _format_speaker_label(raw: Optional[str]) -> str:
+    if raw is None:
+        return ""
+    label = str(raw).strip()
+    if not label:
+        return ""
+    if label.lower().startswith("speaker"):
+        return label.title()
+    if len(label) == 1 and label.isalpha():
+        return f"Speaker {label.upper()}"
+    if label.isdigit():
+        return f"Speaker {label}"
+    return label
+
+
+def _segments_from_utterances(utterances: Optional[Iterable[dict]]) -> tuple[List[TranscriptSegment], str]:
+    utterances = list(utterances or [])
+    if not utterances:
+        return [], ""
+
+    segments: List[TranscriptSegment] = []
+    lines: List[str] = []
+
+    for utterance in utterances:
+        text = (utterance.get("text") or "").strip()
+        if not text:
+            continue
+
+        speaker = _format_speaker_label(
+            utterance.get("speaker") or utterance.get("speaker_label") or utterance.get("id")
+        )
+
+        start = float(utterance.get("start", 0)) / 1000.0
+        end = float(utterance.get("end", 0)) / 1000.0
+
+        line = f"{speaker}: {text}" if speaker else text
+        lines.append(line)
+
+        segments.append(
+            TranscriptSegment(
+                index=len(segments) + 1,
+                start=start,
+                end=end,
+                text=line,
+            )
+        )
+
+    return segments, "\n".join(lines)
+
+
 def _segments_to_srt(segments: Iterable[TranscriptSegment]) -> str:
     def format_timestamp(seconds: float) -> str:
         hours = int(seconds // 3600)
@@ -183,8 +237,65 @@ def _clear_state():
         "yt_transcript_text",
         "yt_transcript_srt",
         "yt_transcript_metadata",
+        "yt_transcript_video_id",
+        "yt_transcript_summary",
     ]:
         st.session_state.pop(key, None)
+
+
+def _ensure_transcript_dir() -> str:
+    os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
+    return TRANSCRIPTS_DIR
+
+
+def _sanitize_filename(name: str) -> str:
+    keep = (" ", "-", "_", ".")
+    sanitized = "".join(ch if ch.isalnum() or ch in keep else "_" for ch in name)
+    return sanitized.strip().strip("._") or "transcript"
+
+
+def save_transcript_to_section(text: str, metadata: dict) -> str:
+    directory = _ensure_transcript_dir()
+    video_id = metadata.get("id") or metadata.get("display_id") or metadata.get("video_id")
+    base_name = video_id or metadata.get("title") or "transcript"
+    filename = _sanitize_filename(base_name) + ".txt"
+    path = os.path.join(directory, filename)
+
+    with open(path, "w", encoding="utf-8") as file:
+        file.write(text)
+
+    return path
+
+
+def generate_summary(text: str) -> str:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("Missing OPENAI_API_KEY in Streamlit secrets.")
+
+    client = OpenAI()
+
+    prompt = (
+        "You are an expert analyst preparing an executive briefing based on a podcast transcript."
+        " Synthesize the material into a comprehensive narrative that includes:"
+        "\n\n1. Executive Overview — succinctly explain the core storyline and why it matters."
+        "\n2. Key Themes — list 4–6 themes with supporting evidence or quotes."
+        "\n3. Detailed Takeaways — for each theme, articulate implications, context, and any data points mentioned."
+        "\n4. Action Items — recommend next steps or strategic considerations for professionals following this topic."
+        "\n\nGuidelines:"
+        "\n- Write in an accessible yet authoritative tone suitable for senior stakeholders."
+        "\n- Keep sections clearly labeled with markdown headings and bullet points as appropriate."
+        "\n- If the transcript lacks information for a section, explicitly note the gap."
+        "\n\nTranscript excerpt (truncated if long):\n"
+        f"{text[:15000]}"
+    )
+
+    completion = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+        max_tokens=3500,
+    )
+
+    return completion.choices[0].message.content.strip()
 
 
 def main() -> None:
@@ -225,16 +336,37 @@ def main() -> None:
                         status_placeholder = st.empty()
                         transcript_data = _poll_transcription(transcript_id, status_placeholder)
 
-                    text = transcript_data.get("text", "").strip()
+                    utterances = transcript_data.get("utterances")
+                    segments: List[TranscriptSegment] = []
+                    text = ""
+
+                    if utterances:
+                        segments, text_with_speakers = _segments_from_utterances(utterances)
+                        if text_with_speakers:
+                            text = text_with_speakers
+
                     if not text:
-                        raise ValueError("Transcription completed but returned empty text.")
+                        text = transcript_data.get("text", "").strip()
 
                     words = transcript_data.get("words", [])
-                    segments = _segments_from_words(words)
                     if not segments:
+                        segments = _segments_from_words(words)
+
+                    if not segments and text:
                         segments = [
-                            TranscriptSegment(index=1, start=0.0, end=max(len(text.split()) / 2, 1.0), text=text)
+                            TranscriptSegment(
+                                index=1,
+                                start=0.0,
+                                end=max(len(text.split()) / 2, 1.0),
+                                text=text,
+                            )
                         ]
+
+                    if not text:
+                        text = "\n".join(segment.text for segment in segments)
+
+                    if not text.strip():
+                        raise ValueError("Transcription completed but returned empty text.")
 
                     srt_text = _segments_to_srt(segments)
 
@@ -245,7 +377,9 @@ def main() -> None:
                         "uploader": metadata.get("uploader"),
                         "duration": metadata.get("duration"),
                         "webpage_url": metadata.get("webpage_url"),
+                        "id": metadata.get("id"),
                     }
+                    st.session_state.yt_transcript_video_id = metadata.get("id") or metadata.get("display_id")
 
                     st.success("Transcript ready!")
 
@@ -289,6 +423,39 @@ def main() -> None:
             file_name="transcript.srt",
             mime="text/plain",
         )
+
+        col_a, col_b = st.columns(2)
+
+        with col_a:
+            if st.button("📤 Upload to Transcript Section"):
+                try:
+                    saved_path = save_transcript_to_section(
+                        st.session_state["yt_transcript_text"],
+                        metadata,
+                    )
+                    st.success(f"Transcript saved to {saved_path}")
+                except Exception as exc:
+                    st.error(f"Failed to save transcript: {exc}")
+
+        with col_b:
+            if st.button("🧠 Generate Summary"):
+                try:
+                    summary = generate_summary(st.session_state["yt_transcript_text"])
+                    st.session_state.yt_transcript_summary = summary
+                    st.success("Summary generated!")
+                except Exception as exc:
+                    st.error(f"Failed to generate summary: {exc}")
+
+        if st.session_state.get("yt_transcript_summary"):
+            st.subheader("🧠 Transcript Summary")
+            st.markdown(st.session_state["yt_transcript_summary"])
+
+            st.download_button(
+                label="💾 Download Summary",
+                data=st.session_state["yt_transcript_summary"],
+                file_name="transcript_summary.txt",
+                mime="text/plain",
+            )
 
 
 if __name__ == "__main__":

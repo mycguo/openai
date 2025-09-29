@@ -308,6 +308,17 @@ def _clear_state():
         st.session_state.pop(key, None)
 
 
+def _clear_transcript_outputs():
+    for key in [
+        "yt_transcript_text",
+        "yt_transcript_srt",
+        "yt_transcript_metadata",
+        "yt_transcript_video_id",
+        "yt_transcript_summary",
+    ]:
+        st.session_state.pop(key, None)
+
+
 def _ensure_transcript_dir() -> str:
     os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
     return TRANSCRIPTS_DIR
@@ -450,9 +461,13 @@ def main() -> None:
 
                 except AudioDownloadError as exc:
                     st.session_state.yt_download_logs = exc.logs
+                    _clear_transcript_outputs()
                     st.error(f"Failed to download audio: {exc}")
+                    return
                 except Exception as exc:
+                    _clear_transcript_outputs()
                     st.error(f"Failed to generate transcript: {exc}")
+                    return
 
     if st.session_state.get("yt_download_logs"):
         with st.expander("Download Logs", expanded=False):
@@ -536,3 +551,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+class AudioDownloadError(Exception):
+    def __init__(self, message: str, logs: Optional[List[str]] = None):
+        super().__init__(message)
+        self.logs = logs or []

@@ -41,88 +41,91 @@ class TranscriptSegment:
     text: str
 
 
-def _select_audio_format(formats: Optional[List[dict]]) -> Optional[dict]:
-    if not formats:
-        return None
+def _download_audio(url: str, workdir: str) -> tuple[str, dict, List[str]]:
+    """Download best audio track with yt_dlp using multiple strategies."""
 
-    candidates = [
-        fmt
-        for fmt in formats
-        if fmt.get("url")
-        and (fmt.get("vcodec") in ("none", None))
-        and fmt.get("acodec") not in ("none", None)
+    attempts = [
+        "bestaudio/best",
+        "bestaudio[ext=m4a]",
+        "140",  # m4a 128kbps
     ]
-    if not candidates:
-        return None
 
-    def score(fmt: dict) -> float:
-        return fmt.get("abr") or fmt.get("tbr") or fmt.get("asr") or 0
-
-    return max(candidates, key=score)
-
-
-def _download_audio_via_http(info: dict, workdir: str) -> str:
-    fmt = _select_audio_format(info.get("formats"))
-    if not fmt:
-        raise RuntimeError("No suitable direct audio format available for download.")
-
-    headers = {
-        **DEFAULT_HTTP_HEADERS,
-        **(fmt.get("http_headers") or {}),
-        **(info.get("http_headers") or {}),
-    }
-
-    extension = fmt.get("ext") or info.get("ext") or "m4a"
-    filename = os.path.join(workdir, f"{info.get('id', 'audio')}.{extension}")
-
-    with requests.get(fmt["url"], headers=headers, stream=True, timeout=30) as response:
-        response.raise_for_status()
-        with open(filename, "wb") as file_stream:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    file_stream.write(chunk)
-
-    if not os.path.exists(filename) or os.path.getsize(filename) == 0:
-        raise RuntimeError("Direct audio download returned an empty file.")
-
-    return filename
-
-
-def _download_audio(url: str, workdir: str) -> tuple[str, dict]:
-    """Download best audio track with yt_dlp, falling back to direct HTTP if needed."""
-    output_template = os.path.join(workdir, "%(id)s.%(ext)s")
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": output_template,
+    logs: List[str] = []
+    common_opts = {
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }
+        ],
+        "outtmpl": os.path.join(workdir, "%(id)s.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "geo_bypass": True,
         "nocheckcertificate": True,
         "http_headers": DEFAULT_HTTP_HEADERS,
+        "retries": 3,
+        "fragment_retries": 3,
+        "concurrent_fragment_downloads": 1,
+        "source_address": "0.0.0.0",
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        base_filename = ydl.prepare_filename(info)
+    last_exception: Optional[Exception] = None
 
-    ext = info.get("ext") or os.path.splitext(base_filename)[1].lstrip(".") or "m4a"
-    audio_path = os.path.splitext(base_filename)[0] + f".{ext}"
-    if not os.path.exists(audio_path):
-        audio_path = base_filename if os.path.exists(base_filename) else audio_path
+    for fmt in attempts:
+        attempt_opts = {**common_opts, "format": fmt}
+        log = f"Attempting audio download with format: {fmt}"
+        logs.append(log)
+        print(log)
 
-    if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
-        if os.path.exists(audio_path):
+        try:
+            with yt_dlp.YoutubeDL(attempt_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                base_filename = ydl.prepare_filename(info)
+        except Exception as exc:
+            last_exception = exc
+            error_log = f"Download error using format {fmt}: {exc}"
+            logs.append(error_log)
+            print(error_log)
+            continue
+
+        possible_paths = []
+        base_root, base_ext = os.path.splitext(base_filename)
+        possible_paths.append(base_root + ".mp3")
+        possible_paths.append(base_filename)
+
+        info_ext = info.get("ext")
+        if info_ext:
+            possible_paths.append(f"{base_root}.{info_ext}")
+
+        audio_path = next((p for p in possible_paths if os.path.exists(p)), None)
+
+        if audio_path and os.path.getsize(audio_path) > 0:
+            success_log = (
+                f"Audio download succeeded with format {fmt}: {os.path.basename(audio_path)} "
+                f"({os.path.getsize(audio_path)} bytes)"
+            )
+            logs.append(success_log)
+            print(success_log)
+            return audio_path, info, logs
+
+        if audio_path and os.path.exists(audio_path):
             try:
                 os.remove(audio_path)
             except OSError:
                 pass
-        audio_path = _download_audio_via_http(info, workdir)
 
-    if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
-        raise RuntimeError("Audio download returned an empty file after fallback attempts.")
+        failure_log = f"Downloaded file missing or empty for format {fmt}."
+        logs.append(failure_log)
+        print(failure_log)
 
-    return audio_path, info
+    message = "Audio download failed for all attempted formats."
+    if last_exception:
+        message += f" Last error: {last_exception}"
+
+    raise AudioDownloadError(message, logs)
 
 
 def _read_file_in_chunks(filepath: str, chunk_size: int = CHUNK_SIZE):
@@ -385,10 +388,13 @@ def main() -> None:
         if not url or not url.strip():
             st.error("Please provide a valid YouTube URL.")
         else:
+            st.session_state.pop("yt_download_logs", None)
+
             with st.spinner("Downloading audio and requesting transcription..."):
                 try:
                     with tempfile.TemporaryDirectory() as tmpdir:
-                        audio_path, metadata = _download_audio(url.strip(), tmpdir)
+                        audio_path, metadata, download_logs = _download_audio(url.strip(), tmpdir)
+                        st.session_state.yt_download_logs = download_logs
                         upload_url = _upload_audio(audio_path)
                         transcript_id = _request_transcription(upload_url)
 
@@ -442,8 +448,16 @@ def main() -> None:
 
                     st.success("Transcript ready!")
 
+                except AudioDownloadError as exc:
+                    st.session_state.yt_download_logs = exc.logs
+                    st.error(f"Failed to download audio: {exc}")
                 except Exception as exc:
                     st.error(f"Failed to generate transcript: {exc}")
+
+    if st.session_state.get("yt_download_logs"):
+        with st.expander("Download Logs", expanded=False):
+            for entry in st.session_state["yt_download_logs"]:
+                st.write(entry)
 
     if st.session_state.get("yt_transcript_text"):
         metadata = st.session_state.get("yt_transcript_metadata", {}) or {}

@@ -277,9 +277,7 @@ def generate_summary(text: str) -> str:
         "You are an expert analyst preparing an executive briefing based on a podcast transcript."
         " Synthesize the material into a comprehensive narrative that includes:"
         "\n\n1. Executive Overview — succinctly explain the core storyline and why it matters."
-        "\n2. Key Themes — list 4–6 themes with supporting evidence or quotes."
-        "\n3. Detailed Takeaways — for each theme, articulate implications, context, and any data points mentioned."
-        "\n4. Action Items — recommend next steps or strategic considerations for professionals following this topic."
+        "\n2. Detailed Takeaways — list 4–6 themes with supporting evidence, try to write in paragraphs, and not bullet points."
         "\n\nGuidelines:"
         "\n- Write in an accessible yet authoritative tone suitable for senior stakeholders."
         "\n- Keep sections clearly labeled with markdown headings and bullet points as appropriate."
@@ -410,24 +408,28 @@ def main() -> None:
             disabled=True,
         )
 
-        st.download_button(
-            label="💾 Download as Text",
-            data=st.session_state["yt_transcript_text"],
-            file_name="transcript.txt",
-            mime="text/plain",
-        )
+        dl_col1, dl_col2, dl_col3 = st.columns(3)
 
-        st.download_button(
-            label="💾 Download as SRT",
-            data=st.session_state["yt_transcript_srt"],
-            file_name="transcript.srt",
-            mime="text/plain",
-        )
+        with dl_col1:
+            st.download_button(
+                label="💾 Download as Text",
+                data=st.session_state["yt_transcript_text"],
+                file_name="transcript.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
 
-        col_a, col_b = st.columns(2)
+        with dl_col2:
+            st.download_button(
+                label="💾 Download as SRT",
+                data=st.session_state["yt_transcript_srt"],
+                file_name="transcript.srt",
+                mime="text/plain",
+                use_container_width=True,
+            )
 
-        with col_a:
-            if st.button("📤 Upload to Transcript Section"):
+        with dl_col3:
+            if st.button("📤 Upload to Transcript Section", use_container_width=True):
                 try:
                     saved_path = save_transcript_to_section(
                         st.session_state["yt_transcript_text"],
@@ -437,14 +439,13 @@ def main() -> None:
                 except Exception as exc:
                     st.error(f"Failed to save transcript: {exc}")
 
-        with col_b:
-            if st.button("🧠 Generate Summary"):
-                try:
-                    summary = generate_summary(st.session_state["yt_transcript_text"])
-                    st.session_state.yt_transcript_summary = summary
-                    st.success("Summary generated!")
-                except Exception as exc:
-                    st.error(f"Failed to generate summary: {exc}")
+        if st.button("🧠 Generate Summary"):
+            try:
+                summary = generate_summary(st.session_state["yt_transcript_text"])
+                st.session_state.yt_transcript_summary = summary
+                st.success("Summary generated!")
+            except Exception as exc:
+                st.error(f"Failed to generate summary: {exc}")
 
         if st.session_state.get("yt_transcript_summary"):
             st.subheader("🧠 Transcript Summary")

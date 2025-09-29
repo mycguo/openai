@@ -23,6 +23,12 @@ OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
 UPLOAD_ENDPOINT = "https://api.assemblyai.com/v2/upload"
 TRANSCRIPT_ENDPOINT = "https://api.assemblyai.com/v2/transcript"
 CHUNK_SIZE = 5_242_880  # 5 MB
+DEFAULT_HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Connection": "keep-alive",
+}
 
 TRANSCRIPTS_DIR = os.path.join("Data", "transcripts")
 
@@ -35,39 +41,86 @@ class TranscriptSegment:
     text: str
 
 
+def _select_audio_format(formats: Optional[List[dict]]) -> Optional[dict]:
+    if not formats:
+        return None
+
+    candidates = [
+        fmt
+        for fmt in formats
+        if fmt.get("url")
+        and (fmt.get("vcodec") in ("none", None))
+        and fmt.get("acodec") not in ("none", None)
+    ]
+    if not candidates:
+        return None
+
+    def score(fmt: dict) -> float:
+        return fmt.get("abr") or fmt.get("tbr") or fmt.get("asr") or 0
+
+    return max(candidates, key=score)
+
+
+def _download_audio_via_http(info: dict, workdir: str) -> str:
+    fmt = _select_audio_format(info.get("formats"))
+    if not fmt:
+        raise RuntimeError("No suitable direct audio format available for download.")
+
+    headers = {
+        **DEFAULT_HTTP_HEADERS,
+        **(fmt.get("http_headers") or {}),
+        **(info.get("http_headers") or {}),
+    }
+
+    extension = fmt.get("ext") or info.get("ext") or "m4a"
+    filename = os.path.join(workdir, f"{info.get('id', 'audio')}.{extension}")
+
+    with requests.get(fmt["url"], headers=headers, stream=True, timeout=30) as response:
+        response.raise_for_status()
+        with open(filename, "wb") as file_stream:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    file_stream.write(chunk)
+
+    if not os.path.exists(filename) or os.path.getsize(filename) == 0:
+        raise RuntimeError("Direct audio download returned an empty file.")
+
+    return filename
+
+
 def _download_audio(url: str, workdir: str) -> tuple[str, dict]:
-    """Download best audio track with yt_dlp and return file path and metadata."""
+    """Download best audio track with yt_dlp, falling back to direct HTTP if needed."""
     output_template = os.path.join(workdir, "%(id)s.%(ext)s")
     ydl_opts = {
         "format": "bestaudio/best",
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }
-        ],
         "outtmpl": output_template,
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "geo_bypass": True,
         "nocheckcertificate": True,
-        "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Connection": "keep-alive",
-        },
+        "http_headers": DEFAULT_HTTP_HEADERS,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         base_filename = ydl.prepare_filename(info)
 
-    audio_path = os.path.splitext(base_filename)[0] + ".mp3"
+    ext = info.get("ext") or os.path.splitext(base_filename)[1].lstrip(".") or "m4a"
+    audio_path = os.path.splitext(base_filename)[0] + f".{ext}"
     if not os.path.exists(audio_path):
-        raise FileNotFoundError("Audio download failed; file not found after processing.")
+        audio_path = base_filename if os.path.exists(base_filename) else audio_path
+
+    if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
+        if os.path.exists(audio_path):
+            try:
+                os.remove(audio_path)
+            except OSError:
+                pass
+        audio_path = _download_audio_via_http(info, workdir)
+
+    if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
+        raise RuntimeError("Audio download returned an empty file after fallback attempts.")
 
     return audio_path, info
 

@@ -16,3 +16,4 @@ python-docx
 pypdf
 requests
 yt-dlp
+pytube

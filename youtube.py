@@ -8,6 +8,7 @@ import requests
 import streamlit as st
 import yt_dlp
 from openai import OpenAI
+from pytube import YouTube as PyTube
 
 
 st.set_page_config(
@@ -31,6 +32,12 @@ DEFAULT_HTTP_HEADERS = {
 }
 
 TRANSCRIPTS_DIR = os.path.join("Data", "transcripts")
+
+
+class AudioDownloadError(Exception):
+    def __init__(self, message: str, logs: Optional[List[str]] = None):
+        super().__init__(message)
+        self.logs = logs or []
 
 
 @dataclass
@@ -70,6 +77,12 @@ def _download_audio(url: str, workdir: str) -> tuple[str, dict, List[str]]:
         "fragment_retries": 3,
         "concurrent_fragment_downloads": 1,
         "source_address": "0.0.0.0",
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android"],
+                "skip": ["hls", "dash"],
+            }
+        },
     }
 
     last_exception: Optional[Exception] = None
@@ -125,7 +138,46 @@ def _download_audio(url: str, workdir: str) -> tuple[str, dict, List[str]]:
     if last_exception:
         message += f" Last error: {last_exception}"
 
+    logs.append("Falling back to pytube audio download...")
+    print("Falling back to pytube audio download...")
+
+    try:
+        audio_path, info = _download_audio_with_pytube(url, workdir)
+        success_log = f"PyTube fallback succeeded: {os.path.basename(audio_path)}"
+        logs.append(success_log)
+        print(success_log)
+        return audio_path, info, logs
+    except Exception as exc:
+        logs.append(f"PyTube fallback failed: {exc}")
+        print(f"PyTube fallback failed: {exc}")
+        if last_exception is None:
+            last_exception = exc
+
     raise AudioDownloadError(message, logs)
+
+
+def _download_audio_with_pytube(url: str, workdir: str) -> tuple[str, dict]:
+    yt = PyTube(url)
+    audio_stream = yt.streams.filter(only_audio=True).order_by("abr").desc().first()
+    if not audio_stream:
+        raise RuntimeError("No audio streams available via PyTube.")
+
+    filename = audio_stream.download(output_path=workdir)
+    if not filename or not os.path.exists(filename):
+        raise RuntimeError("PyTube failed to download the audio stream.")
+
+    if os.path.getsize(filename) == 0:
+        raise RuntimeError("PyTube download produced an empty file.")
+
+    info = {
+        "title": yt.title,
+        "uploader": yt.author,
+        "duration": yt.length,
+        "webpage_url": yt.watch_url,
+        "id": yt.video_id,
+    }
+
+    return filename, info
 
 
 def _read_file_in_chunks(filepath: str, chunk_size: int = CHUNK_SIZE):
@@ -551,7 +603,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-class AudioDownloadError(Exception):
-    def __init__(self, message: str, logs: Optional[List[str]] = None):
-        super().__init__(message)
-        self.logs = logs or []

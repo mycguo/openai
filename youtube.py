@@ -275,11 +275,10 @@ def generate_summary(text: str) -> str:
 
     prompt = (
         "You are an expert analyst preparing an executive briefing based on a podcast transcript."
-        " Synthesize the material into a comprehensive narrative that includes:"
-        "\n\n1. Executive Overview — succinctly explain the core storyline and why it matters."
-        "\n2. Detailed Takeaways — list 4–6 themes with supporting evidence, try to write in paragraphs, and not bullet points."
+        "Please write a concise summary of this article in a few paragraphs. Focus on clearly explaining the main topic and key points in a flowing narrative format. Just write it as you would naturally explain the article to someone."
+        "\nDon't use Spearker A or Speaker B if you don't know who they are, focusing on the content and the main points."
         "\n\nGuidelines:"
-        "\n- Write in an accessible yet authoritative tone suitable for senior stakeholders."
+        "\n Try to write a comprehensive summary and make it long and detailed."
         "\n- Keep sections clearly labeled with markdown headings and bullet points as appropriate."
         "\n- If the transcript lacks information for a section, explicitly note the gap."
         "\n\nTranscript excerpt (truncated if long):\n"
@@ -290,7 +289,7 @@ def generate_summary(text: str) -> str:
         model="gpt-4o",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2,
-        max_tokens=3500,
+        max_tokens=5000,
     )
 
     return completion.choices[0].message.content.strip()

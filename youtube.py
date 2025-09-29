@@ -51,21 +51,21 @@ class TranscriptSegment:
 def _download_audio(url: str, workdir: str) -> tuple[str, dict, List[str]]:
     """Download best audio track with yt_dlp using multiple strategies."""
 
+    # More fallback format attempts for cloud environments
     attempts = [
+        "worst[ext=m4a]",  # Try lowest quality m4a first (more likely to work)
+        "worst[ext=mp4]",  # Try lowest quality mp4
+        "worstaudio",      # Try worst audio quality
+        "bestaudio[ext=m4a]/best[ext=m4a]",
+        "bestaudio[ext=mp4]/best[ext=mp4]",
+        "18",              # mp4 360p (often available)
+        "140",             # m4a 128kbps
         "bestaudio/best",
-        "bestaudio[ext=m4a]",
-        "140",  # m4a 128kbps
     ]
 
     logs: List[str] = []
     common_opts = {
-        "postprocessors": [
-            {
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }
-        ],
+        # Remove postprocessors to avoid FFmpeg issues in cloud
         "outtmpl": os.path.join(workdir, "%(id)s.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
@@ -73,16 +73,19 @@ def _download_audio(url: str, workdir: str) -> tuple[str, dict, List[str]]:
         "geo_bypass": True,
         "nocheckcertificate": True,
         "http_headers": DEFAULT_HTTP_HEADERS,
-        "retries": 3,
-        "fragment_retries": 3,
+        "retries": 5,  # More retries
+        "fragment_retries": 5,
         "concurrent_fragment_downloads": 1,
-        "source_address": "0.0.0.0",
         "extractor_args": {
             "youtube": {
-                "player_client": ["android"],
+                "player_client": ["android", "web"],  # Try both clients
                 "skip": ["hls", "dash"],
             }
         },
+        # Additional cloud-friendly options
+        "no_check_certificate": True,
+        "prefer_insecure": True,
+        "youtube_include_dash_manifest": False,
     }
 
     last_exception: Optional[Exception] = None
@@ -105,13 +108,17 @@ def _download_audio(url: str, workdir: str) -> tuple[str, dict, List[str]]:
             continue
 
         possible_paths = []
-        base_root, base_ext = os.path.splitext(base_filename)
-        possible_paths.append(base_root + ".mp3")
-        possible_paths.append(base_filename)
+        base_root = os.path.splitext(base_filename)[0]
+        # Since we removed FFmpeg post-processing, look for original format
+        possible_paths.append(base_filename)  # Original download
 
         info_ext = info.get("ext")
         if info_ext:
             possible_paths.append(f"{base_root}.{info_ext}")
+
+        # Also check for common audio formats in case they exist
+        for ext in ["m4a", "mp4", "webm", "mp3"]:
+            possible_paths.append(f"{base_root}.{ext}")
 
         audio_path = next((p for p in possible_paths if os.path.exists(p)), None)
 
@@ -157,27 +164,72 @@ def _download_audio(url: str, workdir: str) -> tuple[str, dict, List[str]]:
 
 
 def _download_audio_with_pytube(url: str, workdir: str) -> tuple[str, dict]:
-    yt = PyTube(url)
-    audio_stream = yt.streams.filter(only_audio=True).order_by("abr").desc().first()
-    if not audio_stream:
-        raise RuntimeError("No audio streams available via PyTube.")
+    """Fallback download using PyTube with multiple quality attempts."""
+    try:
+        yt = PyTube(url)
 
-    filename = audio_stream.download(output_path=workdir)
-    if not filename or not os.path.exists(filename):
-        raise RuntimeError("PyTube failed to download the audio stream.")
+        # Try different stream options in order of preference for cloud compatibility
+        stream_attempts = [
+            # First try lowest quality audio (most likely to work in restricted environments)
+            lambda: yt.streams.filter(only_audio=True).order_by("abr").asc().first(),
+            # Then try any audio stream available
+            lambda: yt.streams.filter(only_audio=True).first(),
+            # Finally try lowest quality video with audio (as fallback)
+            lambda: yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').asc().first(),
+        ]
 
-    if os.path.getsize(filename) == 0:
-        raise RuntimeError("PyTube download produced an empty file.")
+        audio_stream = None
+        for attempt in stream_attempts:
+            try:
+                audio_stream = attempt()
+                if audio_stream:
+                    break
+            except Exception:
+                continue
 
-    info = {
-        "title": yt.title,
-        "uploader": yt.author,
-        "duration": yt.length,
-        "webpage_url": yt.watch_url,
-        "id": yt.video_id,
-    }
+        if not audio_stream:
+            raise RuntimeError("No compatible streams available via PyTube.")
 
-    return filename, info
+        filename = audio_stream.download(output_path=workdir)
+        if not filename or not os.path.exists(filename):
+            raise RuntimeError("PyTube failed to download the audio stream.")
+
+        if os.path.getsize(filename) == 0:
+            raise RuntimeError("PyTube download produced an empty file.")
+
+        info = {
+            "title": yt.title,
+            "uploader": yt.author,
+            "duration": yt.length,
+            "webpage_url": yt.watch_url,
+            "id": yt.video_id,
+        }
+
+        return filename, info
+
+    except Exception as e:
+        # Final fallback: try with simplified PyTube configuration
+        try:
+            yt = PyTube(url, use_oauth=False, allow_oauth_cache=False)
+            stream = yt.streams.first()  # Get any available stream
+            if not stream:
+                raise RuntimeError("No streams available at all.")
+
+            filename = stream.download(output_path=workdir)
+            if filename and os.path.exists(filename) and os.path.getsize(filename) > 0:
+                info = {
+                    "title": getattr(yt, 'title', 'Unknown'),
+                    "uploader": getattr(yt, 'author', 'Unknown'),
+                    "duration": getattr(yt, 'length', 0),
+                    "webpage_url": url,
+                    "id": getattr(yt, 'video_id', 'unknown'),
+                }
+                return filename, info
+
+        except Exception:
+            pass
+
+        raise RuntimeError(f"All PyTube fallback methods failed: {e}")
 
 
 def _read_file_in_chunks(filepath: str, chunk_size: int = CHUNK_SIZE):
@@ -245,7 +297,7 @@ def _segments_from_words(words: Optional[Iterable[dict]], max_duration: float = 
     segment_start = words[0]["start"] / 1000.0
     segment_end = segment_start
 
-    for idx, word in enumerate(words, start=1):
+    for word in words:
         token = word.get("text", "").strip()
         if not token:
             continue
@@ -427,6 +479,12 @@ def main() -> None:
     st.title("📺 YouTube Transcript Extractor")
     st.markdown("Download a YouTube video's audio, transcribe it with AssemblyAI, and save the results.")
 
+    # Show cloud platform warning
+    st.info(
+        "ℹ️ **Note**: YouTube downloads may be restricted on cloud platforms like Streamlit Community Cloud. "
+        "If you encounter download errors, try using different videos or run this app locally."
+    )
+
     if not ASSEMBLYAI_API_KEY:
         st.error("Missing ASSEMBLYAI_API_KEY in Streamlit secrets. Please configure it to continue.")
         return
@@ -514,7 +572,38 @@ def main() -> None:
                 except AudioDownloadError as exc:
                     st.session_state.yt_download_logs = exc.logs
                     _clear_transcript_outputs()
-                    st.error(f"Failed to download audio: {exc}")
+
+                    # Provide more helpful error message for cloud deployment issues
+                    error_msg = str(exc)
+                    if "403" in error_msg or "Forbidden" in error_msg:
+                        st.error(
+                            "⚠️ **YouTube Download Restricted**: The video download failed due to platform restrictions. "
+                            "This commonly happens on cloud platforms like Streamlit Community Cloud. "
+                            "Try using a different video or running this app locally."
+                        )
+                    elif "format" in error_msg.lower() and "available" in error_msg.lower():
+                        st.error(
+                            "⚠️ **Format Unavailable**: The requested video format is not available. "
+                            "This can happen with age-restricted, private, or region-locked videos. "
+                            "Try a different public video."
+                        )
+                    else:
+                        st.error(f"Failed to download audio: {exc}")
+
+                    # Show helpful tips
+                    with st.expander("💡 Troubleshooting Tips"):
+                        st.markdown("""
+                        **Common solutions:**
+                        - Try a different YouTube video (public, not age-restricted)
+                        - Ensure the video URL is correct and accessible
+                        - Some videos may be blocked in certain regions or platforms
+                        - For best results, run this app locally on your machine
+
+                        **Video requirements:**
+                        - Must be public (not private or unlisted)
+                        - Should not be age-restricted
+                        - Should not have regional restrictions
+                        """)
                     return
                 except Exception as exc:
                     _clear_transcript_outputs()

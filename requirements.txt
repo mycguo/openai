@@ -17,3 +17,5 @@ pypdf
 requests
 yt-dlp
 pytube
+claude-agent-sdk
+python-dotenv

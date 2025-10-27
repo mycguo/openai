@@ -175,15 +175,12 @@ def get_claude_options(model: str):
             ),
             "events_agent": AgentDefinition(
                 description="You are gathering incoming AI events in bay area. Asking for the input of how many days you want to check, search for sources from https://luma.com/sf, Meetup, eventbrite, startupgrind, Y combinator, 500 startups, Andreessen Horowitz (a16z), Stanford Events, Berkeley Events, LinkedIn Events, Silicon Valley Forum, Galvanize, StrictlyVC, Bay Area Tech Events, cerebralvalley.ai/events , you must include RSVP URL.",
-                prompt="You are searching for AI events in the next few days. Ask for how many days in advance. Gather the events, make sure to include event title, location and RSVP URL, don't include status. Display the events in UI in a friendly format.",
+                prompt="""You are searching for AI events in the next few days. Ask for how many days in advance. Gather the events, make sure to include event title, location and RSVP URL, don't include status.
+
+IMPORTANT: Display the events directly to the user in a friendly, well-formatted output. DO NOT write any files to disk. DO NOT create any documents or reports. Simply return the results as formatted text in your response.""",
                 model="sonnet",
                 tools=[
                     'Read',
-                    'Write',
-                    'Edit',
-                    'MultiEdit',
-                    'Grep',
-                    'Glob',
                     'TodoWrite',
                     'mcp__Playwright__browser_close',
                     'mcp__Playwright__browser_resize',
@@ -306,6 +303,63 @@ Always provide actionable insights and specific steps to fix the issues found.""
                     'mcp__chrome-devtools__take_screenshot',
                     'mcp__chrome-devtools__take_snapshot',
                 ]
+            ),
+            "ipo_agent": AgentDefinition(
+                description="An expert at tracking and analyzing AI companies planning to IPO soon in the United States. The agent will research upcoming IPOs and generate a list.",
+                prompt="""You are an expert financial analyst specializing in AI company IPOs in the United States.
+
+Your mission is to identify and analyze AI companies that are planning to go public soon in the US market.
+
+Research sources to check:
+- Financial news sites (Bloomberg, Reuters, CNBC, Wall Street Journal)
+- IPO tracking platforms (Renaissance Capital, IPO Calendar, Nasdaq IPO Calendar)
+- Tech news sources (TechCrunch, The Information, VentureBeat)
+- SEC filings (S-1 filings, IPO registrations)
+
+
+For each AI company planning to IPO, gather:
+1. Company name and description
+2. Estimated IPO timeline (month/quarter/year)
+
+Research methodology:
+1. Start with web searches for "AI companies IPO 2025", "upcoming AI IPOs", "AI startups going public"
+2. Check major IPO tracking websites and financial news sources
+3. Search for recent S-1 filings and IPO announcements
+4. Cross-reference multiple sources to verify information
+5. Focus on companies with concrete IPO plans (not just speculation)
+""",
+                model="sonnet",
+                tools=[
+                    'Read',
+                    'Write',
+                    'Edit',
+                    'MultiEdit',
+                    'Grep',
+                    'Glob',
+                    'TodoWrite',
+                    'WebSearch',
+                    'WebFetch',
+                    # Playwright tools for accessing IPO tracking websites
+                    'mcp__Playwright__browser_close',
+                    'mcp__Playwright__browser_resize',
+                    'mcp__Playwright__browser_console_messages',
+                    'mcp__Playwright__browser_handle_dialog',
+                    'mcp__Playwright__browser_evaluate',
+                    'mcp__Playwright__browser_fill_form',
+                    'mcp__Playwright__browser_install',
+                    'mcp__Playwright__browser_press_key',
+                    'mcp__Playwright__browser_type',
+                    'mcp__Playwright__browser_navigate',
+                    'mcp__Playwright__browser_navigate_back',
+                    'mcp__Playwright__browser_network_requests',
+                    'mcp__Playwright__browser_take_screenshot',
+                    'mcp__Playwright__browser_snapshot',
+                    'mcp__Playwright__browser_click',
+                    'mcp__Playwright__browser_hover',
+                    'mcp__Playwright__browser_select_option',
+                    'mcp__Playwright__browser_tabs',
+                    'mcp__Playwright__browser_wait_for',
+                ]
             )
         },
         # Note: Playwright requires Node.js and Chrome to be installed!
@@ -403,6 +457,7 @@ with st.sidebar:
     - **documentation-writer**: Creates technical documentation
     - **events_agent**: Gathers upcoming AI events in the Bay Area
     - **debug_agent**: Debugs website issues with Chrome DevTools (performance analysis, network inspection, console errors, CPU/network emulation)
+    - **ipo_agent**: Tracks AI companies planning to IPO soon in the US market
     """)
 
     st.divider()

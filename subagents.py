@@ -174,10 +174,39 @@ def get_claude_options(model: str):
                 ]
             ),
             "events_agent": AgentDefinition(
-                description="You are gathering incoming AI events in bay area. Asking for the input of how many days you want to check, search for sources from https://luma.com/sf, Meetup, eventbrite, startupgrind, Y combinator, 500 startups, Andreessen Horowitz (a16z), Stanford Events, Berkeley Events, LinkedIn Events, Silicon Valley Forum, Galvanize, StrictlyVC, Bay Area Tech Events, cerebralvalley.ai/events , you must include RSVP URL.",
-                prompt="""You are searching for AI events in the next few days. Ask for how many days in advance. Gather the events, make sure to include event title, location and RSVP URL, don't include status.
+                description="You are gathering incoming AI events in bay area. Search for sources from https://luma.com/sf, Meetup, eventbrite, startupgrind, Y combinator, 500 startups, Andreessen Horowitz (a16z), Stanford Events, Berkeley Events, LinkedIn Events, Silicon Valley Forum, Galvanize, StrictlyVC, Bay Area Tech Events, cerebralvalley.ai/events. You must include RSVP URL.",
+                prompt="""You are an AI events researcher for the Bay Area. When the user specifies a time period (e.g., "next 9 days"), gather AI/tech events from multiple sources.
 
-IMPORTANT: Display the events directly to the user in a friendly, well-formatted output. DO NOT write any files to disk. DO NOT create any documents or reports. Simply return the results as formatted text in your response.""",
+**Your Task:**
+1. Use browser tools to scrape events from key sources:
+   - https://lu.ma/sf (primary source)
+   - https://cerebralvalley.ai/events
+   - Meetup, Eventbrite, Y Combinator events, a16z events
+
+2. For each event, extract:
+   - Event title
+   - Date and time
+   - Location (physical or virtual)
+   - RSVP/Registration URL
+
+3. **CRITICAL**: After gathering events, you MUST provide a text summary directly in your response. Format the results as a clean, readable list.
+
+**Output Format:**
+Present events in chronological order like this:
+
+## AI Events - [Date Range]
+
+**[Date] - [Event Title]**
+- Time: [Time]
+- Location: [Location]
+- RSVP: [URL]
+
+**DO NOT:**
+- Write to files or create documents
+- Just use tools without providing a text summary
+- Include event status fields
+
+**REMEMBER:** Always end your work by providing a formatted text response with all the events you found.""",
                 model="sonnet",
                 tools=[
                     'Read',
@@ -416,9 +445,15 @@ async def process_message(user_input: str, model: str):
     response_text = ""
     async for message in client.receive_response():
         # Log the message activity to console
+        logger.debug(f"Received message type: {type(message)}")
         if hasattr(message, 'content'):
+            logger.debug(f"Message has content, type: {type(message.content)}")
             if isinstance(message.content, list):
-                for content_block in message.content:
+                logger.debug(f"Content is list with {len(message.content)} items")
+                for i, content_block in enumerate(message.content):
+                    block_type = getattr(content_block, 'type', 'unknown')
+                    logger.debug(f"Content block {i}: type={block_type}")
+
                     # Log tool usage to console
                     if hasattr(content_block, 'type') and content_block.type == 'tool_use':
                         tool_name = getattr(content_block, 'name', 'unknown')
@@ -428,9 +463,15 @@ async def process_message(user_input: str, model: str):
 
                     # Extract text content
                     if hasattr(content_block, 'text'):
-                        response_text += content_block.text
+                        text_content = content_block.text
+                        logger.debug(f"Found text content, length: {len(text_content)}")
+                        response_text += text_content
             elif hasattr(message.content, 'text'):
-                response_text += message.content.text
+                text_content = message.content.text
+                logger.debug(f"Found text in content, length: {len(text_content)}")
+                response_text += text_content
+        else:
+            logger.debug(f"Message has no content attribute")
 
     logger.info(f"Response received, length: {len(response_text)} characters")
     return response_text

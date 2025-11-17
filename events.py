@@ -199,6 +199,95 @@ def generate_essay(combined_events_content=None):
         return False, None
 
 
+def generate_event_image(combined_events_content=None):
+    """Generate an image based on the events using OpenAI Images API with DALL-E 3"""
+    try:
+        if not combined_events_content:
+            return False, None, "No events data available. Please scrape events first."
+
+        # Extract key themes and event names from the events
+        # Create a simple, descriptive prompt for image generation
+        prompt_for_image = (
+            "Create a simple, clean image representing AI and tech events in San Francisco. "
+            "Include minimal text with words like 'AI Events', 'Tech Community', 'Innovation'. "
+            "The image should be modern, professional, and relate to technology and community gatherings. "
+            "Use a simple design with bold, readable text and tech-themed visual elements."
+        )
+
+        # Try to extract event names for more specific image
+        event_names = []
+        lines = combined_events_content.split('\n')
+        for line in lines:
+            # Look for event names in markdown bold format
+            bold_matches = re.findall(r'\*\*([^*]+)\*\*', line)
+            if bold_matches:
+                event_names.extend(bold_matches)
+
+        # Limit to first few event names to keep prompt simple
+        if event_names:
+            event_names_str = ", ".join(event_names[:3])
+            prompt_for_image = (
+                f"Create a simple, clean promotional image for AI tech events including: {event_names_str}. "
+                "Include minimal text with words like 'AI Events', 'Tech Community', 'San Francisco'. "
+                "The image should be modern, professional, and relate to technology and community gatherings. "
+                "Use a simple design with bold, readable text and tech-themed visual elements."
+            )
+
+        # Use OpenAI Images API with DALL-E 3
+        client = OpenAI(api_key=OPENAI_API_KEY)
+
+        try:
+            # Use DALL-E 3 for high-quality image generation
+            response = client.images.generate(
+                model="dall-e-3",
+                prompt=prompt_for_image,
+                size="1024x1024",
+                quality="standard",  # "standard" or "hd" - using standard to reduce cost
+                n=1,
+            )
+
+            # Extract image URL from response
+            if hasattr(response, 'data') and len(response.data) > 0:
+                image_url = response.data[0].url
+                print(f"✅ Image generated successfully with DALL-E 3")
+                return True, image_url, None
+            else:
+                error_msg = "DALL-E 3 returned empty response"
+                print(f"❌ {error_msg}")
+                return False, None, error_msg
+
+        except Exception as e:
+            error_str = str(e)
+            print(f"❌ DALL-E 3 error: {error_str}")
+
+            # Try DALL-E 2 as fallback (cheaper and more permissive)
+            try:
+                print("⚠️ Trying DALL-E 2 as fallback...")
+                response = client.images.generate(
+                    model="dall-e-2",
+                    prompt=prompt_for_image[:1000],  # DALL-E 2 has shorter prompt limits
+                    size="1024x1024",
+                    n=1,
+                )
+
+                if hasattr(response, 'data') and len(response.data) > 0:
+                    image_url = response.data[0].url
+                    print(f"✅ Image generated successfully with DALL-E 2")
+                    return True, image_url, None
+                else:
+                    return False, None, "Both DALL-E 3 and DALL-E 2 returned empty responses"
+
+            except Exception as e2:
+                fallback_error = str(e2)
+                print(f"❌ DALL-E 2 error: {fallback_error}")
+                return False, None, f"DALL-E 3 error: {error_str}. DALL-E 2 fallback error: {fallback_error}"
+
+    except Exception as e:
+        error_msg = f"Error generating image: {str(e)}"
+        print(f"❌ {error_msg}")
+        return False, None, error_msg
+
+
 def search_web_events(days=8):
     """Use web search to find AI events from multiple sources"""
     try:
@@ -797,7 +886,16 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                     if valid_events:
                         # Parse and sort all events chronologically
                         formatted_combined = parse_and_format_combined_events(valid_events)
-                        st.markdown("**All Events Combined (Chronological Order)**")
+                        
+                        # Header with copy button
+                        col_header1, col_header2 = st.columns([3, 1])
+                        with col_header1:
+                            st.markdown("**All Events Combined (Chronological Order)**")
+                        with col_header2:
+                            copy_clicked_1 = st.button("📋 Copy", key="copy_btn_1", use_container_width=True)
+                            if copy_clicked_1:
+                                st.session_state.show_copy_area_1 = True
+                                st.success("👆 Text area shown below - select all and copy!")
 
                         # Debug info
                         if not formatted_combined.strip():
@@ -808,7 +906,32 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                                 if events:
                                     st.text_area(f"Source {i+1} raw content (first 500 chars)", events[:500])
                         else:
-                            st.markdown(formatted_combined)
+                            # Display in collapsed expander by default
+                            with st.expander("📋 View Combined Events", expanded=False):
+                                st.markdown(formatted_combined)
+                            
+                            # Show copy text area if copy button was clicked or always show a compact version
+                            if st.session_state.get('show_copy_area_1', False) or copy_clicked_1:
+                                st.text_area(
+                                    "📋 Copy text (Select all: Cmd+A / Ctrl+A, then Copy: Cmd+C / Ctrl+C)",
+                                    value=formatted_combined,
+                                    height=300,
+                                    key="combined_events_text_1",
+                                    label_visibility="visible"
+                                )
+                                if st.button("✅ Done copying", key="done_copy_1"):
+                                    st.session_state.show_copy_area_1 = False
+                                    st.rerun()
+                            else:
+                                # Show a preview snippet
+                                st.text_area(
+                                    "📋 Click 'Copy' button above to show full text for copying",
+                                    value=formatted_combined[:200] + "\n\n... (click Copy button to see full text) ...",
+                                    height=100,
+                                    key="combined_events_preview_1",
+                                    label_visibility="visible",
+                                    disabled=True
+                                )
 
                         # Store combined events in session state for essay generation
                         st.session_state.combined_events = formatted_combined
@@ -854,10 +977,44 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
                 if valid_events:
                     formatted_combined = parse_and_format_combined_events(valid_events)
-                    st.markdown("**All Events Combined (Chronological Order)**")
+                    
+                    # Header with copy button
+                    col_header1, col_header2 = st.columns([3, 1])
+                    with col_header1:
+                        st.markdown("**All Events Combined (Chronological Order)**")
+                    with col_header2:
+                        copy_clicked_2 = st.button("📋 Copy", key="copy_btn_2", use_container_width=True)
+                        if copy_clicked_2:
+                            st.session_state.show_copy_area_2 = True
+                            st.success("👆 Text area shown below - select all and copy!")
 
                     if formatted_combined.strip():
-                        st.markdown(formatted_combined)
+                        # Display in collapsed expander by default
+                        with st.expander("📋 View Combined Events", expanded=False):
+                            st.markdown(formatted_combined)
+                        
+                        # Show copy text area if copy button was clicked
+                        if st.session_state.get('show_copy_area_2', False) or copy_clicked_2:
+                            st.text_area(
+                                "📋 Copy text (Select all: Cmd+A / Ctrl+A, then Copy: Cmd+C / Ctrl+C)",
+                                value=formatted_combined,
+                                height=300,
+                                key="combined_events_text_2",
+                                label_visibility="visible"
+                            )
+                            if st.button("✅ Done copying", key="done_copy_2"):
+                                st.session_state.show_copy_area_2 = False
+                                st.rerun()
+                        else:
+                            # Show a preview snippet
+                            st.text_area(
+                                "📋 Click 'Copy' button above to show full text for copying",
+                                value=formatted_combined[:200] + "\n\n... (click Copy button to see full text) ...",
+                                height=100,
+                                key="combined_events_preview_2",
+                                label_visibility="visible",
+                                disabled=True
+                            )
                         # Store combined events for essay generation
                         st.session_state.combined_events = formatted_combined
                     else:
@@ -888,10 +1045,44 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
                 if valid_events:
                     formatted_combined = parse_and_format_combined_events(valid_events)
-                    st.markdown("**All Events Combined (Chronological Order)**")
+                    
+                    # Header with copy button
+                    col_header1, col_header2 = st.columns([3, 1])
+                    with col_header1:
+                        st.markdown("**All Events Combined (Chronological Order)**")
+                    with col_header2:
+                        copy_clicked_3 = st.button("📋 Copy", key="copy_btn_3", use_container_width=True)
+                        if copy_clicked_3:
+                            st.session_state.show_copy_area_3 = True
+                            st.success("👆 Text area shown below - select all and copy!")
 
                     if formatted_combined.strip():
-                        st.markdown(formatted_combined)
+                        # Display in collapsed expander by default
+                        with st.expander("📋 View Combined Events", expanded=False):
+                            st.markdown(formatted_combined)
+                        
+                        # Show copy text area if copy button was clicked
+                        if st.session_state.get('show_copy_area_3', False) or copy_clicked_3:
+                            st.text_area(
+                                "📋 Copy text (Select all: Cmd+A / Ctrl+A, then Copy: Cmd+C / Ctrl+C)",
+                                value=formatted_combined,
+                                height=300,
+                                key="combined_events_text_3",
+                                label_visibility="visible"
+                            )
+                            if st.button("✅ Done copying", key="done_copy_3"):
+                                st.session_state.show_copy_area_3 = False
+                                st.rerun()
+                        else:
+                            # Show a preview snippet
+                            st.text_area(
+                                "📋 Click 'Copy' button above to show full text for copying",
+                                value=formatted_combined[:200] + "\n\n... (click Copy button to see full text) ...",
+                                height=100,
+                                key="combined_events_preview_3",
+                                label_visibility="visible",
+                                disabled=True
+                            )
                         # Store combined events for essay generation
                         st.session_state.combined_events = formatted_combined
                     else:
@@ -964,7 +1155,80 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         st.info("📋 Please scrape events first using 'Scrape All Sources' to generate an essay.")
         st.button("Generate Essay from Scraped Events", key="essay_button", disabled=True)
 
+    st.divider()
 
+    # Add image generation section
+    st.subheader("🎨 Image Generation")
+    st.write("Generate a promotional image based on the scraped events using OpenAI's image generation API")
+
+    # Check if we have combined events data in session state
+    if 'combined_events' in st.session_state:
+        col_img1, col_img2 = st.columns([1, 1])
+        
+        with col_img1:
+            button_image = st.button("Generate Event Image", key="image_button", type="primary")
+        
+        with col_img2:
+            if 'generated_image_url' in st.session_state:
+                st.success("✅ Image generated! Displayed below.")
+        
+        if button_image:
+            with st.spinner("Generating image from events..."):
+                success, image_url, error = generate_event_image(st.session_state.combined_events)
+                
+                if success and image_url:
+                    # Store image URL in session state
+                    st.session_state.generated_image_url = image_url
+                    st.success("✅ Image generated successfully!")
+                    
+                    # Display the image
+                    st.markdown("### Generated Image")
+                    st.image(image_url, caption="AI Events Promotional Image", use_container_width=True)
+                    
+                    # Add download option
+                    try:
+                        import requests
+                        response = requests.get(image_url)
+                        if response.status_code == 200:
+                            st.download_button(
+                                "Download Image",
+                                data=response.content,
+                                file_name="ai_events_image.png",
+                                mime="image/png",
+                                help="Download the generated image"
+                            )
+                    except Exception as e:
+                        st.info(f"Image URL: {image_url}")
+                        st.warning(f"Could not download image directly: {str(e)}")
+                else:
+                    error_msg = error or "Failed to generate image"
+                    st.error(f"❌ {error_msg}")
+                    
+                    # Show more detailed error information
+                    with st.expander("🔍 Error Details", expanded=False):
+                        st.code(error_msg, language="text")
+                        st.markdown("""
+                        **Troubleshooting:**
+                        - Make sure your OpenAI API key has access to image generation
+                        - Check if you have sufficient API credits
+                        - Verify that the `gpt-image-1` or `dall-e-3` models are available in your account
+                        - Try checking OpenAI's API status page
+                        """)
+                    
+                    st.info("💡 Tip: Make sure you have access to OpenAI's image generation API (gpt-image-1 or DALL-E)")
+    else:
+        st.info("📋 Please scrape events first using 'Scrape All Sources' to generate an image.")
+        st.button("Generate Event Image", key="image_button", disabled=True)
+    
+    # Display previously generated image if available
+    if 'generated_image_url' in st.session_state and st.session_state.generated_image_url:
+        st.divider()
+        st.subheader("🖼️ Previously Generated Image")
+        st.image(
+            st.session_state.generated_image_url, 
+            caption="AI Events Promotional Image", 
+            use_container_width=True
+        )
 
 
 if __name__ == "__main__":

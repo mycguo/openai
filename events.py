@@ -54,7 +54,7 @@ Event URL: [ACTUAL URL - click on event to get the full URL like https://lu.ma/e
 IMPORTANT:
 - For Event URL, you MUST click on each event or extract the href attribute to get the ACTUAL URL
 - Never use "Link" as the URL - always get the real URL like https://lu.ma/xyz or https://cerebralvalley.ai/events/abc
-- Stop scrolling once you have events for {days} days or after 3 scrolls maximum.""".format(days=days)
+- Stop scrolling once you have events for {days} days or after 3 scrolls maximum (scroll 3 times total).""".format(days=days)
 
     # Task to scrape events
     task = f"""Go to {url} and extract AI/GenAI event information for the next {days} days.
@@ -62,17 +62,17 @@ IMPORTANT:
     CRITICAL INSTRUCTIONS:
     1. Load the page
     2. Extract ALL visible events from the current view with their ACTUAL URLs (not "Link")
-    3. Scroll down MAXIMUM 2 times to see more events
+    3. Scroll down MAXIMUM 3 times to see more events
     4. Extract any additional events for the next {days} days
-    5. STOP IMMEDIATELY - do not scroll more than 2 times total
+    5. STOP IMMEDIATELY - do not scroll more than 3 times total
     6. Return all collected events
 
     STOP CONDITIONS:
-    - After 2 scrolls maximum
+    - After 3 scrolls maximum
     - When you have events for the next {days} days
     - When no new events appear after scrolling
 
-    DO NOT CONTINUE SCROLLING BEYOND 2 SCROLLS. STOP AND RETURN RESULTS.
+    DO NOT CONTINUE SCROLLING BEYOND 3 SCROLLS. STOP AND RETURN RESULTS.
 
     For each event, extract:
     - Event Name

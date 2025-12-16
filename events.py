@@ -49,11 +49,11 @@ Event Name: [Name]
 Date and Time: [Date and Time]
 Location/Venue: [Venue/Address]
 Brief Description: [Brief description including organizer/host]
-Event URL: [ACTUAL URL - click on event to get the full URL like https://lu.ma/event-name, NOT just "Link"]
+Event URL: [ACTUAL URL - click on event to get the full URL like https://luma.com/event-name, NOT just "Link"]
 
 IMPORTANT:
 - For Event URL, you MUST click on each event or extract the href attribute to get the ACTUAL URL
-- Never use "Link" as the URL - always get the real URL like https://lu.ma/xyz or https://cerebralvalley.ai/events/abc
+- Never use "Link" as the URL - always get the real URL like https://luma.com/xyz or https://cerebralvalley.ai/events/abc
 - Stop scrolling once you have events for {days} days or after 3 scrolls maximum (scroll 3 times total).""".format(days=days)
 
     # Task to scrape events
@@ -79,7 +79,7 @@ IMPORTANT:
     - Date and Time
     - Location/Venue
     - Brief Description
-    - Event URL (can be relative path)
+    - Event URL (must be full URL like https://luma.com/event-id)
 
     """
 
@@ -488,7 +488,7 @@ def clean_event_content(content):
 
 
 def fix_relative_urls(link_line):
-    """Convert relative URLs to full lu.ma URLs"""
+    """Convert relative URLs to full luma.com URLs"""
     import re
 
     # Pattern to match various URL formats in Link: lines
@@ -504,22 +504,22 @@ def fix_relative_urls(link_line):
         match = re.search(pattern, link_line)
         if match:
             url_part = match.group(1).strip()  # Remove any extra whitespace
-            # Convert to full lu.ma URL
+            # Convert to full luma.com URL
             if url_part.startswith('/'):
                 # Relative path
-                full_url = f"https://lu.ma{url_part}"
+                full_url = f"https://luma.com{url_part}"
             elif 'example.com' in url_part:
-                # Replace example.com with lu.ma
+                # Replace example.com with luma.com
                 event_id = url_part.split('/')[-1]
-                full_url = f"https://lu.ma/{event_id}"
+                full_url = f"https://luma.com/{event_id}"
             elif not url_part.startswith('http'):
                 # Just a slug
-                full_url = f"https://lu.ma/{url_part}"
+                full_url = f"https://luma.com/{url_part}"
             else:
                 # Already a full URL, but check if it needs hostname replacement
                 if 'example.com' in url_part:
                     event_id = url_part.split('/')[-1]
-                    full_url = f"https://lu.ma/{event_id}"
+                    full_url = f"https://luma.com/{event_id}"
                 else:
                     full_url = url_part
 
@@ -604,7 +604,7 @@ IMPORTANT:
         return f"Error combining events: {str(e)}"
 
 
-def fix_example_com_urls(line, base_url="https://lu.ma"):
+def fix_example_com_urls(line, base_url="https://luma.com"):
     """Replace example.com URLs and relative URLs with proper base URLs"""
     import re
 
@@ -619,8 +619,8 @@ def fix_example_com_urls(line, base_url="https://lu.ma"):
         link_text = match.group(1)
         url = match.group(2)
         event_id = url.split('/')[-1].strip()
-        # For lu.ma, use just the ID; for others, might need /events/ prefix
-        if base_url == "https://lu.ma":
+        # For luma.com, use just the ID; for others, might need /events/ prefix
+        if base_url == "https://luma.com":
             return f'[{link_text}]({base_url}/{event_id})'
         else:
             return f'[{link_text}]({base_url}/events/{event_id})'
@@ -633,8 +633,8 @@ def fix_example_com_urls(line, base_url="https://lu.ma"):
     def replace_relative_url(match):
         link_text = match.group(1)
         path = match.group(2)
-        # For lu.ma, remove leading slash; for others, keep the path structure
-        if base_url == "https://lu.ma":
+        # For luma.com, remove leading slash; for others, keep the path structure
+        if base_url == "https://luma.com":
             event_id = path.lstrip('/')
             return f'[{link_text}]({base_url}/{event_id})'
         else:
@@ -644,16 +644,16 @@ def fix_example_com_urls(line, base_url="https://lu.ma"):
 
     # Pattern 3: Plain example.com URLs
     plain_example = r'https://example\.com/([^\s\)]+)'
-    if base_url == "https://lu.ma":
-        fixed_line = re.sub(plain_example, r'https://lu.ma/\1', fixed_line)
+    if base_url == "https://luma.com":
+        fixed_line = re.sub(plain_example, r'https://luma.com/\1', fixed_line)
     else:
         fixed_line = re.sub(plain_example, base_url + r'/events/\1', fixed_line)
 
     # Pattern 4: Plain relative paths in Link: lines
     if 'Link:' in fixed_line or '**Link:**' in fixed_line:
         plain_relative = r'(\*\*Link:\*\*|\bLink:)\s*(/[^\s]+)'
-        if base_url == "https://lu.ma":
-            fixed_line = re.sub(plain_relative, r'\1 https://lu.ma\2', fixed_line)
+        if base_url == "https://luma.com":
+            fixed_line = re.sub(plain_relative, r'\1 https://luma.com\2', fixed_line)
         else:
             fixed_line = re.sub(plain_relative, r'\1 ' + base_url + r'\2', fixed_line)
 

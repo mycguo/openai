@@ -179,7 +179,7 @@ def get_claude_options(model: str):
 
 **Your Task:**
 1. Use browser tools to scrape events from key sources:
-   - https://lu.ma/sf (primary source)
+   - https://luma.com/sf (primary source)
    - https://cerebralvalley.ai/events
    - Meetup, Eventbrite, Y Combinator events, a16z events
 

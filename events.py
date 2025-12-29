@@ -20,8 +20,8 @@ def generate_from_openai(prompt: str, temperature: float = 0.0, max_tokens: int 
 
 
 # ─── Main features ─────────────────────────────────────────────────
-async def scrape_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI SF", days=8):
-    """Use browser-use to scrape events from lu.ma/genai-sf"""
+async def scrape_events(url="https://luma.com/genai-sf?k=c", source_name="Lu.ma GenAI SF", days=8):
+    """Use browser-use to scrape events from luma.com/genai-sf"""
     from browser_use import ChatOpenAI
     from browser_use.agent.service import Agent
     from browser_use.browser import BrowserProfile, BrowserSession
@@ -362,7 +362,7 @@ Search Results:
         return None
 
 
-def generate_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI SF", days=8):
+def generate_events(url="https://luma.com/genai-sf?k=c", source_name="Lu.ma GenAI SF", days=8):
     """Go to specified URL and get the events for the specified number of days"""
     try:
         # Run the async scraping function
@@ -476,7 +476,7 @@ def clean_event_content(content):
     # Remove extra whitespace and normalize line breaks
     lines = [line.strip() for line in content.split('\n') if line.strip()]
 
-    # Fix relative URLs to use full lu.ma URLs
+    # Fix relative URLs to use full luma.com URLs
     fixed_lines = []
     for line in lines:
         # Check for any URLs that need fixing (example.com or relative paths)
@@ -594,7 +594,7 @@ Additional rules:
 
 IMPORTANT:
 - Combine ALL events from all sources into a single unified list, not separate sections.
-- Show actual URLs directly (e.g., https://lu.ma/event-name), never just show "Link"
+- Show actual URLs directly (e.g., https://luma.com/event-name), never just show "Link"
 - If a URL appears as "[text](url)" markdown format, extract and show just the URL"""
 
     try:
@@ -692,7 +692,7 @@ def main():
         button1 = st.button("Scrape Lu.ma GenAI SF", key="luma_button")
         if button1:
             with st.spinner("Scraping Lu.ma events..."):
-                success, events = generate_events("https://lu.ma/genai-sf?k=c", "Lu.ma GenAI SF", days_to_scrape)
+                success, events = generate_events("https://luma.com/genai-sf?k=c", "Lu.ma GenAI SF", days_to_scrape)
                 if success:
                     st.success("✅ Lu.ma events scraped successfully!")
                 else:
@@ -774,7 +774,7 @@ Startup Grind Conference 2025 - https://www.startupgrind.com/events/details/star
 
             # Scrape Lu.ma
             st.write("1️⃣ Scraping Lu.ma...")
-            success, events = generate_events("https://lu.ma/genai-sf?k=c", "Lu.ma GenAI SF", days_to_scrape)
+            success, events = generate_events("https://luma.com/genai-sf?k=c", "Lu.ma GenAI SF", days_to_scrape)
             if success:
                 success_count += 1
                 luma_events = events

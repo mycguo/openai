@@ -49,11 +49,15 @@ Event Name: [Name]
 Date and Time: [Date and Time]
 Location/Venue: [Venue/Address]
 Brief Description: [Brief description including organizer/host]
-Event URL: [ACTUAL URL - click on event to get the full URL like https://luma.com/event-name, NOT just "Link"]
+Event URL: [ACTUAL URL]
 
-IMPORTANT:
-- For Event URL, you MUST click on each event or extract the href attribute to get the ACTUAL URL
-- Never use "Link" as the URL - always get the real URL like https://luma.com/xyz or https://cerebralvalley.ai/events/abc
+CRITICAL URL EXTRACTION RULES:
+- You MUST extract the actual clickable URL (href attribute) for each event
+- On Luma.com: Find the <a> tag around the event title/card and extract its href (e.g., href="/genai-vc-soiree-pv78gj2s" → https://lu.ma/genai-vc-soiree-pv78gj2s)
+- On Cerebral Valley: Extract the full event URL from the event link (e.g., href="/events/ai-summit-2024")
+- NEVER write "Link", "Not provided", or leave URL blank - always extract the actual href value
+- If href is relative (starts with /), prepend the base domain (https://lu.ma for Luma, https://cerebralvalley.ai for Cerebral Valley)
+- Use browser inspection or DOM queries to get href attributes - do NOT just copy visible text
 - Stop scrolling once you have events for {days} days or after 3 scrolls maximum (scroll 3 times total).""".format(days=days)
 
     # Task to scrape events
@@ -61,7 +65,15 @@ IMPORTANT:
 
     CRITICAL INSTRUCTIONS:
     1. Load the page
-    2. Extract ALL visible events from the current view with their ACTUAL URLs (not "Link")
+    2. For EACH visible event, inspect the DOM to extract:
+       - Event Name (visible text)
+       - Date and Time (visible text)
+       - Location/Venue (visible text)
+       - Brief Description (visible text)
+       - Event URL: Find the <a> tag/link element and extract the href attribute value
+         * If href starts with "/", prepend the base domain (https://lu.ma for Luma, https://cerebralvalley.ai for others)
+         * If href is already a full URL, use it as-is
+         * Example: href="/genai-event" → https://lu.ma/genai-event
     3. Scroll down MAXIMUM 3 times to see more events
     4. Extract any additional events for the next {days} days
     5. STOP IMMEDIATELY - do not scroll more than 3 times total
@@ -74,12 +86,10 @@ IMPORTANT:
 
     DO NOT CONTINUE SCROLLING BEYOND 3 SCROLLS. STOP AND RETURN RESULTS.
 
-    For each event, extract:
-    - Event Name
-    - Date and Time
-    - Location/Venue
-    - Brief Description
-    - Event URL (must be full URL like https://luma.com/event-id)
+    URL EXTRACTION IS CRITICAL:
+    - NEVER write "Link", "Not provided", or "example.com" for Event URL
+    - ALWAYS extract the actual href attribute from the event's clickable link
+    - If you cannot find an href, write "URL extraction failed" but try your best to find it first
 
     """
 
@@ -120,7 +130,8 @@ def _extract_event_links(events_block: str):
     if not events_block:
         return []
 
-    pattern = re.compile(r"\*\*(?P<name>[^*]+)\*\*.*?Sign-up URL:\s*(?P<url>https?://\S+)", re.DOTALL)
+    # Try "Event URL:" first (new format), then fall back to "Sign-up URL:" (legacy)
+    pattern = re.compile(r"\*\*(?P<name>[^*]+)\*\*.*?(?:Event URL|Sign-up URL):\s*(?P<url>https?://\S+)", re.DOTALL)
     matches = []
     for match in pattern.finditer(events_block):
         name = match.group("name").strip()
@@ -128,11 +139,11 @@ def _extract_event_links(events_block: str):
         if name and url:
             matches.append((name, url))
 
-    # Fallback: look for less-structured "Sign-up URL" lines and capture the preceding line as the name
+    # Fallback: look for less-structured "Event URL" or "Sign-up URL" lines and capture the preceding line as the name
     if not matches:
         lines = events_block.splitlines()
         for idx, line in enumerate(lines):
-            if "Sign-up URL:" in line:
+            if "Event URL:" in line or "Sign-up URL:" in line:
                 url_match = re.search(r"(https?://\S+)", line)
                 if not url_match:
                     continue
@@ -175,7 +186,7 @@ def generate_essay(combined_events_content=None):
             prompt = (
                 "Generate an engaging essay about the upcoming AI events using the provided information. "
                 "Write in a way that encourages readers to attend these events and highlights the exciting opportunities in the AI community. "
-                "Every time you mention an event by name, immediately include its sign-up URL in parentheses right after the event name, e.g., 'AI Summit (https://example.com)'. "
+                "Every time you mention an event by name, immediately include its event URL in parentheses right after the event name, e.g., 'AI Summit (https://lu.ma/ai-summit-2024)'. "
                 "Do not reference an event without its URL, and only use URLs supplied below or in the source content.\n\n"
                 f"{links_guidance}"
                 f"Event source material:\n{selected}"
@@ -336,7 +347,7 @@ Event Name: [Name]
 Date and Time: [Date and Time]
 Location/Venue: [Venue/Address]
 Brief Description: [Brief description including organizer/host]
-Event URL: [URL if available]
+Event URL: [Full URL - extract from search results, NEVER use "Not provided" or leave blank]
 
 Sources to prioritize: {sources_str}
 
@@ -345,6 +356,8 @@ Only include events that are:
 2. In the San Francisco Bay Area or virtual
 3. Within the next {days} days
 4. From the specified sources
+
+CRITICAL: For Event URL, extract the actual URL from the search results. NEVER write "Not provided" or leave it blank.
 
 Search Results:
 {search_results}
@@ -563,13 +576,13 @@ CRITICAL: Use EXACTLY this format with NEWLINES after each field:
    Time: [Time or "Time TBD"]
    Location: [Location]
    Host: [Host organization or description]
-   Sign-up URL: [URL]
+   Event URL: [Full URL - e.g., https://lu.ma/event-id]
 
 2. **[Next Event Name]**
    Time: [Time]
    Location: [Location]
    Host: [Host]
-   Sign-up URL: [URL]
+   Event URL: [Full URL]
 
 ABSOLUTELY REQUIRED:
 - Put each field on a NEW LINE (press Enter after each field)
@@ -582,20 +595,23 @@ Example of CORRECT formatting:
    Time: 10:00 AM
    Location: San Francisco, CA
    Host: Tech Organization
-   Sign-up URL: https://example.com/event
+   Event URL: https://lu.ma/ai-summit-2024
 
 Example of WRONG formatting (DO NOT DO THIS):
-1. **AI Summit 2024** Time: 10:00 AM Location: San Francisco, CA Host: Tech Organization Sign-up URL: https://example.com/event
+1. **AI Summit 2024** Time: 10:00 AM Location: San Francisco, CA Host: Tech Organization Event URL: https://lu.ma/event
 
 Additional rules:
 - Group all events by date, sort dates chronologically
 - Combine events from ALL sources into single date groups
-- Extract actual URLs, never show just "Link"
+- Extract actual URLs, never show just "Link" or "Not provided"
+- If Event URL field is missing or shows "Link"/"Not provided", look for the URL elsewhere in the event data
 
-IMPORTANT:
+CRITICAL URL HANDLING:
 - Combine ALL events from all sources into a single unified list, not separate sections.
-- Show actual URLs directly (e.g., https://luma.com/event-name), never just show "Link"
-- If a URL appears as "[text](url)" markdown format, extract and show just the URL"""
+- Show actual URLs directly (e.g., https://lu.ma/event-name or https://cerebralvalley.ai/events/event-name)
+- NEVER write "Link", "Not provided", "example.com", or leave Event URL blank
+- If a URL appears as "[text](url)" markdown format, extract and show just the URL
+- If source data has "Event URL:" extract that value; preserve all actual URLs from source data"""
 
     try:
         result = generate_from_openai(combined_text + "\n\n" + prompt, temperature=0.1, max_tokens=3000)

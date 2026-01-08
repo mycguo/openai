@@ -30,11 +30,36 @@ async def scrape_events(url="https://luma.com/genai-sf?k=c", source_name="Lu.ma 
     # Ensure API key is in environment
     os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
+    # Configure Playwright to use system chromium on Streamlit Cloud
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+    os.environ["PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"] = "1"
+
+    # Try to find system chromium executable (for Streamlit Cloud)
+    chromium_paths = [
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable"
+    ]
+
+    chromium_executable = None
+    for path in chromium_paths:
+        if os.path.exists(path):
+            chromium_executable = path
+            os.environ["CHROME_PATH"] = path
+            os.environ["PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"] = path
+            print(f"✅ Found system Chromium at: {path}")
+            break
+
+    if not chromium_executable:
+        print("⚠️ System Chromium not found, using Playwright's bundled browser")
+        print(f"Checked paths: {chromium_paths}")
+
     # Set up browser session
     browser_session = BrowserSession(
         browser_profile=BrowserProfile(
             keep_alive=False,
-            headless=True,  # Show browser window during scraping
+            headless=True,
             record_video_dir=None,
         )
     )

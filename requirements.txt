@@ -3,7 +3,8 @@ streamlit
 google-api-python-client
 google-auth
 browser-use
-playwright
+playwright>=1.48.0
+playwright-stealth
 langchain-openai
 PyPDF2
 beautifulsoup4

@@ -1,33 +1,160 @@
+import logging
 import os
 import re
-from openai import OpenAI
-import streamlit as st
-from openai import AsyncOpenAI
 import asyncio
 from datetime import datetime, timedelta
+from typing import List, Optional
+
+import streamlit as st
+from openai import OpenAI
+
+logger = logging.getLogger(__name__)
+
+_browser_use_file_patch_applied = False
+
+
+def _disable_browser_use_file_saving() -> None:
+    """Monkey patch browser_use FileSystem to avoid disk writes for extracted content."""
+    global _browser_use_file_patch_applied
+    if _browser_use_file_patch_applied:
+        return
+
+    try:
+        from browser_use.filesystem import file_system as browser_file_system
+    except Exception:  # noqa: BLE001
+        return
+
+    original_method = browser_file_system.FileSystem.save_extracted_content
+
+    async def _log_only_save(self, content: str) -> str:  # type: ignore[override]
+        entry_number = self.extracted_content_count
+        logger.info(
+            "Captured extracted content #%s (%s chars). Logging only, skipping disk write.",
+            entry_number,
+            len(content),
+        )
+        logger.debug("Extracted content #%s:\n%s", entry_number, content)
+        self.extracted_content_count += 1
+        return (
+            f"Extracted content logged as entry #{entry_number}. "
+            "Disk writes are disabled."
+        )
+
+    browser_file_system.FileSystem.save_extracted_content = _log_only_save  # type: ignore[assignment]
+    browser_file_system._original_save_extracted_content = original_method  # type: ignore[attr-defined]
+    _browser_use_file_patch_applied = True
 
 
 # ─── Configuration ────────────────────────────────────────────────
-OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-MODEL = "gpt-3.5-turbo"
+OPENAI_API_KEY = (
+    st.secrets.get("OPENAI_API_KEY")
+    or os.getenv("OPENAI_API_KEY")
+)
+CONFIGURED_GPT_MODEL = (
+    st.secrets.get("GPT_MODEL")
+    or os.getenv("GPT_MODEL")
+)
+DEFAULT_GPT_MODELS: List[str] = [
+    CONFIGURED_GPT_MODEL,
+    "gpt-5",
+    "gpt-5-turbo",
+    "gpt-4o",
+    "gpt-4-turbo",
+]
+DALLE_MODEL = "dall-e-3"
 
-def generate_from_openai(prompt: str, temperature: float = 0.0, max_tokens: int = 2060) -> str:
-    """Calls ChatCompletions and returns the assistant's reply."""
-    client = OpenAI()
-    completion = client.chat.completions.create(model=MODEL,
-        messages=[{"role": "user", "content": prompt}], temperature=temperature, max_tokens=max_tokens)
-    return completion.choices[0].message.content.strip()
+if OPENAI_API_KEY:
+    os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+
+
+def _gpt_model_candidates() -> List[str]:
+    candidates: List[str] = []
+    seen = set()
+    for model_name in DEFAULT_GPT_MODELS:
+        if not model_name:
+            continue
+        if model_name in seen:
+            continue
+        seen.add(model_name)
+        candidates.append(model_name)
+    return candidates
+
+
+def _is_model_unavailable_error(error: Exception) -> bool:
+    message = str(error).lower()
+    return "not found" in message or "does not exist" in message or "not supported" in message
+
+
+@st.cache_resource
+def get_resolved_gpt_model() -> str:
+    client = _create_openai_client()
+    last_error: Optional[Exception] = None
+    for candidate in _gpt_model_candidates():
+        try:
+            # Try to use the model with a simple test
+            client.chat.completions.create(
+                model=candidate,
+                messages=[{"role": "user", "content": "test"}],
+                max_tokens=1
+            )
+            logger.info("Using GPT model: %s", candidate)
+            return candidate
+        except Exception as exc:  # noqa: BLE001
+            if _is_model_unavailable_error(exc):
+                logger.warning("GPT model unavailable: %s (%s)", candidate, exc)
+                last_error = exc
+                continue
+            # If it's a different error, the model exists but request failed for other reasons
+            # Still return this model as it's available
+            logger.info("Using GPT model: %s (validated)", candidate)
+            return candidate
+
+    raise RuntimeError(
+        "No supported GPT model available. Set GPT_MODEL to a supported ID or check your OpenAI API access."
+    ) from last_error
+
+
+@st.cache_resource
+def _create_openai_client() -> OpenAI:
+    if not OPENAI_API_KEY:
+        raise RuntimeError(
+            "OpenAI API key is not configured. Set OPENAI_API_KEY in secrets or env."
+        )
+    return OpenAI(api_key=OPENAI_API_KEY)
+
+
+def generate_with_gpt(prompt: str, temperature: float = 0.0, max_tokens: int = 2060) -> str:
+    """Call OpenAI GPT API and return the text output."""
+    client = _create_openai_client()
+    model_name = get_resolved_gpt_model()
+
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+    if response.choices and len(response.choices) > 0:
+        return response.choices[0].message.content.strip()
+
+    raise RuntimeError("OpenAI response did not contain text output")
 
 
 # ─── Main features ─────────────────────────────────────────────────
 async def scrape_events(url="https://luma.com/genai-sf?k=c", source_name="Lu.ma GenAI SF", days=8):
     """Use browser-use to scrape events from luma.com/genai-sf"""
-    from browser_use import ChatOpenAI
+    from browser_use.llm.openai.chat import ChatOpenAI
     from browser_use.agent.service import Agent
     from browser_use.browser import BrowserProfile, BrowserSession
     import os
 
-    # Ensure API key is in environment
+    _disable_browser_use_file_saving()
+
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OpenAI API key not configured for scraping")
+
+    # Ensure API key is in environment for downstream libraries
     os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
     # Configure Playwright to use system chromium on Streamlit Cloud
@@ -64,8 +191,13 @@ async def scrape_events(url="https://luma.com/genai-sf?k=c", source_name="Lu.ma 
         )
     )
 
-    # Set up the LLM using browser_use's ChatOpenAI
-    llm = ChatOpenAI(model='gpt-4o-mini')
+    # Set up the LLM using browser-use's ChatOpenAI with GPT
+    resolved_model = get_resolved_gpt_model()
+    llm = ChatOpenAI(
+        model=resolved_model,
+        api_key=OPENAI_API_KEY,
+        temperature=0.2,
+    )
 
     # System prompt for formatting
     system_prompt = """You are extracting event information. Format events as:
@@ -77,46 +209,69 @@ Brief Description: [Brief description including organizer/host]
 Event URL: [ACTUAL URL]
 
 CRITICAL URL EXTRACTION RULES:
-- You MUST extract the actual clickable URL (href attribute) for each event
-- On Luma.com: Find the <a> tag around the event title/card and extract its href (e.g., href="/genai-vc-soiree-pv78gj2s" → https://lu.ma/genai-vc-soiree-pv78gj2s)
-- On Cerebral Valley: Extract the full event URL from the event link (e.g., href="/events/ai-summit-2024")
-- NEVER write "Link", "Not provided", or leave URL blank - always extract the actual href value
-- If href is relative (starts with /), prepend the base domain (https://lu.ma for Luma, https://cerebralvalley.ai for Cerebral Valley)
-- Use browser inspection or DOM queries to get href attributes - do NOT just copy visible text
-- Stop scrolling once you have events for {days} days or after 3 scrolls maximum (scroll 3 times total).""".format(days=days)
+- Each event card is clickable - you MUST find and extract the href attribute from the <a> tag that wraps the event
+- ONLY treat <a> tags whose href contains "/event/" as event entries. Ignore navigation, sign-in, footer, or map attribution links.
+- Use JavaScript evaluation or DOM queries to get the href: document.querySelector('a[href*="/event/"]').href
+- ALWAYS call the run_javascript action to execute the provided snippet and capture the exact href/title pairs. Do NOT pass the snippet to extract_structured_data.
+- After running run_javascript, inspect the returned JSON and log each href you plan to use. If you do not see href values, re-run run_javascript with a corrected selector before continuing.
+- On Luma.com: URLs are in format https://lu.ma/event-slug-abc123
+- The href might be relative (e.g., /event-slug) - prepend https://lu.ma if needed
+- NEVER write "Link", "Not provided", or "URL extraction failed"
+- You have access to browser automation - use it to inspect elements and get exact URLs"""
 
     # Task to scrape events
     task = f"""Go to {url} and extract AI/GenAI event information for the next {days} days.
 
-    CRITICAL INSTRUCTIONS:
-    1. Load the page
-    2. For EACH visible event, inspect the DOM to extract:
-       - Event Name (visible text)
-       - Date and Time (visible text)
-       - Location/Venue (visible text)
-       - Brief Description (visible text)
-       - Event URL: Find the <a> tag/link element and extract the href attribute value
-         * If href starts with "/", prepend the base domain (https://lu.ma for Luma, https://cerebralvalley.ai for others)
-         * If href is already a full URL, use it as-is
-         * Example: href="/genai-event" → https://lu.ma/genai-event
-    3. Scroll down MAXIMUM 3 times to see more events
-    4. Extract any additional events for the next {days} days
-    5. STOP IMMEDIATELY - do not scroll more than 3 times total
-    6. Return all collected events
+STEP-BY-STEP PROCESS:
 
-    STOP CONDITIONS:
-    - After 3 scrolls maximum
-    - When you have events for the next {days} days
-    - When no new events appear after scrolling
+1. Load the page and wait for events to appear (wait 3 seconds after page load)
 
-    DO NOT CONTINUE SCROLLING BEYOND 3 SCROLLS. STOP AND RETURN RESULTS.
+2. For EACH event card visible on the page, use JavaScript or DOM inspection to extract:
 
-    URL EXTRACTION IS CRITICAL:
-    - NEVER write "Link", "Not provided", or "example.com" for Event URL
-    - ALWAYS extract the actual href attribute from the event's clickable link
-    - If you cannot find an href, write "URL extraction failed" but try your best to find it first
+   CRITICAL - URL EXTRACTION METHOD:
+   - Each event is wrapped in an <a> tag (anchor/link element)
+   - Use JavaScript to get the href:
+     * Find the event card container element
+     * Get the parent <a> tag or find <a> tag within the card
+     * Extract .href property (this gives full URL) or .getAttribute('href') (might be relative)
+     * If relative (starts with /), prepend https://lu.ma
 
-    """
+   Example JavaScript you can execute:
+   ```javascript
+   // Find only event detail links
+   Array.from(document.querySelectorAll('a[href*="/event/"]')).map(a => ({{
+     href: a.href.startsWith('http') ? a.href : `https://lu.ma${{a.getAttribute('href')}}`,
+     title: (a.querySelector('[data-testid="event-card__title"]')?.textContent || a.textContent).trim()
+   }}))
+   ```
+   Run the above EXACTLY via the run_javascript tool, then use the returned href values for every event you output.
+
+   Extract for each event:
+   - Event Name (from the title/heading in the card)
+   - Date and Time (visible on the card)
+   - Location/Venue (location text on the card)
+   - Brief Description (organizer, status like "Sold Out" or "Waitlist")
+   - Event URL (use JavaScript/DOM inspection as described above)
+
+3. After extracting visible events, scroll down ONCE to load more events
+
+4. Extract URLs for the newly visible events using the same method
+
+5. Scroll down ONE more time (maximum 2 scrolls total)
+
+6. Extract URLs for any new events
+
+7. STOP and return all collected events
+
+CRITICAL REQUIREMENTS:
+- You MUST use browser automation/JavaScript to get actual href attributes
+- NEVER write "URL extraction failed" - use JavaScript evaluation to get URLs
+- The URLs should all start with https://lu.ma/
+- Before returning, double-check every event you output includes an "Event URL: https://..." line populated with the actual link you captured. If any event is missing a URL, inspect the DOM again until you have it.
+- Maximum 2 scrolls, then STOP
+- Focus on getting correct URLs - this is the most important part
+
+"""
 
     try:
         # Start browser session
@@ -128,7 +283,7 @@ CRITICAL URL EXTRACTION RULES:
             llm=llm,
             browser_session=browser_session,
             system_message=system_prompt,
-            max_actions=12  # Strict limit to prevent infinite loops
+            max_actions=15  # Allow enough actions for: page load, wait, extract, scroll, extract, scroll, extract, return
         )
 
         # Run the agent
@@ -220,8 +375,8 @@ def generate_essay(combined_events_content=None):
             st.warning("No events data available. Please scrape events first.")
             return False, None
 
-        # Generate essay using OpenAI
-        result = generate_from_openai(prompt, temperature=0.7, max_tokens=1500)
+        # Generate essay using OpenAI GPT
+        result = generate_with_gpt(prompt, temperature=0.7, max_tokens=1500)
 
         # Display essay on the page
         st.subheader("📝 Generated Essay")
@@ -236,13 +391,11 @@ def generate_essay(combined_events_content=None):
 
 
 def generate_event_image(combined_events_content=None):
-    """Generate an image based on the events using OpenAI Images API with DALL-E 3"""
+    """Generate an image based on the events using OpenAI's DALL-E 3 model."""
     try:
         if not combined_events_content:
             return False, None, "No events data available. Please scrape events first."
 
-        # Extract key themes and event names from the events
-        # Create a simple, descriptive prompt for image generation
         prompt_for_image = (
             "Create a simple, clean image representing AI and tech events in San Francisco. "
             "Include minimal text with words like 'AI Events', 'Tech Community', 'Innovation'. "
@@ -250,73 +403,45 @@ def generate_event_image(combined_events_content=None):
             "Use a simple design with bold, readable text and tech-themed visual elements."
         )
 
-        # Try to extract event names for more specific image
         event_names = []
         lines = combined_events_content.split('\n')
         for line in lines:
-            # Look for event names in markdown bold format
             bold_matches = re.findall(r'\*\*([^*]+)\*\*', line)
             if bold_matches:
                 event_names.extend(bold_matches)
 
-        # Limit to first few event names to keep prompt simple
         if event_names:
             event_names_str = ", ".join(event_names[:3])
             prompt_for_image = (
-                f"Create a simple, clean promotional image for AI tech events including: {event_names_str}. "
-                "Include minimal text with words like 'AI Events', 'Tech Community', 'San Francisco'. "
-                "The image should be modern, professional, and relate to technology and community gatherings. "
-                "Use a simple design with bold, readable text and tech-themed visual elements."
+                f"Create a modern promotional image for AI tech events including: {event_names_str}. "
+                "Incorporate minimal text like 'AI Events', 'Tech Community', 'San Francisco'. "
+                "Use bold typography, futuristic gradients, and tech-themed icons."
             )
 
-        # Use OpenAI Images API with DALL-E 3
-        client = OpenAI(api_key=OPENAI_API_KEY)
+        client = _create_openai_client()
+        response = client.images.generate(
+            model=DALLE_MODEL,
+            prompt=prompt_for_image,
+            size="1024x1024",
+            quality="standard",
+            n=1,
+        )
 
-        try:
-            # Use DALL-E 3 for high-quality image generation
-            response = client.images.generate(
-                model="dall-e-3",
-                prompt=prompt_for_image,
-                size="1024x1024",
-                quality="standard",  # "standard" or "hd" - using standard to reduce cost
-                n=1,
-            )
-
-            # Extract image URL from response
-            if hasattr(response, 'data') and len(response.data) > 0:
-                image_url = response.data[0].url
-                print(f"✅ Image generated successfully with DALL-E 3")
-                return True, image_url, None
+        if response.data and len(response.data) > 0:
+            image_url = response.data[0].url
+            # Download the image
+            import requests
+            image_response = requests.get(image_url)
+            if image_response.status_code == 200:
+                return True, {"bytes": image_response.content, "mime_type": "image/png"}, None
             else:
-                error_msg = "DALL-E 3 returned empty response"
+                error_msg = f"Failed to download image from URL: {image_url}"
                 print(f"❌ {error_msg}")
                 return False, None, error_msg
 
-        except Exception as e:
-            error_str = str(e)
-            print(f"❌ DALL-E 3 error: {error_str}")
-
-            # Try DALL-E 2 as fallback (cheaper and more permissive)
-            try:
-                print("⚠️ Trying DALL-E 2 as fallback...")
-                response = client.images.generate(
-                    model="dall-e-2",
-                    prompt=prompt_for_image[:1000],  # DALL-E 2 has shorter prompt limits
-                    size="1024x1024",
-                    n=1,
-                )
-
-                if hasattr(response, 'data') and len(response.data) > 0:
-                    image_url = response.data[0].url
-                    print(f"✅ Image generated successfully with DALL-E 2")
-                    return True, image_url, None
-                else:
-                    return False, None, "Both DALL-E 3 and DALL-E 2 returned empty responses"
-
-            except Exception as e2:
-                fallback_error = str(e2)
-                print(f"❌ DALL-E 2 error: {fallback_error}")
-                return False, None, f"DALL-E 3 error: {error_str}. DALL-E 2 fallback error: {fallback_error}"
+        error_msg = "DALL-E 3 returned no image data"
+        print(f"❌ {error_msg}")
+        return False, None, error_msg
 
     except Exception as e:
         error_msg = f"Error generating image: {str(e)}"
@@ -362,7 +487,7 @@ def format_web_search_results(search_results, days=8):
         ]
         sources_str = ", ".join(sources)
 
-        # Use OpenAI to format the search results into event format
+        # Use OpenAI GPT to format the search results into event format
         format_prompt = f"""
 Extract and format AI/GenAI events from the following search results for the date range {today.strftime('%B %d, %Y')} to {end_date.strftime('%B %d, %Y')}.
 
@@ -388,7 +513,7 @@ Search Results:
 {search_results}
 """
 
-        formatted_events = generate_from_openai(format_prompt, temperature=0.1, max_tokens=2000)
+        formatted_events = generate_with_gpt(format_prompt, temperature=0.1, max_tokens=2000)
 
         # Format for display
         final_format = format_events_for_doc(formatted_events, "Web Search Results", days)
@@ -485,7 +610,7 @@ def extract_events_from_agent_result(agent_result):
         event_pattern = r'Event Name:.*?(?=Event Name:|$)'
         events = re.findall(event_pattern, result_str, re.DOTALL)
         if events:
-            return '\n\n'.join(events).strip()
+            return clean_event_content('\n\n'.join(events).strip())
 
         # If no structured format found, try to extract readable content
         # Look for lines that contain event-like information
@@ -498,7 +623,7 @@ def extract_events_from_agent_result(agent_result):
                     event_lines.append(line)
 
         if event_lines:
-            return '\n'.join(event_lines)
+            return clean_event_content('\n'.join(event_lines))
 
         return "Unable to parse event information from agent result."
 
@@ -507,22 +632,119 @@ def extract_events_from_agent_result(agent_result):
 
 
 def clean_event_content(content):
-    """Clean up event content for better formatting"""
-    # Remove escape characters and clean up formatting
+    """Clean event data so titles carry their URLs."""
+    import re
+
+    # Normalize escape characters and split into meaningful lines
     content = content.replace('\\n', '\n').replace('\\t', '\t')
+    raw_lines = [line.rstrip() for line in content.split('\n') if line.strip()]
 
-    # Remove extra whitespace and normalize line breaks
-    lines = [line.strip() for line in content.split('\n') if line.strip()]
+    processed_lines: List[str] = []
+    events: List[dict] = []
 
-    # Fix relative URLs to use full luma.com URLs
-    fixed_lines = []
-    for line in lines:
-        # Check for any URLs that need fixing (example.com or relative paths)
+    def _normalize_url(url_text: str) -> Optional[str]:
+        if not url_text:
+            return None
+        original = url_text
+        url_text = url_text.strip().strip('.,)')
+        if not url_text:
+            logger.warning("Discarded empty URL after stripping: %s", original)
+            return None
+        if url_text.startswith('/'):
+            normalized = f"https://luma.com{url_text}"
+        elif url_text.startswith('lu.ma/'):
+            normalized = f"https://{url_text}"
+        elif url_text.startswith('luma.com/'):
+            normalized = f"https://{url_text}"
+        elif url_text.startswith('www.'):
+            normalized = f"https://{url_text}"
+        else:
+            normalized = url_text
+        logger.info("URL normalized from %s to %s", original.strip(), normalized)
+        return normalized
+
+    def _record_event_label(before: str, title: str) -> None:
+        events.append({
+            'index': len(processed_lines),
+            'type': 'label',
+            'before': before.rstrip(),
+            'title': title.strip(),
+            'url': None,
+        })
+
+    def _record_event_bold(match) -> None:
+        events.append({
+            'index': len(processed_lines),
+            'type': 'bold',
+            'lead': match.group('lead') or '',
+            'title': match.group('title').strip(),
+            'trail': match.group('trail') or '',
+            'url': None,
+        })
+
+    for raw_line in raw_lines:
+        line = raw_line
+
+        # Fix example.com or relative markdown links before parsing
         if 'example.com' in line or '[Event Link](/' in line or '**Link:**' in line or 'Link:' in line:
             line = fix_example_com_urls(line)
-        fixed_lines.append(line)
 
-    return '\n'.join(fixed_lines)
+        colon_idx = line.find(':')
+        if colon_idx != -1:
+            before = line[:colon_idx]
+            after = line[colon_idx + 1 :]
+            before_lower = before.lower()
+
+            if any(key in before_lower for key in ['event url', 'url', 'link']):
+                url_match = re.search(r'(https?://[^\s)]+)', after)
+                url_value = url_match.group(1) if url_match else after.strip()
+                url_value = _normalize_url(url_value)
+                if url_value and events:
+                    events[-1]['url'] = url_value
+                    logger.info(
+                        "Captured Event URL for title '%s' from line: %s",
+                        events[-1]['title'],
+                        raw_line,
+                    )
+                    continue  # Skip standalone URL line
+
+            if 'event name' in before_lower or before_lower.strip().startswith('event '):
+                _record_event_label(before, after)
+                processed_lines.append(line)
+                continue
+
+        bold_match = re.match(r'^(?P<lead>\s*(?:[-*]\s+|\d+\.\s+)?)\*\*(?P<title>[^*]+)\*\*(?P<trail>.*)$', line)
+        if bold_match:
+            _record_event_bold(bold_match)
+            processed_lines.append(line)
+            continue
+
+        processed_lines.append(line)
+
+    # Apply collected URLs to their respective title lines
+    for event in events:
+        url = event.get('url')
+        if not url:
+            continue
+
+        if event['type'] == 'label':
+            linked = f"[{event['title']}]({url})"
+            processed_lines[event['index']] = f"{event['before']}: {linked}"
+            logger.info(
+                "Applied URL %s to label event title '%s'",
+                url,
+                event['title'],
+            )
+        else:
+            linked = f"[{event['title']}]({url})"
+            processed_lines[event['index']] = f"{event['lead']}**{linked}**{event['trail']}"
+            logger.info(
+                "Applied URL %s to numbered/bold event title '%s'",
+                url,
+                event['title'],
+            )
+
+    return '\n'.join(processed_lines)
 
 
 def fix_relative_urls(link_line):
@@ -590,7 +812,7 @@ Web Search Events:
 {all_events[2]}
 """
 
-    # Use OpenAI to combine and format the events
+    # Use OpenAI GPT to combine and format the events
     prompt = """Take all the events from all sources and combine them into a single chronologically ordered list.
 
 CRITICAL: Use EXACTLY this format with NEWLINES after each field:
@@ -639,7 +861,7 @@ CRITICAL URL HANDLING:
 - If source data has "Event URL:" extract that value; preserve all actual URLs from source data"""
 
     try:
-        result = generate_from_openai(combined_text + "\n\n" + prompt, temperature=0.1, max_tokens=3000)
+        result = generate_with_gpt(combined_text + "\n\n" + prompt, temperature=0.1, max_tokens=3000)
         return result
     except Exception as e:
         return f"Error combining events: {str(e)}"
@@ -651,7 +873,7 @@ def fix_example_com_urls(line, base_url="https://luma.com"):
 
     # Determine base domain from context
     if 'cerebralvalley' in line.lower():
-        base_url = "https://cerebralvalley.ai"
+        base_url = "https://cerebralvalley.ai/"
 
     # Pattern 1: Markdown links with example.com
     example_pattern = r'\[([^\]]+)\]\s*\((https://example\.com/[^\)]+)\)'
@@ -1200,7 +1422,7 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
     # Add image generation section
     st.subheader("🎨 Image Generation")
-    st.write("Generate a promotional image based on the scraped events using OpenAI's image generation API")
+    st.write("Generate a promotional image based on the scraped events using OpenAI's DALL-E 3 API")
 
     # Check if we have combined events data in session state
     if 'combined_events' in st.session_state:
@@ -1210,37 +1432,34 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             button_image = st.button("Generate Event Image", key="image_button", type="primary")
         
         with col_img2:
-            if 'generated_image_url' in st.session_state:
+            if 'generated_image' in st.session_state:
                 st.success("✅ Image generated! Displayed below.")
         
         if button_image:
             with st.spinner("Generating image from events..."):
-                success, image_url, error = generate_event_image(st.session_state.combined_events)
+                success, image_payload, error = generate_event_image(st.session_state.combined_events)
                 
-                if success and image_url:
-                    # Store image URL in session state
-                    st.session_state.generated_image_url = image_url
+                if success and image_payload:
+                    # Store image bytes in session state
+                    st.session_state.generated_image = image_payload
                     st.success("✅ Image generated successfully!")
                     
                     # Display the image
                     st.markdown("### Generated Image")
-                    st.image(image_url, caption="AI Events Promotional Image", use_container_width=True)
+                    st.image(
+                        image_payload["bytes"],
+                        caption="AI Events Promotional Image",
+                        use_container_width=True,
+                    )
                     
                     # Add download option
-                    try:
-                        import requests
-                        response = requests.get(image_url)
-                        if response.status_code == 200:
-                            st.download_button(
-                                "Download Image",
-                                data=response.content,
-                                file_name="ai_events_image.png",
-                                mime="image/png",
-                                help="Download the generated image"
-                            )
-                    except Exception as e:
-                        st.info(f"Image URL: {image_url}")
-                        st.warning(f"Could not download image directly: {str(e)}")
+                    st.download_button(
+                        "Download Image",
+                        data=image_payload["bytes"],
+                        file_name="ai_events_image.png",
+                        mime=image_payload.get("mime_type", "image/png"),
+                        help="Download the generated image",
+                    )
                 else:
                     error_msg = error or "Failed to generate image"
                     st.error(f"❌ {error_msg}")
@@ -1250,23 +1469,23 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                         st.code(error_msg, language="text")
                         st.markdown("""
                         **Troubleshooting:**
-                        - Make sure your OpenAI API key has access to image generation
-                        - Check if you have sufficient API credits
-                        - Verify that the `gpt-image-1` or `dall-e-3` models are available in your account
-                        - Try checking OpenAI's API status page
-                        """)
-                    
-                    st.info("💡 Tip: Make sure you have access to OpenAI's image generation API (gpt-image-1 or DALL-E)")
+                        - Make sure your OpenAI API key has DALL-E access
+                        - Check if you have sufficient API quota/credits
+                        - Verify that DALL-E 3 is available for your account
+                        - Check OpenAI API status for outages
+                    """)
+
+                    st.info("💡 Tip: Ensure your OpenAI API key has access to DALL-E 3 image generation.")
     else:
         st.info("📋 Please scrape events first using 'Scrape All Sources' to generate an image.")
         st.button("Generate Event Image", key="image_button", disabled=True)
     
     # Display previously generated image if available
-    if 'generated_image_url' in st.session_state and st.session_state.generated_image_url:
+    if 'generated_image' in st.session_state and st.session_state.generated_image:
         st.divider()
         st.subheader("🖼️ Previously Generated Image")
         st.image(
-            st.session_state.generated_image_url, 
+            st.session_state.generated_image["bytes"], 
             caption="AI Events Promotional Image", 
             use_container_width=True
         )

@@ -85,7 +85,11 @@ def _gpt_model_candidates() -> List[str]:
 
 def _is_model_unavailable_error(error: Exception) -> bool:
     message = str(error).lower()
-    return "not found" in message or "does not exist" in message or "not supported" in message
+    # Check for various error conditions that indicate the model is not available or incompatible
+    return ("not found" in message or
+            "does not exist" in message or
+            "not supported" in message or
+            "unsupported_parameter" in message)
 
 
 @st.cache_resource
@@ -95,11 +99,19 @@ def get_resolved_gpt_model() -> str:
     for candidate in _gpt_model_candidates():
         try:
             # Try to use the model with a simple test
-            client.chat.completions.create(
-                model=candidate,
-                messages=[{"role": "user", "content": "test"}],
-                max_tokens=1
-            )
+            # GPT-5 and newer models use max_completion_tokens instead of max_tokens
+            if candidate.startswith('gpt-5') or candidate.startswith('o1') or candidate.startswith('o3'):
+                client.chat.completions.create(
+                    model=candidate,
+                    messages=[{"role": "user", "content": "test"}],
+                    max_completion_tokens=1
+                )
+            else:
+                client.chat.completions.create(
+                    model=candidate,
+                    messages=[{"role": "user", "content": "test"}],
+                    max_tokens=1
+                )
             logger.info("Using GPT model: %s", candidate)
             return candidate
         except Exception as exc:  # noqa: BLE001
@@ -131,12 +143,21 @@ def generate_with_gpt(prompt: str, temperature: float = 0.0, max_tokens: int = 2
     client = _create_openai_client()
     model_name = get_resolved_gpt_model()
 
-    response = client.chat.completions.create(
-        model=model_name,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
+    # GPT-5 and newer models use max_completion_tokens instead of max_tokens
+    if model_name.startswith('gpt-5') or model_name.startswith('o1') or model_name.startswith('o3'):
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+            max_completion_tokens=max_tokens,
+        )
+    else:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
     if response.choices and len(response.choices) > 0:
         return response.choices[0].message.content.strip()
@@ -321,8 +342,13 @@ CRITICAL REQUIREMENTS:
 
 
 def scrape_luma_events(url="https://luma.com/genai-sf?k=c", days=8):
-    """Directly scrape luma.com events without browser automation."""
-    logger.info("Fetching Luma events directly from %s", url)
+    """Directly scrape luma.com events without browser automation.
+
+    Note: Luma.com shows events in chronological order. Since we can't reliably
+    extract dates from static HTML without the full calendar rendering, we limit
+    by taking only the first N events which are typically within the next few days.
+    """
+    logger.info("Fetching Luma events directly from %s (next %d days)", url, days)
 
     try:
         # Use headers to mimic a real browser
@@ -391,73 +417,82 @@ def scrape_luma_events(url="https://luma.com/genai-sf?k=c", days=8):
             seen_urls.add(event['url'])
             unique_events.append(event)
 
-    logger.info("Successfully extracted %d unique Luma events", len(unique_events))
-    return unique_events
+    # Limit to approximately the requested time range
+    # Allow up to ~20 events per day to avoid missing dense event days
+    max_events = max(20, days * 20)
+    limited_events = unique_events[:max_events]
+
+    logger.info("Successfully extracted %d unique Luma events (limited from %d to ~%d days)",
+                len(limited_events), len(unique_events), days)
+    return limited_events
+
+
+async def scrape_cerebral_valley_events_async(days=8):
+    """Scrape cerebralvalley.ai/events using Playwright (requires JavaScript rendering)."""
+    from playwright.async_api import async_playwright
+
+    target_url = "https://cerebralvalley.ai/events"
+    logger.info("Fetching Cerebral Valley events from %s using Playwright", target_url)
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+
+            # Navigate and wait for network to be idle
+            await page.goto(target_url, wait_until="networkidle")
+
+            # Wait a bit for dynamic content to load
+            await page.wait_for_timeout(2000)
+
+            # Extract events using JavaScript
+            events_data = await page.evaluate("""
+                () => {
+                    const links = Array.from(document.querySelectorAll('a[aria-label^="Open event"]'));
+                    return links.map(a => {
+                        const title = a.getAttribute('aria-label')?.replace(/^Open event:\\s*/i, '').trim() || '';
+                        const href = a.getAttribute('href') || '';
+
+                        // Try to find location info in parent container
+                        let host = '';
+                        const parent = a.closest('div');
+                        if (parent) {
+                            const paragraphs = parent.querySelectorAll('p');
+                            const locations = [];
+                            paragraphs.forEach(p => {
+                                const text = p.textContent?.trim() || '';
+                                // Skip time-related paragraphs
+                                if (text && !/AM|PM|·/.test(text)) {
+                                    locations.push(text);
+                                }
+                            });
+                            host = locations.slice(0, 2).join(' ');
+                        }
+
+                        return {
+                            title: title,
+                            url: href,
+                            host: host
+                        };
+                    });
+                }
+            """)
+
+            await browser.close()
+
+            logger.info("Successfully extracted %d Cerebral Valley events", len(events_data))
+            return events_data
+
+    except Exception as exc:
+        logger.error("Failed to fetch Cerebral Valley events: %s", exc)
+        import traceback
+        traceback.print_exc()
+        return []
 
 
 def scrape_cerebral_valley_events(days=8):
-    """Directly scrape cerebralvalley.ai/events without browser automation."""
-    base_url = "https://cerebralvalley.ai"
-    target_url = "https://cerebralvalley.ai/events"
-
-    logger.info("Fetching Cerebral Valley events directly from %s", target_url)
-    try:
-        response = requests.get(target_url, timeout=30)
-        response.raise_for_status()
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Failed to fetch Cerebral Valley events: %s", exc)
-        return []
-
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    def _is_event_card(node):
-        if node.name != 'div':
-            return False
-        classes = node.get("class", [])
-        if "flex" not in classes or "flex-col" not in classes:
-            return False
-        return any(cls.startswith('pb-[') for cls in classes)
-
-    cards = [div for div in soup.find_all('div') if _is_event_card(div)]
-    events = []
-
-    for card in cards:
-        anchor = card.find('a', attrs={'aria-label': re.compile(r'^Open event', re.IGNORECASE)})
-        if not anchor:
-            continue
-
-        href = anchor.get('href', '').strip()
-        if not href:
-            continue
-        href = urljoin(base_url, href)
-
-        title_text = anchor.get('aria-label') or anchor.get_text(" ", strip=True)
-        if title_text and title_text.lower().startswith('open event:'):
-            title_text = title_text.split(':', 1)[1].strip()
-        title_text = title_text or anchor.get_text(" ", strip=True)
-
-        host_block = None
-        for candidate in card.find_all('div'):
-            classes = candidate.get('class', [])
-            if {'flex', 'items-center'}.issubset(set(classes)) and any(cls.startswith('leading-[') for cls in classes):
-                host_block = candidate
-                break
-        host_text = ''
-        if host_block:
-            host_parts = [p.get_text(" ", strip=True) for p in host_block.select('p') if p.get_text(strip=True)]
-            host_text = ' '.join(host_parts)
-
-        logger.info("Cerebral Valley event parsed: %s -> %s", title_text, href)
-        if host_text:
-            logger.info("Host/Location captured for '%s': %s", title_text, host_text)
-
-        events.append({
-            'title': title_text,
-            'url': href,
-            'host': host_text,
-        })
-
-    return events
+    """Wrapper to run async Cerebral Valley scraper synchronously."""
+    return asyncio.run(scrape_cerebral_valley_events_async(days))
 
 
 def _extract_event_links(events_block: str):

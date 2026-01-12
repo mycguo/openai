@@ -4,9 +4,12 @@ import re
 import asyncio
 from datetime import datetime, timedelta
 from typing import List, Optional
+from urllib.parse import urljoin
 
 import streamlit as st
 from openai import OpenAI
+import requests
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +220,9 @@ CRITICAL URL EXTRACTION RULES:
 - On Luma.com: URLs are in format https://lu.ma/event-slug-abc123
 - The href might be relative (e.g., /event-slug) - prepend https://lu.ma if needed
 - NEVER write "Link", "Not provided", or "URL extraction failed"
-- You have access to browser automation - use it to inspect elements and get exact URLs"""
+- You have access to browser automation - use it to inspect elements and get exact URLs
+- SPECIAL CASE (https://cerebralvalley.ai/events): Event cards use `<div class="flex flex-col pb-[2rem]">` containers. Inside each, there is an `<a ... aria-label="Open event: ..." href="https://luma.com/...">` wrapping the `<h3>` title. Select them via `document.querySelectorAll('div.flex.flex-col.pb-[2rem] a[aria-label^="Open event"]')`, and capture each anchor's href and inner text. These href values already include tracking parameters; copy them exactly.
+"""
 
     # Task to scrape events
     task = f"""Go to {url} and extract AI/GenAI event information for the next {days} days.
@@ -245,6 +250,16 @@ STEP-BY-STEP PROCESS:
    }}))
    ```
    Run the above EXACTLY via the run_javascript tool, then use the returned href values for every event you output.
+
+   When scraping Cerebral Valley specifically, use:
+   ```javascript
+   Array.from(document.querySelectorAll('div.flex.flex-col.pb-[2rem] a[aria-label^="Open event"]')).map(a => ({{
+     href: a.href,
+     title: (a.querySelector('h3 span.inline')?.textContent || a.textContent).trim(),
+     host: a.closest('div.flex.flex-col.pb-[2rem]')?.querySelector('div.flex.items-center.leading-[24px] p')?.textContent?.trim() || ''
+   }}))
+   ```
+   This returns the exact href tied to the event title; attach that URL directly to the title when presenting results.
 
    Extract for each event:
    - Event Name (from the title/heading in the card)
@@ -303,6 +318,146 @@ CRITICAL REQUIREMENTS:
         except:
             pass
         return None
+
+
+def scrape_luma_events(url="https://luma.com/genai-sf?k=c", days=8):
+    """Directly scrape luma.com events without browser automation."""
+    logger.info("Fetching Luma events directly from %s", url)
+
+    try:
+        # Use headers to mimic a real browser
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to fetch Luma events: %s", exc)
+        return []
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    events = []
+
+    # Find all links with event-like paths
+    # Event links on luma.com are simple paths like "/ra7ba3kr", "/ai-x-healthcare"
+    all_links = soup.find_all('a', href=re.compile(r'^/[^/]+$'))
+
+    for link in all_links:
+        href = link.get('href', '').strip()
+        if not href:
+            continue
+
+        # Filter out non-event links (navigation, etc.)
+        if href in ['/', '/discover', '/signin'] or href.startswith('/genai-sf'):
+            continue
+
+        # Build full URL
+        full_url = f"https://luma.com{href}" if not href.startswith('http') else href
+
+        # Extract title - try aria-label first, then look for h3 in parent button
+        title_text = link.get('aria-label', '').strip()
+
+        if not title_text:
+            # Try to find h3 within the same button container
+            button = link.find_parent('button')
+            if button:
+                h3 = button.find('h3')
+                if h3:
+                    title_text = h3.get_text(" ", strip=True)
+
+        # If still no title, use link text
+        if not title_text:
+            title_text = link.get_text(" ", strip=True)
+
+        # Skip if we couldn't get a meaningful title
+        if not title_text or len(title_text) < 3:
+            continue
+
+        logger.info("Luma event parsed: %s -> %s", title_text, full_url)
+
+        events.append({
+            'title': title_text,
+            'url': full_url,
+            'host': '',  # Luma doesn't expose host info easily in HTML
+        })
+
+    # Remove duplicates (same URL)
+    seen_urls = set()
+    unique_events = []
+    for event in events:
+        if event['url'] not in seen_urls:
+            seen_urls.add(event['url'])
+            unique_events.append(event)
+
+    logger.info("Successfully extracted %d unique Luma events", len(unique_events))
+    return unique_events
+
+
+def scrape_cerebral_valley_events(days=8):
+    """Directly scrape cerebralvalley.ai/events without browser automation."""
+    base_url = "https://cerebralvalley.ai"
+    target_url = "https://cerebralvalley.ai/events"
+
+    logger.info("Fetching Cerebral Valley events directly from %s", target_url)
+    try:
+        response = requests.get(target_url, timeout=30)
+        response.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to fetch Cerebral Valley events: %s", exc)
+        return []
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    def _is_event_card(node):
+        if node.name != 'div':
+            return False
+        classes = node.get("class", [])
+        if "flex" not in classes or "flex-col" not in classes:
+            return False
+        return any(cls.startswith('pb-[') for cls in classes)
+
+    cards = [div for div in soup.find_all('div') if _is_event_card(div)]
+    events = []
+
+    for card in cards:
+        anchor = card.find('a', attrs={'aria-label': re.compile(r'^Open event', re.IGNORECASE)})
+        if not anchor:
+            continue
+
+        href = anchor.get('href', '').strip()
+        if not href:
+            continue
+        href = urljoin(base_url, href)
+
+        title_text = anchor.get('aria-label') or anchor.get_text(" ", strip=True)
+        if title_text and title_text.lower().startswith('open event:'):
+            title_text = title_text.split(':', 1)[1].strip()
+        title_text = title_text or anchor.get_text(" ", strip=True)
+
+        host_block = None
+        for candidate in card.find_all('div'):
+            classes = candidate.get('class', [])
+            if {'flex', 'items-center'}.issubset(set(classes)) and any(cls.startswith('leading-[') for cls in classes):
+                host_block = candidate
+                break
+        host_text = ''
+        if host_block:
+            host_parts = [p.get_text(" ", strip=True) for p in host_block.select('p') if p.get_text(strip=True)]
+            host_text = ' '.join(host_parts)
+
+        logger.info("Cerebral Valley event parsed: %s -> %s", title_text, href)
+        if host_text:
+            logger.info("Host/Location captured for '%s': %s", title_text, host_text)
+
+        events.append({
+            'title': title_text,
+            'url': href,
+            'host': host_text,
+        })
+
+    return events
 
 
 def _extract_event_links(events_block: str):
@@ -528,28 +683,42 @@ Search Results:
 def generate_events(url="https://luma.com/genai-sf?k=c", source_name="Lu.ma GenAI SF", days=8):
     """Go to specified URL and get the events for the specified number of days"""
     try:
-        # Run the async scraping function
-        events_data = asyncio.run(scrape_events(url, source_name, days))
+        if "cerebralvalley.ai" in url:
+            events_list = scrape_cerebral_valley_events(days)
+            if not events_list:
+                st.error("Failed to extract Cerebral Valley events")
+                return False, None
+            formatted_events = format_cerebral_valley_list(events_list, source_name, days)
+        elif "luma.com" in url or "lu.ma" in url:
+            # Use direct HTTP scraping for Luma events
+            events_list = scrape_luma_events(url, days)
+            if not events_list:
+                st.error("Failed to extract Luma events")
+                return False, None
+            formatted_events = format_cerebral_valley_list(events_list, source_name, days)
+        else:
+            # Run the async scraping function for other sources
+            events_data = asyncio.run(scrape_events(url, source_name, days))
 
-        if events_data:
-            # Format the events for display and Google Doc
+            if not events_data:
+                st.error(f"Failed to retrieve events from {source_name}")
+                return False, None
+
+            # Format the events for display
             formatted_events = format_events_for_doc(events_data, source_name, days)
 
-            # Display results on the page
-            st.subheader(f"📅 {source_name} Events")
-            st.markdown("**Scraped Events:**")
+        # Display results on the page
+        st.subheader(f"📅 {source_name} Events")
+        st.markdown("**Scraped Events:**")
 
-            # Display as rendered markdown instead of plain text
-            with st.container():
-                st.markdown(formatted_events)
+        # Display as rendered markdown instead of plain text
+        with st.container():
+            st.markdown(formatted_events)
 
-            # No longer writing to Google Doc
-            print(f"✅ Successfully scraped {source_name} events.")
+        # No longer writing to Google Doc
+        print(f"✅ Successfully scraped {source_name} events.")
 
-            return True, formatted_events
-        else:
-            st.error(f"Failed to retrieve events from {source_name}")
-            return False, None
+        return True, formatted_events
     except Exception as e:
         st.error(f"Error in generate_events: {str(e)}")
         return False, None
@@ -745,6 +914,35 @@ def clean_event_content(content):
             )
 
     return '\n'.join(processed_lines)
+
+
+def format_cerebral_valley_list(events, source_name="Cerebral Valley", days=8):
+    today = datetime.now()
+    end_date = today + timedelta(days=days)
+
+    header = [
+        f"{source_name} Events - {today.strftime('%B %d, %Y')} to {end_date.strftime('%B %d, %Y')}",
+        "=" * 50,
+        "",
+    ]
+
+    if not events:
+        header.append("No events found on cerebralvalley.ai/events")
+    else:
+        for event in events:
+            title = event.get('title', 'Untitled Event').strip()
+            url = event.get('url', '').strip()
+            host = event.get('host', '').strip()
+            line = f"- [{title}]({url})" if url else f"- {title}"
+            if host:
+                line += f" — {host}"
+            header.append(line)
+
+    header.append("")
+    header.append("=" * 50)
+    header.append(f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+    return '\n'.join(header)
 
 
 def fix_relative_urls(link_line):

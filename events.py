@@ -689,9 +689,37 @@ def generate_events(url="https://luma.com/genai-sf?k=c", source_name="Lu.ma GenA
                 st.error("Failed to extract Cerebral Valley events")
                 return False, None
             formatted_events = format_cerebral_valley_list(events_list, source_name, days)
-        elif "luma.com" in url or "lu.ma" in url:
+        elif url == "LUMA_COMBINED" or "luma.com" in url or "lu.ma" in url:
             # Use direct HTTP scraping for Luma events
-            events_list = scrape_luma_events(url, days)
+            # If this is the combined Luma scrape, fetch from both URLs
+            if url == "LUMA_COMBINED":
+                events_list = []
+
+                # Scrape genai-sf
+                genai_events = scrape_luma_events("https://luma.com/genai-sf?k=c", days)
+                if genai_events:
+                    events_list.extend(genai_events)
+                    logger.info("Added %d events from genai-sf", len(genai_events))
+
+                # Scrape sf
+                sf_events = scrape_luma_events("https://luma.com/sf", days)
+                if sf_events:
+                    events_list.extend(sf_events)
+                    logger.info("Added %d events from sf", len(sf_events))
+
+                # Remove duplicates by URL
+                seen_urls = set()
+                unique_events = []
+                for event in events_list:
+                    if event['url'] not in seen_urls:
+                        seen_urls.add(event['url'])
+                        unique_events.append(event)
+
+                events_list = unique_events
+                logger.info("Combined total: %d unique events", len(events_list))
+            else:
+                events_list = scrape_luma_events(url, days)
+
             if not events_list:
                 st.error("Failed to extract Luma events")
                 return False, None
@@ -1149,11 +1177,12 @@ def main():
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.write("**Lu.ma GenAI SF Events**")
-        button1 = st.button("Scrape Lu.ma GenAI SF", key="luma_button")
+        st.write("**Lu.ma Events**")
+        st.caption("genai-sf + sf calendars")
+        button1 = st.button("Scrape Lu.ma", key="luma_button")
         if button1:
-            with st.spinner("Scraping Lu.ma events..."):
-                success, events = generate_events("https://luma.com/genai-sf?k=c", "Lu.ma GenAI SF", days_to_scrape)
+            with st.spinner("Scraping Lu.ma events from genai-sf and sf..."):
+                success, events = generate_events("LUMA_COMBINED", "Lu.ma Events", days_to_scrape)
                 if success:
                     st.success("✅ Lu.ma events scraped successfully!")
                 else:
@@ -1233,9 +1262,9 @@ Startup Grind Conference 2025 - https://www.startupgrind.com/events/details/star
             cv_events = None
             web_events = None
 
-            # Scrape Lu.ma
-            st.write("1️⃣ Scraping Lu.ma...")
-            success, events = generate_events("https://luma.com/genai-sf?k=c", "Lu.ma GenAI SF", days_to_scrape)
+            # Scrape Lu.ma (genai-sf + sf)
+            st.write("1️⃣ Scraping Lu.ma (genai-sf + sf)...")
+            success, events = generate_events("LUMA_COMBINED", "Lu.ma Events", days_to_scrape)
             if success:
                 success_count += 1
                 luma_events = events

@@ -1007,8 +1007,30 @@ Search Results:
         # Some models only allow the default temperature of 1.0
         formatted_events = generate_with_gpt(format_prompt, temperature=1.0, max_tokens=2000)
 
+        fallback_required = False
+        lowered = formatted_events.lower()
+        failure_phrases = [
+            "couldn't find any events",
+            "could not find any events",
+            "no events found",
+            "i am unable to find",
+            "unable to find events",
+            "i couldn’t find any events",
+        ]
+        if any(phrase in lowered for phrase in failure_phrases):
+            fallback_required = True
+
+        if fallback_required or not formatted_events.strip():
+            logger.warning("LLM could not format web events; falling back to simple parser")
+            formatted_events = _fallback_web_search_format(search_results, days)
+
         # Format for display
         final_format = format_events_for_doc(formatted_events, "Web Search Results", days)
+
+        if "No events found" in final_format or "Error formatting events" in final_format:
+            logger.warning("Formatted web events appear empty; forcing fallback parser")
+            fallback_text = _fallback_web_search_format(search_results, days)
+            final_format = format_events_for_doc(fallback_text, "Web Search Results", days)
 
         return final_format
 
@@ -1115,6 +1137,53 @@ def format_events_for_doc(events_data, source_name="Events", days=8):
         return formatted_text
     except Exception as e:
         return f"Error formatting events: {str(e)}\n\nRaw data:\n{str(events_data)[:500]}..."
+
+
+def _fallback_web_search_format(search_results: str, days: int) -> str:
+    """Simple parser when GPT can't extract structured events."""
+    lines = []
+    for raw_line in search_results.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        title = line
+        url = ""
+        if ' - ' in line:
+            title_part, url_part = line.split(' - ', 1)
+            title = title_part.strip()
+            url = url_part.strip()
+        else:
+            parts = re.split(r"\s+(https?://\S+)", line, maxsplit=1)
+            if len(parts) >= 3:
+                title = parts[0].strip()
+                url = parts[1].strip()
+
+        if not url:
+            url_match = re.search(r"https?://\S+", line)
+            if url_match:
+                url = url_match.group(0)
+
+        if not title:
+            continue
+
+        entry = [
+            f"Event Name: {title}",
+            f"Date and Time: Within next {days} days",
+            "Location/Venue: San Francisco Bay Area or Virtual",
+            "Brief Description: Listed via web search source; visit URL for full details.",
+        ]
+        if url:
+            entry.append(f"Event URL: {url}")
+        else:
+            entry.append("Event URL: Not provided")
+
+        lines.append('\n'.join(entry))
+
+    if not lines:
+        return "No events found in search results."
+
+    separator = "\n\n" + "=" * 40 + "\n\n"
+    return separator.join(lines)
 
 
 def extract_events_from_agent_result(agent_result):
@@ -1317,6 +1386,15 @@ def _format_event_entry_lines(event: Dict) -> List[str]:
 def format_cerebral_valley_list(events, source_name="Cerebral Valley", days=8):
     today = datetime.now()
     end_date = today + timedelta(days=days)
+    today_floor = today.replace(hour=0, minute=0, second=0, microsecond=0)
+    local_tz = datetime.now().astimezone().tzinfo
+
+    def _normalize_event_dt(value: Optional[datetime]) -> Optional[datetime]:
+        if not value:
+            return None
+        if value.tzinfo is None or local_tz is None:
+            return value.replace(tzinfo=None)
+        return value.astimezone(local_tz).replace(tzinfo=None)
 
     header = [
         f"{source_name} Events - {today.strftime('%B %d, %Y')} to {end_date.strftime('%B %d, %Y')}",
@@ -1328,10 +1406,49 @@ def format_cerebral_valley_list(events, source_name="Cerebral Valley", days=8):
         header.append("No events found on cerebralvalley.ai/events")
     else:
         detailed_events = _enrich_events_with_details(events)
-        for idx, event in enumerate(detailed_events):
-            header.extend(_format_event_entry_lines(event))
-            if idx < len(detailed_events) - 1:
-                header.append("")
+        filtered_events: List[Dict] = []
+        for event in detailed_events:
+            event_dt: Optional[datetime] = None
+            start_iso = event.get('start_iso')
+            if isinstance(start_iso, str) and start_iso:
+                event_dt = _parse_iso_datetime(start_iso)
+            if not event_dt:
+                date_text = _ensure_text(event.get('date_text', '')).strip()
+                if date_text:
+                    for fmt in ('%B %d, %Y', '%b %d, %Y'):
+                        try:
+                            event_dt = datetime.strptime(date_text, fmt)
+                            break
+                        except ValueError:
+                            continue
+
+            event_dt = _normalize_event_dt(event_dt)
+
+            if event_dt and event_dt > end_date:
+                logger.info(
+                    "Skipping Cerebral Valley event %s (date %s beyond %s days)",
+                    event.get('title'),
+                    event_dt,
+                    days,
+                )
+                continue
+            if event_dt and event_dt < today_floor:
+                logger.info(
+                    "Skipping outdated Cerebral Valley event %s (date %s before today)",
+                    event.get('title'),
+                    event_dt,
+                )
+                continue
+
+            filtered_events.append(event)
+
+        if not filtered_events:
+            header.append("No events within the requested date range")
+        else:
+            for idx, event in enumerate(filtered_events):
+                header.extend(_format_event_entry_lines(event))
+                if idx < len(filtered_events) - 1:
+                    header.append("")
 
     header.append("")
     header.append("=" * 50)
@@ -1383,82 +1500,37 @@ def fix_relative_urls(link_line):
 
 
 def parse_and_format_combined_events(all_events):
-    """Use LLM to combine and format events in chronological order"""
+    """Combine event source strings sequentially with clear source headers."""
 
-    if not all_events or len(all_events) < 2:
-        return "Not enough event sources to combine"
+    if not all_events:
+        return "No event sources provided to combine."
 
-    # Combine all events into a single text
-    combined_text = f"""
-Lu.ma Events:
-{all_events[0]}
+    sections = []
+    for idx, entry in enumerate(all_events):
+        if isinstance(entry, tuple):
+            label, content = entry[0], entry[1]
+        else:
+            label, content = (f"Source {idx + 1}", entry)
 
-Cerebral Valley Events:
-{all_events[1]}
-"""
+        if not content:
+            continue
 
-    # Add web search events if available
-    if len(all_events) >= 3:
-        combined_text += f"""
+        label = label or f"Source {idx + 1}"
+        cleaned = str(content).strip()
+        if not cleaned:
+            continue
 
-Web Search Events:
-{all_events[2]}
-"""
+        divider = "=" * len(label)
+        sections.append(f"{label}\n{divider}\n\n{cleaned}")
 
-    # Use OpenAI GPT to combine and format the events
-    prompt = """Take all the events from all sources and combine them into a single chronologically ordered list.
+    if not sections:
+        return "No combined events available."
 
-CRITICAL: Use EXACTLY this format with NEWLINES after each field:
-
-**[Date in format: Month DD, YYYY]**
-
-1. **[Event Name]**
-   Time: [Time or "Time TBD"]
-   Location: [Location]
-   Host: [Host organization or description]
-   Event URL: [Full URL - e.g., https://lu.ma/event-id]
-
-2. **[Next Event Name]**
-   Time: [Time]
-   Location: [Location]
-   Host: [Host]
-   Event URL: [Full URL]
-
-ABSOLUTELY REQUIRED:
-- Put each field on a NEW LINE (press Enter after each field)
-- Add TWO SPACES at the end of each line before the newline
-- Insert a BLANK LINE between each event
-- Do NOT put all fields on the same line
-
-Example of CORRECT formatting:
-1. **AI Summit 2024**
-   Time: 10:00 AM
-   Location: San Francisco, CA
-   Host: Tech Organization
-   Event URL: https://lu.ma/ai-summit-2024
-
-Example of WRONG formatting (DO NOT DO THIS):
-1. **AI Summit 2024** Time: 10:00 AM Location: San Francisco, CA Host: Tech Organization Event URL: https://lu.ma/event
-
-Additional rules:
-- Group all events by date, sort dates chronologically
-- Combine events from ALL sources into single date groups
-- Extract actual URLs, never show just "Link" or "Not provided"
-- If Event URL field is missing or shows "Link"/"Not provided", look for the URL elsewhere in the event data
-
-CRITICAL URL HANDLING:
-- Combine ALL events from all sources into a single unified list, not separate sections.
-- Show actual URLs directly (e.g., https://lu.ma/event-name or https://cerebralvalley.ai/events/event-name)
-- NEVER write "Link", "Not provided", "example.com", or leave Event URL blank
-- If a URL appears as "[text](url)" markdown format, extract and show just the URL
-- If source data has "Event URL:" extract that value; preserve all actual URLs from source data"""
-
-    try:
-        # Some newer models only accept their default temperature (1.0)
-        result = generate_with_gpt(combined_text + "\n\n" + prompt, temperature=1.0, max_tokens=3000)
-        return result
-    except Exception as e:
-        return f"Error combining events: {str(e)}"
+    header = "Combined Events Overview"
+    header_line = "=" * len(header)
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    body = "\n\n---\n\n".join(sections)
+    return f"{header}\n{header_line}\nGenerated: {timestamp}\n\n{body}"
 
 
 def fix_example_com_urls(line, base_url=LUMA_BASE_URL):
@@ -1738,8 +1810,13 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                         st.info("❌ Web search failed or no events found")
 
                 with tab4:
-                    # Filter out None values for combining
-                    valid_events = [event for event in all_events if event is not None]
+                    # Filter out None values for combining while keeping labels
+                    source_labels = ["Lu.ma Events", "Cerebral Valley Events", "Web Search Events"]
+                    valid_events = [
+                        (source_labels[idx] if idx < len(source_labels) else f"Source {idx + 1}", content)
+                        for idx, content in enumerate(all_events)
+                        if content is not None
+                    ]
 
                     if valid_events:
                         # Parse and sort all events chronologically
@@ -1748,7 +1825,7 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                         # Header with copy button
                         col_header1, col_header2 = st.columns([3, 1])
                         with col_header1:
-                            st.markdown("**All Events Combined (Chronological Order)**")
+                            st.markdown("**All Events Combined (All Sources)**")
                         with col_header2:
                             copy_clicked_1 = st.button("📋 Copy", key="copy_btn_1", use_container_width=True)
                             if copy_clicked_1:
@@ -1830,8 +1907,13 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                     st.info("❌ Web search events not available")
 
             with tab4:
-                # Filter out None values for combining
-                valid_events = [event for event in st.session_state.all_events if event is not None]
+                # Filter out None values for combining with labels
+                stored_labels = ["Lu.ma Events", "Cerebral Valley Events", "Web Search Events"]
+                valid_events = [
+                    (stored_labels[idx] if idx < len(stored_labels) else f"Source {idx + 1}", content)
+                    for idx, content in enumerate(st.session_state.all_events)
+                    if content is not None
+                ]
 
                 if valid_events:
                     formatted_combined = parse_and_format_combined_events(valid_events)
@@ -1839,7 +1921,7 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                     # Header with copy button
                     col_header1, col_header2 = st.columns([3, 1])
                     with col_header1:
-                        st.markdown("**All Events Combined (Chronological Order)**")
+                        st.markdown("**All Events Combined (All Sources)**")
                     with col_header2:
                         copy_clicked_2 = st.button("📋 Copy", key="copy_btn_2", use_container_width=True)
                         if copy_clicked_2:
@@ -1898,8 +1980,13 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                     st.info("❌ Cerebral Valley events not available")
 
             with tab3:
-                # Filter valid events
-                valid_events = [event for event in st.session_state.all_events if event is not None]
+                # Filter valid events with labels
+                stored_labels = ["Lu.ma Events", "Cerebral Valley Events"]
+                valid_events = [
+                    (stored_labels[idx] if idx < len(stored_labels) else f"Source {idx + 1}", content)
+                    for idx, content in enumerate(st.session_state.all_events)
+                    if content is not None
+                ]
 
                 if valid_events:
                     formatted_combined = parse_and_format_combined_events(valid_events)
@@ -1907,7 +1994,7 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                     # Header with copy button
                     col_header1, col_header2 = st.columns([3, 1])
                     with col_header1:
-                        st.markdown("**All Events Combined (Chronological Order)**")
+                        st.markdown("**All Events Combined (All Sources)**")
                     with col_header2:
                         copy_clicked_3 = st.button("📋 Copy", key="copy_btn_3", use_container_width=True)
                         if copy_clicked_3:

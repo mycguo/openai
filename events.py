@@ -11,6 +11,7 @@ from urllib.parse import urljoin
 
 import streamlit as st
 from openai import OpenAI
+from anthropic import Anthropic
 import requests
 from bs4 import BeautifulSoup
 
@@ -60,6 +61,15 @@ CONFIGURED_GPT_MODEL = (
     st.secrets.get("GPT_MODEL")
     or os.getenv("GPT_MODEL")
 )
+ANTHROPIC_API_KEY = (
+    st.secrets.get("ANTHROPIC_API_KEY")
+    or os.getenv("ANTHROPIC_API_KEY")
+)
+ANTHROPIC_SONNET_MODEL = (
+    st.secrets.get("ANTHROPIC_SONNET_MODEL")
+    or os.getenv("ANTHROPIC_SONNET_MODEL")
+    or "claude-sonnet-4-5"
+)
 DEFAULT_GPT_MODELS: List[str] = [
     CONFIGURED_GPT_MODEL,
     "gpt-5",
@@ -79,6 +89,8 @@ LUMA_REQUEST_HEADERS = {
 
 if OPENAI_API_KEY:
     os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+if ANTHROPIC_API_KEY:
+    os.environ["ANTHROPIC_API_KEY"] = ANTHROPIC_API_KEY
 
 
 def _gpt_model_candidates() -> List[str]:
@@ -149,13 +161,23 @@ def _create_openai_client() -> OpenAI:
     return OpenAI(api_key=OPENAI_API_KEY)
 
 
-def generate_with_gpt(prompt: str, temperature: float = 0.0, max_tokens: int = 2060) -> str:
+@st.cache_resource
+def _create_anthropic_client() -> Anthropic:
+    if not ANTHROPIC_API_KEY:
+        raise RuntimeError(
+            "Anthropic API key is not configured. Set ANTHROPIC_API_KEY in secrets or env."
+        )
+    return Anthropic(api_key=ANTHROPIC_API_KEY)
+
+
+def generate_with_gpt(prompt: str, temperature: float = 0.0, max_tokens: int = 2060, model_override: Optional[str] = None) -> str:
     """Call OpenAI GPT API and return the text output."""
     client = _create_openai_client()
-    model_name = get_resolved_gpt_model()
+    model_name = model_override or get_resolved_gpt_model()
 
     # GPT-5 and newer models use max_completion_tokens instead of max_tokens
-    if model_name.startswith('gpt-5') or model_name.startswith('o1') or model_name.startswith('o3'):
+    if (model_name.startswith('gpt-5') or model_name.startswith('o1') or
+            model_name.startswith('o3') or model_name.startswith('gpt-4.5')):
         response = client.chat.completions.create(
             model=model_name,
             messages=[{"role": "user", "content": prompt}],
@@ -174,6 +196,37 @@ def generate_with_gpt(prompt: str, temperature: float = 0.0, max_tokens: int = 2
         return response.choices[0].message.content.strip()
 
     raise RuntimeError("OpenAI response did not contain text output")
+
+
+def generate_with_claude(prompt: str, temperature: float = 1.0, max_tokens: int = 3000) -> str:
+    """Call Anthropic Claude Sonnet and return the text output."""
+    client = _create_anthropic_client()
+    response = client.messages.create(
+        model=ANTHROPIC_SONNET_MODEL,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt,
+                    }
+                ],
+            }
+        ],
+    )
+    text_segments: List[str] = []
+    for block in response.content:
+        if getattr(block, "type", "") == "text":
+            text_segments.append(block.text)
+        elif isinstance(block, dict) and block.get("type") == "text":
+            text_segments.append(block.get("text", ""))
+    full_text = "".join(text_segments).strip()
+    if full_text:
+        return full_text
+    raise RuntimeError("Anthropic response did not contain text output")
 
 
 # ─── Main features ─────────────────────────────────────────────────
@@ -839,6 +892,40 @@ def _extract_event_links(events_block: str):
     return unique_matches
 
 
+def _build_fallback_essay(event_links: List[tuple], combined_text: str) -> Optional[str]:
+    """Create a deterministic essay if the LLM returns nothing."""
+    if event_links:
+        intro = (
+            "San Francisco's AI scene remains vibrant, with community meetups, demo days, and "
+            "founder salons filling calendars nearly every night. Below are a few upcoming "
+            "highlights drawn directly from the scraped events."
+        )
+        body_lines = []
+        for idx, (name, url) in enumerate(event_links[:6], start=1):
+            body_lines.append(
+                f"{idx}. {name} ({url}) keeps builders and investors comparing playbooks, "
+                "sharing product lessons, and meeting future collaborators."
+            )
+        body = '\n'.join(body_lines)
+        closing = (
+            "Seats typically vanish quickly for these gatherings, so confirm your RSVP early "
+            "and bring a teammate to multiply the takeaways."
+        )
+        return f"{intro}\n\nEvent Highlights:\n{body}\n\n{closing}"
+
+    if combined_text.strip():
+        excerpt = combined_text.strip()
+        if len(excerpt) > 1200:
+            excerpt = excerpt[:1200].rsplit('\n', 1)[0]
+        return (
+            "Here is a condensed overview drawn from the scraped calendars when the AI "
+            "essay service was unavailable:\n\n"
+            f"{excerpt}\n\nStay tuned for fresh write-ups as soon as the generator is back."
+        )
+
+    return None
+
+
 def generate_essay(combined_events_content=None):
     """Generate an essay based on combined events content and display it"""
     try:
@@ -866,17 +953,44 @@ def generate_essay(combined_events_content=None):
             st.warning("No events data available. Please scrape events first.")
             return False, None
 
-        # Generate essay using OpenAI GPT
-        result = generate_with_gpt(prompt, temperature=0.7, max_tokens=1500)
+        # Generate essay using OpenAI GPT (some models require default temperature of 1.0)
+        raw_result = None
+        if ANTHROPIC_API_KEY:
+            try:
+                raw_result = generate_with_claude(
+                    prompt,
+                    temperature=1.0,
+                    max_tokens=3000,
+                )
+            except Exception as claude_error:  # noqa: BLE001
+                logger.warning("Anthropic Claude request failed: %s", claude_error)
+                st.warning("Anthropic Sonnet 4.5 unavailable; falling back to GPT.")
 
-        # Display essay on the page
-        st.subheader("📝 Generated Essay")
-        st.markdown("**Essay based on scraped events:**")
-        st.markdown(result)
+        if raw_result is None:
+            raw_result = generate_with_gpt(
+                prompt,
+                temperature=1.0,
+                max_tokens=3000,
+                model_override="gpt-4.1",
+            )
+        cleaned_result = raw_result.strip()
+        logger.info("Essay generated with %d characters", len(cleaned_result))
+        print(f"Essay preview (first 200 chars): {cleaned_result[:200]}")
 
-        print("✅ Essay generated successfully.")
-        return True, result
+        if not cleaned_result:
+            logger.warning("Essay generation returned empty text; using fallback")
+            fallback = _build_fallback_essay(event_links, selected)
+            if fallback:
+                return True, fallback
+            return False, None
+
+        return True, cleaned_result
     except Exception as e:
+        logger.error("Essay generation failed: %s", e)
+        fallback = _build_fallback_essay(event_links if 'event_links' in locals() else [], selected if 'selected' in locals() else '')
+        if fallback:
+            st.warning("LLM essay generation failed, showing fallback summary instead.")
+            return True, fallback
         st.error(f"Error generating essay: {str(e)}")
         return False, None
 
@@ -2047,7 +2161,7 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         st.divider()
         st.subheader("💽 Save Current Events")
         st.download_button(
-            "Download Combined Events",
+            "Save Combined Events",
             data=st.session_state.combined_events,
             file_name="combined_events.txt",
             mime="text/plain",
@@ -2087,18 +2201,42 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
     st.write("Generate an essay based on the scraped events")
 
     # Check if we have combined events data in session state
+    button_essay = False
     if 'combined_events' in st.session_state:
         button_essay = st.button("Generate Essay from Scraped Events", key="essay_button")
         if button_essay:
             with st.spinner("Generating essay from scraped events..."):
-                success, _ = generate_essay(st.session_state.combined_events)
+                success, essay_text = generate_essay(st.session_state.combined_events)
                 if success:
+                    st.session_state.generated_essay = essay_text
                     st.success("✅ Essay generated successfully!")
+                    st.subheader("📝 Generated Essay")
+                    st.markdown("**Essay based on scraped events:**")
+                    st.markdown(essay_text)
+                    st.text_area(
+                        "Generated essay (copy or edit):",
+                        value=essay_text,
+                        height=400,
+                        key="generated_essay_live",
+                        label_visibility="visible"
+                    )
                 else:
                     st.error("❌ Failed to generate essay")
     else:
         st.info("📋 Please scrape events first using 'Scrape All Sources' to generate an essay.")
         st.button("Generate Essay from Scraped Events", key="essay_button", disabled=True)
+
+    if st.session_state.get('generated_essay') and not button_essay:
+        st.subheader("📝 Generated Essay")
+        st.markdown("**Essay based on scraped events:**")
+        st.markdown(st.session_state.generated_essay)
+        st.text_area(
+            "Generated essay (copy or edit):",
+            value=st.session_state.generated_essay,
+            height=400,
+            key="generated_essay_saved",
+            label_visibility="visible"
+        )
 
     st.divider()
 

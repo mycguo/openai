@@ -1,9 +1,12 @@
 import logging
 import os
 import re
+import json
 import asyncio
+import time
 from datetime import datetime, timedelta
-from typing import List, Optional
+from functools import lru_cache
+from typing import Dict, List, Optional
 from urllib.parse import urljoin
 
 import streamlit as st
@@ -65,6 +68,14 @@ DEFAULT_GPT_MODELS: List[str] = [
     "gpt-4-turbo",
 ]
 DALLE_MODEL = "dall-e-3"
+LUMA_BASE_URL = "https://lu.ma"
+LUMA_REQUEST_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                  'AppleWebKit/537.36 (KHTML, like Gecko) '
+                  'Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+}
 
 if OPENAI_API_KEY:
     os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
@@ -166,8 +177,8 @@ def generate_with_gpt(prompt: str, temperature: float = 0.0, max_tokens: int = 2
 
 
 # ─── Main features ─────────────────────────────────────────────────
-async def scrape_events(url="https://luma.com/genai-sf?k=c", source_name="Lu.ma GenAI SF", days=8):
-    """Use browser-use to scrape events from luma.com/genai-sf"""
+async def scrape_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI SF", days=8):
+    """Use browser-use to scrape events from lu.ma/genai-sf"""
     from browser_use.llm.openai.chat import ChatOpenAI
     from browser_use.agent.service import Agent
     from browser_use.browser import BrowserProfile, BrowserSession
@@ -242,7 +253,7 @@ CRITICAL URL EXTRACTION RULES:
 - The href might be relative (e.g., /event-slug) - prepend https://lu.ma if needed
 - NEVER write "Link", "Not provided", or "URL extraction failed"
 - You have access to browser automation - use it to inspect elements and get exact URLs
-- SPECIAL CASE (https://cerebralvalley.ai/events): Event cards use `<div class="flex flex-col pb-[2rem]">` containers. Inside each, there is an `<a ... aria-label="Open event: ..." href="https://luma.com/...">` wrapping the `<h3>` title. Select them via `document.querySelectorAll('div.flex.flex-col.pb-[2rem] a[aria-label^="Open event"]')`, and capture each anchor's href and inner text. These href values already include tracking parameters; copy them exactly.
+- SPECIAL CASE (https://cerebralvalley.ai/events): Event cards use `<div class="flex flex-col pb-[2rem]">` containers. Inside each, there is an `<a ... aria-label="Open event: ..." href="https://lu.ma/...">` wrapping the `<h3>` title. Select them via `document.querySelectorAll('div.flex.flex-col.pb-[2rem] a[aria-label^="Open event"]')`, and capture each anchor's href and inner text. These href values already include tracking parameters; copy them exactly.
 """
 
     # Task to scrape events
@@ -341,23 +352,19 @@ CRITICAL REQUIREMENTS:
         return None
 
 
-def scrape_luma_events(url="https://luma.com/genai-sf?k=c", days=8):
-    """Directly scrape luma.com events without browser automation.
+def scrape_luma_events(url="https://lu.ma/genai-sf?k=c", days=8):
+    """Directly scrape lu.ma events without browser automation.
 
     Note: Luma.com shows events in chronological order. Since we can't reliably
     extract dates from static HTML without the full calendar rendering, we limit
     by taking only the first N events which are typically within the next few days.
     """
-    logger.info("Fetching Luma events directly from %s (next %d days)", url, days)
+    normalized_url = _normalize_luma_url(url)
+    logger.info("Fetching Luma events directly from %s (next %d days)", normalized_url, days)
 
     try:
         # Use headers to mimic a real browser
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
-        response = requests.get(url, headers=headers, timeout=30)
+        response = requests.get(normalized_url, headers=LUMA_REQUEST_HEADERS, timeout=30)
         response.raise_for_status()
     except Exception as exc:  # noqa: BLE001
         logger.error("Failed to fetch Luma events: %s", exc)
@@ -367,7 +374,7 @@ def scrape_luma_events(url="https://luma.com/genai-sf?k=c", days=8):
     events = []
 
     # Find all links with event-like paths
-    # Event links on luma.com are simple paths like "/ra7ba3kr", "/ai-x-healthcare"
+    # Event links on lu.ma are simple paths like "/ra7ba3kr", "/ai-x-healthcare"
     all_links = soup.find_all('a', href=re.compile(r'^/[^/]+$'))
 
     for link in all_links:
@@ -380,7 +387,10 @@ def scrape_luma_events(url="https://luma.com/genai-sf?k=c", days=8):
             continue
 
         # Build full URL
-        full_url = f"https://luma.com{href}" if not href.startswith('http') else href
+        if href.startswith('http'):
+            full_url = _normalize_luma_url(href)
+        else:
+            full_url = urljoin(LUMA_BASE_URL, href)
 
         # Extract title - try aria-label first, then look for h3 in parent button
         title_text = link.get('aria-label', '').strip()
@@ -425,6 +435,297 @@ def scrape_luma_events(url="https://luma.com/genai-sf?k=c", days=8):
     logger.info("Successfully extracted %d unique Luma events (limited from %d to ~%d days)",
                 len(limited_events), len(unique_events), days)
     return limited_events
+
+
+def _is_luma_url(url: str) -> bool:
+    if not url:
+        return False
+    normalized = url.lower()
+    return "luma.com" in normalized or "lu.ma" in normalized
+
+
+def _normalize_luma_url(url: str) -> str:
+    if not url:
+        return url
+    trimmed = url.strip()
+    if not trimmed:
+        return trimmed
+
+    lowered = trimmed.lower()
+    legacy_prefixes = [
+        "https://luma.com",
+        "http://luma.com",
+        "https://www.luma.com",
+        "http://www.luma.com",
+    ]
+    for prefix in legacy_prefixes:
+        if lowered.startswith(prefix):
+            return f"{LUMA_BASE_URL}{trimmed[len(prefix):]}"
+
+    if lowered.startswith("https://lu.ma"):
+        if not trimmed.startswith(LUMA_BASE_URL):
+            return f"{LUMA_BASE_URL}{trimmed[len('https://lu.ma'):]}"
+        return trimmed
+
+    if lowered.startswith("http://lu.ma"):
+        suffix = trimmed[len('http://lu.ma'):]
+        return f"{LUMA_BASE_URL}{suffix}"
+
+    if trimmed.startswith('/'):
+        return f"{LUMA_BASE_URL}{trimmed}"
+
+    return trimmed
+
+
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    normalized = value.replace('Z', '+00:00')
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+
+def _format_datetime_parts(dt_value: Optional[datetime]) -> Dict[str, str]:
+    if not dt_value:
+        return {"date_text": "", "time_text": ""}
+
+    date_text = dt_value.strftime('%B %d, %Y')
+    time_text = dt_value.strftime('%I:%M %p').lstrip('0')
+
+    tz_name = dt_value.strftime('%Z')
+    if tz_name:
+        time_text = f"{time_text} {tz_name}".strip()
+    else:
+        offset = dt_value.strftime('%z')
+        if offset:
+            offset_formatted = f"GMT{offset[:3]}:{offset[3:]}"
+            time_text = f"{time_text} {offset_formatted}".strip()
+
+    return {
+        "date_text": date_text,
+        "time_text": time_text,
+    }
+
+
+def _ensure_text(value, fallback: str = "") -> str:
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return fallback
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, dict):
+        extracted = (
+            _extract_name(value)
+            or _format_location_value(value)
+        )
+        if isinstance(extracted, str) and extracted:
+            return extracted
+        if extracted:
+            return _ensure_text(extracted)
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        combined = ', '.join(
+            part.strip()
+            for part in (_ensure_text(item) for item in value)
+            if part.strip()
+        )
+        return combined if combined else fallback
+    return str(value)
+
+
+def _format_location_value(location_value) -> str:
+    if not location_value:
+        return ""
+    if isinstance(location_value, list):
+        for item in location_value:
+            formatted = _format_location_value(item)
+            if formatted:
+                return formatted
+        return ""
+    if isinstance(location_value, dict):
+        name = _ensure_text(location_value.get('name') or location_value.get('legalName') or '')
+        address = location_value.get('address')
+        address_text = ""
+        if isinstance(address, dict):
+            components = [
+                address.get('streetAddress'),
+                address.get('addressLocality'),
+                address.get('addressRegion'),
+                address.get('postalCode'),
+                address.get('addressCountry'),
+            ]
+            address_text = ', '.join(
+                _ensure_text(part).strip() for part in components if _ensure_text(part).strip()
+            )
+        elif isinstance(address, str):
+            address_text = address.strip()
+        else:
+            address_text = _ensure_text(address).strip()
+
+        parts = [part for part in [name.strip(), address_text.strip()] if part]
+        return ', '.join(parts)
+    if isinstance(location_value, str):
+        return location_value.strip()
+    return ""
+
+
+def _extract_name(value) -> str:
+    if not value:
+        return ""
+    if isinstance(value, list):
+        for item in value:
+            name = _extract_name(item)
+            if name:
+                return name
+        return ""
+    if isinstance(value, dict):
+        return value.get('name') or value.get('legalName') or ''
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def _clean_description(text: Optional[str]) -> str:
+    if not text:
+        return ""
+    cleaned = BeautifulSoup(text, 'html.parser').get_text(' ', strip=True)
+    return re.sub(r'\s+', ' ', cleaned).strip()
+
+
+def _collect_jsonld_events(payload) -> List[Dict]:
+    events: List[Dict] = []
+
+    def _walk(node):
+        if isinstance(node, list):
+            for item in node:
+                _walk(item)
+            return
+        if not isinstance(node, dict):
+            return
+
+        node_type = node.get('@type')
+        if isinstance(node_type, list):
+            if any('Event' in str(entry) for entry in node_type):
+                events.append(node)
+        elif isinstance(node_type, str) and 'Event' in node_type:
+            events.append(node)
+
+        for key in ('@graph', 'graph', 'itemListElement', 'item', 'mainEntity'):
+            if key in node:
+                _walk(node[key])
+
+    _walk(payload)
+    return events
+
+
+def _extract_details_from_jsonld(html: str) -> Dict[str, str]:
+    soup = BeautifulSoup(html, 'html.parser')
+    scripts = soup.find_all('script', attrs={'type': 'application/ld+json'})
+
+    for script in scripts:
+        content = script.string or script.get_text()
+        if not content:
+            continue
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            continue
+
+        for event_node in _collect_jsonld_events(data):
+            start_value = event_node.get('startDate') or event_node.get('startTime')
+            start_dt = _parse_iso_datetime(start_value)
+            datetime_parts = _format_datetime_parts(start_dt)
+            location_text = _format_location_value(event_node.get('location'))
+            host_text = (
+                _extract_name(event_node.get('organizer'))
+                or _extract_name(event_node.get('performer'))
+                or _extract_name(event_node.get('creator'))
+            )
+            description_text = _clean_description(event_node.get('description'))
+
+            details = {
+                'date_text': datetime_parts['date_text'],
+                'time_text': datetime_parts['time_text'],
+                'location': location_text,
+                'host': host_text,
+                'description': description_text,
+            }
+
+            if start_dt:
+                details['start_iso'] = start_dt.isoformat()
+            if not any(details.values()):
+                continue
+            return details
+
+    return {}
+
+
+def _extract_details_fallback(html: str) -> Dict[str, str]:
+    soup = BeautifulSoup(html, 'html.parser')
+    details: Dict[str, str] = {}
+
+    time_tag = soup.find('time')
+    if time_tag:
+        dt_attr = time_tag.get('datetime')
+        parsed = _parse_iso_datetime(dt_attr)
+        datetime_parts = _format_datetime_parts(parsed)
+        details.update(datetime_parts)
+        if parsed:
+            details['start_iso'] = parsed.isoformat()
+
+    if 'location' not in details or not details.get('location'):
+        location_candidate = soup.find(attrs={'data-testid': re.compile('location', re.I)})
+        if location_candidate:
+            details['location'] = location_candidate.get_text(' ', strip=True)
+
+    if 'description' not in details or not details.get('description'):
+        meta_desc = soup.find('meta', attrs={'property': 'og:description'})
+        if meta_desc and meta_desc.get('content'):
+            details['description'] = meta_desc['content'].strip()
+
+    return {k: v for k, v in details.items() if v}
+
+
+@lru_cache(maxsize=256)
+def _fetch_luma_event_details(url: str) -> Dict[str, str]:
+    try:
+        response = requests.get(url, headers=LUMA_REQUEST_HEADERS, timeout=20)
+        response.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to fetch event details from %s: %s", url, exc)
+        return {}
+
+    html = response.text
+    time.sleep(0.3)
+    details = _extract_details_from_jsonld(html)
+    if details:
+        return details
+    return _extract_details_fallback(html)
+
+
+def _enrich_events_with_details(events: List[Dict]) -> List[Dict]:
+    enriched: List[Dict] = []
+    for event in events:
+        url = event.get('url', '')
+        normalized_url = url
+        extra: Dict[str, str] = {}
+        if _is_luma_url(url):
+            normalized_url = _normalize_luma_url(url)
+            extra = _fetch_luma_event_details(normalized_url)
+        merged = event.copy()
+        if normalized_url != url:
+            merged['url'] = normalized_url
+        for key, value in extra.items():
+            if value:
+                merged[key] = value
+        enriched.append(merged)
+    return enriched
 
 
 async def scrape_cerebral_valley_events_async(days=8):
@@ -703,7 +1004,8 @@ Search Results:
 {search_results}
 """
 
-        formatted_events = generate_with_gpt(format_prompt, temperature=0.1, max_tokens=2000)
+        # Some models only allow the default temperature of 1.0
+        formatted_events = generate_with_gpt(format_prompt, temperature=1.0, max_tokens=2000)
 
         # Format for display
         final_format = format_events_for_doc(formatted_events, "Web Search Results", days)
@@ -715,7 +1017,7 @@ Search Results:
         return None
 
 
-def generate_events(url="https://luma.com/genai-sf?k=c", source_name="Lu.ma GenAI SF", days=8):
+def generate_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI SF", days=8):
     """Go to specified URL and get the events for the specified number of days"""
     try:
         if "cerebralvalley.ai" in url:
@@ -724,20 +1026,20 @@ def generate_events(url="https://luma.com/genai-sf?k=c", source_name="Lu.ma GenA
                 st.error("Failed to extract Cerebral Valley events")
                 return False, None
             formatted_events = format_cerebral_valley_list(events_list, source_name, days)
-        elif url == "LUMA_COMBINED" or "luma.com" in url or "lu.ma" in url:
+        elif url == "LUMA_COMBINED" or _is_luma_url(url):
             # Use direct HTTP scraping for Luma events
             # If this is the combined Luma scrape, fetch from both URLs
             if url == "LUMA_COMBINED":
                 events_list = []
 
                 # Scrape genai-sf
-                genai_events = scrape_luma_events("https://luma.com/genai-sf?k=c", days)
+                genai_events = scrape_luma_events(f"{LUMA_BASE_URL}/genai-sf?k=c", days)
                 if genai_events:
                     events_list.extend(genai_events)
                     logger.info("Added %d events from genai-sf", len(genai_events))
 
                 # Scrape sf
-                sf_events = scrape_luma_events("https://luma.com/sf", days)
+                sf_events = scrape_luma_events(f"{LUMA_BASE_URL}/sf", days)
                 if sf_events:
                     events_list.extend(sf_events)
                     logger.info("Added %d events from sf", len(sf_events))
@@ -753,7 +1055,8 @@ def generate_events(url="https://luma.com/genai-sf?k=c", source_name="Lu.ma GenA
                 events_list = unique_events
                 logger.info("Combined total: %d unique events", len(events_list))
             else:
-                events_list = scrape_luma_events(url, days)
+                target_url = _normalize_luma_url(url)
+                events_list = scrape_luma_events(target_url, days)
 
             if not events_list:
                 st.error("Failed to extract Luma events")
@@ -883,15 +1186,15 @@ def clean_event_content(content):
             logger.warning("Discarded empty URL after stripping: %s", original)
             return None
         if url_text.startswith('/'):
-            normalized = f"https://luma.com{url_text}"
+            normalized = _normalize_luma_url(url_text)
         elif url_text.startswith('lu.ma/'):
-            normalized = f"https://{url_text}"
+            normalized = _normalize_luma_url(f"https://{url_text}")
         elif url_text.startswith('luma.com/'):
-            normalized = f"https://{url_text}"
+            normalized = _normalize_luma_url(f"https://{url_text}")
         elif url_text.startswith('www.'):
             normalized = f"https://{url_text}"
         else:
-            normalized = url_text
+            normalized = _normalize_luma_url(url_text)
         logger.info("URL normalized from %s to %s", original.strip(), normalized)
         return normalized
 
@@ -979,6 +1282,38 @@ def clean_event_content(content):
     return '\n'.join(processed_lines)
 
 
+def _format_event_entry_lines(event: Dict) -> List[str]:
+    lines: List[str] = []
+    title = _ensure_text(event.get('title', 'Untitled Event'), 'Untitled Event').strip()
+    url = _ensure_text(event.get('url', '')).strip()
+    if url:
+        lines.append(f"- **[{title}]({url})**")
+    else:
+        lines.append(f"- **{title}**")
+
+    date_text = _ensure_text(event.get('date_text', '')).strip()
+    time_text = _ensure_text(event.get('time_text', '')).strip()
+    datetime_parts = ' '.join(part for part in [date_text, time_text] if part)
+    if datetime_parts:
+        lines.append(f"  Date and Time: {datetime_parts}")
+
+    location = _ensure_text(event.get('location', '')).strip()
+    if location:
+        lines.append(f"  Location/Venue: {location}")
+
+    host = _ensure_text(event.get('host', '')).strip()
+    if host:
+        lines.append(f"  Host: {host}")
+
+    description = _ensure_text(event.get('description', '')).strip()
+    if description:
+        if len(description) > 300:
+            description = description[:297].rstrip() + '...'
+        lines.append(f"  Brief Description: {description}")
+
+    return lines
+
+
 def format_cerebral_valley_list(events, source_name="Cerebral Valley", days=8):
     today = datetime.now()
     end_date = today + timedelta(days=days)
@@ -992,14 +1327,11 @@ def format_cerebral_valley_list(events, source_name="Cerebral Valley", days=8):
     if not events:
         header.append("No events found on cerebralvalley.ai/events")
     else:
-        for event in events:
-            title = event.get('title', 'Untitled Event').strip()
-            url = event.get('url', '').strip()
-            host = event.get('host', '').strip()
-            line = f"- [{title}]({url})" if url else f"- {title}"
-            if host:
-                line += f" — {host}"
-            header.append(line)
+        detailed_events = _enrich_events_with_details(events)
+        for idx, event in enumerate(detailed_events):
+            header.extend(_format_event_entry_lines(event))
+            if idx < len(detailed_events) - 1:
+                header.append("")
 
     header.append("")
     header.append("=" * 50)
@@ -1009,7 +1341,7 @@ def format_cerebral_valley_list(events, source_name="Cerebral Valley", days=8):
 
 
 def fix_relative_urls(link_line):
-    """Convert relative URLs to full luma.com URLs"""
+    """Convert relative URLs to full lu.ma URLs"""
     import re
 
     # Pattern to match various URL formats in Link: lines
@@ -1025,24 +1357,24 @@ def fix_relative_urls(link_line):
         match = re.search(pattern, link_line)
         if match:
             url_part = match.group(1).strip()  # Remove any extra whitespace
-            # Convert to full luma.com URL
+            # Convert to full lu.ma URL
             if url_part.startswith('/'):
                 # Relative path
-                full_url = f"https://luma.com{url_part}"
+                full_url = _normalize_luma_url(url_part)
             elif 'example.com' in url_part:
-                # Replace example.com with luma.com
+                # Replace example.com with lu.ma
                 event_id = url_part.split('/')[-1]
-                full_url = f"https://luma.com/{event_id}"
+                full_url = f"{LUMA_BASE_URL}/{event_id}"
             elif not url_part.startswith('http'):
                 # Just a slug
-                full_url = f"https://luma.com/{url_part}"
+                full_url = f"{LUMA_BASE_URL}/{url_part}"
             else:
                 # Already a full URL, but check if it needs hostname replacement
                 if 'example.com' in url_part:
                     event_id = url_part.split('/')[-1]
-                    full_url = f"https://luma.com/{event_id}"
+                    full_url = f"{LUMA_BASE_URL}/{event_id}"
                 else:
-                    full_url = url_part
+                    full_url = _normalize_luma_url(url_part)
 
             return f"Link: {full_url}"
 
@@ -1122,13 +1454,14 @@ CRITICAL URL HANDLING:
 - If source data has "Event URL:" extract that value; preserve all actual URLs from source data"""
 
     try:
-        result = generate_with_gpt(combined_text + "\n\n" + prompt, temperature=0.1, max_tokens=3000)
+        # Some newer models only accept their default temperature (1.0)
+        result = generate_with_gpt(combined_text + "\n\n" + prompt, temperature=1.0, max_tokens=3000)
         return result
     except Exception as e:
         return f"Error combining events: {str(e)}"
 
 
-def fix_example_com_urls(line, base_url="https://luma.com"):
+def fix_example_com_urls(line, base_url=LUMA_BASE_URL):
     """Replace example.com URLs and relative URLs with proper base URLs"""
     import re
 
@@ -1143,8 +1476,8 @@ def fix_example_com_urls(line, base_url="https://luma.com"):
         link_text = match.group(1)
         url = match.group(2)
         event_id = url.split('/')[-1].strip()
-        # For luma.com, use just the ID; for others, might need /events/ prefix
-        if base_url == "https://luma.com":
+        # For lu.ma, use just the ID; for others, might need /events/ prefix
+        if base_url == LUMA_BASE_URL:
             return f'[{link_text}]({base_url}/{event_id})'
         else:
             return f'[{link_text}]({base_url}/events/{event_id})'
@@ -1157,8 +1490,8 @@ def fix_example_com_urls(line, base_url="https://luma.com"):
     def replace_relative_url(match):
         link_text = match.group(1)
         path = match.group(2)
-        # For luma.com, remove leading slash; for others, keep the path structure
-        if base_url == "https://luma.com":
+        # For lu.ma, remove leading slash; for others, keep the path structure
+        if base_url == LUMA_BASE_URL:
             event_id = path.lstrip('/')
             return f'[{link_text}]({base_url}/{event_id})'
         else:
@@ -1168,16 +1501,16 @@ def fix_example_com_urls(line, base_url="https://luma.com"):
 
     # Pattern 3: Plain example.com URLs
     plain_example = r'https://example\.com/([^\s\)]+)'
-    if base_url == "https://luma.com":
-        fixed_line = re.sub(plain_example, r'https://luma.com/\1', fixed_line)
+    if base_url == LUMA_BASE_URL:
+        fixed_line = re.sub(plain_example, LUMA_BASE_URL + r'/\1', fixed_line)
     else:
         fixed_line = re.sub(plain_example, base_url + r'/events/\1', fixed_line)
 
     # Pattern 4: Plain relative paths in Link: lines
     if 'Link:' in fixed_line or '**Link:**' in fixed_line:
         plain_relative = r'(\*\*Link:\*\*|\bLink:)\s*(/[^\s]+)'
-        if base_url == "https://luma.com":
-            fixed_line = re.sub(plain_relative, r'\1 https://luma.com\2', fixed_line)
+        if base_url == LUMA_BASE_URL:
+            fixed_line = re.sub(plain_relative, r'\1 ' + LUMA_BASE_URL + r'\2', fixed_line)
         else:
             fixed_line = re.sub(plain_relative, r'\1 ' + base_url + r'\2', fixed_line)
 
@@ -1252,7 +1585,7 @@ def main():
 
                 # Use real web search results
                 sample_search_results = """
-Generative AI San Francisco and Bay Area · Events Calendar - https://luma.com/genai-sf
+Generative AI San Francisco and Bay Area · Events Calendar - https://lu.ma/genai-sf
 Generative AI Summit | Silicon Valley - https://world.aiacceleratorinstitute.com/location/siliconvalley/
 Discover Artificial Intelligence Events & Activities in San Francisco, CA | Eventbrite - https://www.eventbrite.com/d/ca--san-francisco/artificial-intelligence/
 The AI Conference 2025 - Shaping the future of AI - https://aiconference.com/
@@ -1329,7 +1662,7 @@ Startup Grind Conference 2025 - https://www.startupgrind.com/events/details/star
 
             # Use real web search results
             sample_search_results = """
-Generative AI San Francisco and Bay Area · Events Calendar - https://luma.com/genai-sf
+Generative AI San Francisco and Bay Area · Events Calendar - https://lu.ma/genai-sf
 Generative AI Summit | Silicon Valley - https://world.aiacceleratorinstitute.com/location/siliconvalley/
 Discover Artificial Intelligence Events & Activities in San Francisco, CA | Eventbrite - https://www.eventbrite.com/d/ca--san-francisco/artificial-intelligence/
 The AI Conference 2025 - Shaping the future of AI - https://aiconference.com/

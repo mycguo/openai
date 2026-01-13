@@ -103,7 +103,7 @@ async def scrape_events(url, source_name):
 5. UI display with session state persistence
 
 ### URL Processing Pipeline
-- Detects and fixes relative URLs (`/event-id` → `https://luma.com/event-id`)
+- Detects and fixes relative URLs (`/event-id` → `https://lu.ma/event-id`)
 - Handles placeholder URLs (`example.com` → proper domain)
 - Source-aware URL construction (Lu.ma vs Cerebral Valley)
 - Markdown link parsing for `[text](url)` format
@@ -111,7 +111,7 @@ async def scrape_events(url, source_name):
 ## Event Source Configuration
 
 ### Supported Sources
-- **Lu.ma GenAI SF**: `https://luma.com/genai-sf?k=c`
+- **Lu.ma GenAI SF**: `https://lu.ma/genai-sf?k=c`
 - **Cerebral Valley**: `https://cerebralvalley.ai/events`
 
 ### Adding New Sources

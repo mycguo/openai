@@ -1,7 +1,7 @@
 # Luma.com URL Extraction Fix - Implementation Summary
 
 ## Problem
-The previous browser-use agent approach was failing to reliably extract event URLs from luma.com. The agent would either:
+The previous browser-use agent approach was failing to reliably extract event URLs from Lu.ma (formerly luma.com). The agent would either:
 - Return placeholder URLs like "example.com"
 - Return "Link" or "Not provided" instead of actual URLs
 - Miss URLs entirely due to unreliable JavaScript execution
@@ -17,7 +17,7 @@ Instead of using browser automation, I implemented a direct HTTP scraping approa
 ### Key Implementation Details
 
 #### URL Pattern Discovery (via Playwright browser inspection)
-- Event URLs on luma.com follow a simple pattern: `/event-slug` (e.g., `/ra7ba3kr`, `/ai-x-healthcare`)
+- Event URLs on Lu.ma follow a simple pattern: `/event-slug` (e.g., `/ra7ba3kr`, `/ai-x-healthcare`)
 - All event links are `<a>` tags with `href` attributes starting with `/` and containing only one path segment
 - Navigation links (like `/discover`, `/signin`, `/genai-sf`) need to be filtered out
 
@@ -45,15 +45,15 @@ Located in `events.py` at line ~323, this function:
    - First checking the `aria-label` attribute
    - Then looking for `<h3>` within parent `<button>`
    - Finally falling back to link text
-5. **Builds full URLs** by prepending `https://luma.com`
+5. **Builds full URLs** by prepending `https://lu.ma`
 6. **Deduplicates** events by URL to avoid duplicates
 
 ### Code Changes
 
 #### 1. New scrape_luma_events() function (events.py:323-395)
 ```python
-def scrape_luma_events(url="https://luma.com/genai-sf?k=c", days=8):
-    """Directly scrape luma.com events without browser automation."""
+def scrape_luma_events(url="https://lu.ma/genai-sf?k=c", days=8):
+    """Directly scrape lu.ma events without browser automation."""
     # HTTP request with browser-like headers
     # BeautifulSoup parsing
     # Link extraction with regex: ^/[^/]+$
@@ -63,7 +63,7 @@ def scrape_luma_events(url="https://luma.com/genai-sf?k=c", days=8):
 ```
 
 #### 2. Updated generate_events() function (events.py:683-724)
-Added conditional logic to route luma.com URLs to the new direct scraper:
+Added conditional logic to route Lu.ma URLs to the new direct scraper:
 
 ```python
 elif "luma.com" in url or "lu.ma" in url:
@@ -89,14 +89,14 @@ The implementation extracts events in this format:
 ```python
 {
     'title': 'East Meets West – Building the Future Beyond Borders',
-    'url': 'https://luma.com/ra7ba3kr',
+    'url': 'https://lu.ma/ra7ba3kr',
     'host': ''  # Host info not easily available from HTML
 }
 ```
 
 ## What's Removed
-- The browser-use agent approach with complex JavaScript extraction prompts is now **bypassed** for luma.com URLs
-- It's still available as fallback for other URLs that aren't luma.com or cerebralvalley.ai
+- The browser-use agent approach with complex JavaScript extraction prompts is now **bypassed** for Lu.ma URLs
+- It's still available as fallback for other URLs that aren't Lu.ma or cerebralvalley.ai
 
 ## Next Steps to Verify
 
@@ -107,7 +107,7 @@ streamlit run events.py
 
 Then click "Scrape Lu.ma GenAI SF" and verify that:
 1. Events are extracted successfully
-2. Each event has a proper URL like `https://luma.com/event-slug`
+2. Each event has a proper URL like `https://lu.ma/event-slug`
 3. No "example.com", "Link", or "Not provided" placeholders appear
 
 ## Files Modified

@@ -174,12 +174,12 @@ def get_claude_options(model: str):
                 ]
             ),
             "events_agent": AgentDefinition(
-                description="You are gathering incoming AI events in bay area. Search for sources from https://luma.com/sf, Meetup, eventbrite, startupgrind, Y combinator, 500 startups, Andreessen Horowitz (a16z), Stanford Events, Berkeley Events, LinkedIn Events, Silicon Valley Forum, Galvanize, StrictlyVC, Bay Area Tech Events, cerebralvalley.ai/events. You must include RSVP URL.",
+                description="You are gathering incoming AI events in bay area. Search for sources from https://lu.ma/sf, Meetup, eventbrite, startupgrind, Y combinator, 500 startups, Andreessen Horowitz (a16z), Stanford Events, Berkeley Events, LinkedIn Events, Silicon Valley Forum, Galvanize, StrictlyVC, Bay Area Tech Events, cerebralvalley.ai/events. You must include RSVP URL.",
                 prompt="""You are an AI events researcher for the Bay Area. When the user specifies a time period (e.g., "next 9 days"), gather AI/tech events from multiple sources.
 
 **Your Task:**
 1. Use browser tools to scrape events from key sources:
-   - https://luma.com/sf (primary source)
+   - https://lu.ma/sf (primary source)
    - https://cerebralvalley.ai/events
    - Meetup, Eventbrite, Y Combinator events, a16z events
 

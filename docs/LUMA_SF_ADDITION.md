@@ -1,14 +1,14 @@
-# Added https://luma.com/sf to Luma Event Sources
+# Added https://lu.ma/sf to Luma Event Sources
 
 ## Summary
-Added a second Luma.com calendar (https://luma.com/sf) to the existing scraper while keeping the 3-source structure (Lu.ma, Cerebral Valley, Web Search).
+Added a second Lu.ma calendar (https://lu.ma/sf) to the existing scraper while keeping the 3-source structure (Lu.ma, Cerebral Valley, Web Search).
 
 ## Implementation
 
 ### How It Works
 The Lu.ma scraper now fetches events from **two calendars** and combines them:
-1. `https://luma.com/genai-sf?k=c` (original GenAI SF calendar)
-2. `https://luma.com/sf` (new SF calendar)
+1. `https://lu.ma/genai-sf?k=c` (original GenAI SF calendar)
+2. `https://lu.ma/sf` (new SF calendar)
 
 Events from both sources are merged and deduplicated by URL, so the same event won't appear twice.
 
@@ -22,12 +22,12 @@ if url == "LUMA_COMBINED":
     events_list = []
 
     # Scrape genai-sf
-    genai_events = scrape_luma_events("https://luma.com/genai-sf?k=c", days)
+    genai_events = scrape_luma_events("https://lu.ma/genai-sf?k=c", days)
     if genai_events:
         events_list.extend(genai_events)
 
     # Scrape sf
-    sf_events = scrape_luma_events("https://luma.com/sf", days)
+    sf_events = scrape_luma_events("https://lu.ma/sf", days)
     if sf_events:
         events_list.extend(sf_events)
 
@@ -89,7 +89,7 @@ streamlit run events.py
 Click "Scrape Lu.ma" and verify:
 - Events from both genai-sf and sf appear
 - No duplicate events
-- All URLs are valid (https://luma.com/...)
+- All URLs are valid (https://lu.ma/...)
 
 ## Files Modified
 - `events.py` - Updated generate_events() and UI sections

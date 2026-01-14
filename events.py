@@ -1054,105 +1054,6 @@ def generate_event_image(combined_events_content=None):
         return False, None, error_msg
 
 
-def search_web_events(days=8):
-    """Use web search to find AI events from multiple sources"""
-    try:
-        # Define search sources
-        sources = [
-            "Meetup", "eventbrite", "startupgrind", "Y combinator", "500 startups",
-            "Andreessen Horowitz a16z", "Stanford Events", "Berkeley Events",
-            "LinkedIn Events", "Silicon Valley Forum", "Galvanize", "StrictlyVC",
-            "Bay Area Tech Events"
-        ]
-
-        # Create search query - this will be used by the UI to trigger WebSearch
-        sources_str = ", ".join(sources)
-
-        # Return a placeholder that will be replaced by actual search results
-        # The actual WebSearch will be triggered from the UI
-        return True, f"Web search for AI events from: {sources_str} (for next {days} days)"
-
-    except Exception as e:
-        st.error(f"Error in web search: {str(e)}")
-        return False, None
-
-
-def format_web_search_results(search_results, days=8):
-    """Format web search results into event format"""
-    try:
-        from datetime import datetime, timedelta
-        today = datetime.now()
-        end_date = today + timedelta(days=days)
-
-        sources = [
-            "Meetup", "eventbrite", "startupgrind", "Y combinator", "500 startups",
-            "Andreessen Horowitz a16z", "Stanford Events", "Berkeley Events",
-            "LinkedIn Events", "Silicon Valley Forum", "Galvanize", "StrictlyVC",
-            "Bay Area Tech Events"
-        ]
-        sources_str = ", ".join(sources)
-
-        # Use OpenAI GPT to format the search results into event format
-        format_prompt = f"""
-Extract and format AI/GenAI events from the following search results for the date range {today.strftime('%B %d, %Y')} to {end_date.strftime('%B %d, %Y')}.
-
-CRITICAL: Use EXACTLY this format:
-
-Event Name: [Name]
-Date and Time: [Date and Time]
-Location/Venue: [Venue/Address]
-Brief Description: [Brief description including organizer/host]
-Event URL: [Full URL - extract from search results, NEVER use "Not provided" or leave blank]
-
-Sources to prioritize: {sources_str}
-
-Only include events that are:
-1. Related to AI, GenAI, machine learning, or tech
-2. In the San Francisco Bay Area or virtual
-3. Within the next {days} days
-4. From the specified sources
-
-CRITICAL: For Event URL, extract the actual URL from the search results. NEVER write "Not provided" or leave it blank.
-
-Search Results:
-{search_results}
-"""
-
-        # Some models only allow the default temperature of 1.0
-        formatted_events = generate_with_gpt(format_prompt, temperature=1.0, max_tokens=2000)
-
-        fallback_required = False
-        lowered = formatted_events.lower()
-        failure_phrases = [
-            "couldn't find any events",
-            "could not find any events",
-            "no events found",
-            "i am unable to find",
-            "unable to find events",
-            "i couldn’t find any events",
-        ]
-        if any(phrase in lowered for phrase in failure_phrases):
-            fallback_required = True
-
-        if fallback_required or not formatted_events.strip():
-            logger.warning("LLM could not format web events; falling back to simple parser")
-            formatted_events = _fallback_web_search_format(search_results, days)
-
-        # Format for display
-        final_format = format_events_for_doc(formatted_events, "Web Search Results", days)
-
-        if "No events found" in final_format or "Error formatting events" in final_format:
-            logger.warning("Formatted web events appear empty; forcing fallback parser")
-            fallback_text = _fallback_web_search_format(search_results, days)
-            final_format = format_events_for_doc(fallback_text, "Web Search Results", days)
-
-        return final_format
-
-    except Exception as e:
-        st.error(f"Error formatting web search results: {str(e)}")
-        return None
-
-
 def generate_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI SF", days=8):
     """Go to specified URL and get the events for the specified number of days"""
     try:
@@ -1253,51 +1154,6 @@ def format_events_for_doc(events_data, source_name="Events", days=8):
         return f"Error formatting events: {str(e)}\n\nRaw data:\n{str(events_data)[:500]}..."
 
 
-def _fallback_web_search_format(search_results: str, days: int) -> str:
-    """Simple parser when GPT can't extract structured events."""
-    lines = []
-    for raw_line in search_results.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        title = line
-        url = ""
-        if ' - ' in line:
-            title_part, url_part = line.split(' - ', 1)
-            title = title_part.strip()
-            url = url_part.strip()
-        else:
-            parts = re.split(r"\s+(https?://\S+)", line, maxsplit=1)
-            if len(parts) >= 3:
-                title = parts[0].strip()
-                url = parts[1].strip()
-
-        if not url:
-            url_match = re.search(r"https?://\S+", line)
-            if url_match:
-                url = url_match.group(0)
-
-        if not title:
-            continue
-
-        entry = [
-            f"Event Name: {title}",
-            f"Date and Time: Within next {days} days",
-            "Location/Venue: San Francisco Bay Area or Virtual",
-            "Brief Description: Listed via web search source; visit URL for full details.",
-        ]
-        if url:
-            entry.append(f"Event URL: {url}")
-        else:
-            entry.append("Event URL: Not provided")
-
-        lines.append('\n'.join(entry))
-
-    if not lines:
-        return "No events found in search results."
-
-    separator = "\n\n" + "=" * 40 + "\n\n"
-    return separator.join(lines)
 
 
 def extract_events_from_agent_result(agent_result):
@@ -1712,29 +1568,22 @@ def main():
 
     # Configuration section
     st.subheader("⚙️ Configuration")
-    col_config1, col_config2 = st.columns([1, 3])
-    with col_config1:
-        days_to_scrape = st.number_input(
-            "Days to scrape",
-            min_value=1,
-            max_value=30,
-            value=8,
-            help="Number of days ahead to scrape events for"
-        )
-    with col_config2:
-        st.info(f"Will scrape events for the next {days_to_scrape} days")
+    days_to_scrape = st.number_input(
+        "Days to scrape",
+        min_value=1,
+        max_value=30,
+        value=8,
+        help="Number of days ahead to scrape events for"
+    )
 
     st.divider()
 
     st.subheader("🎯 Event Sources")
+    tab_luma, tab_cv = st.tabs(["Lu.ma Events", "Cerebral Valley Events"])
 
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.write("**Lu.ma Events**")
-        st.caption("genai-sf + sf calendars")
-        button1 = st.button("Scrape Lu.ma", key="luma_button")
-        if button1:
+    with tab_luma:
+        st.caption("Covers both genai-sf and sf calendars")
+        if st.button("Scrape Lu.ma", key="luma_button", use_container_width=True):
             with st.spinner("Scraping Lu.ma events from genai-sf and sf..."):
                 success, events = generate_events("LUMA_COMBINED", "Lu.ma Events", days_to_scrape)
                 if success:
@@ -1742,10 +1591,9 @@ def main():
                 else:
                     st.error("❌ Failed to scrape Lu.ma events")
 
-    with col2:
-        st.write("**Cerebral Valley Events**")
-        button2 = st.button("Scrape Cerebral Valley", key="cv_button")
-        if button2:
+    with tab_cv:
+        st.caption("Direct scrape from cerebralvalley.ai/events")
+        if st.button("Scrape Cerebral Valley", key="cv_button", use_container_width=True):
             with st.spinner("Scraping Cerebral Valley events..."):
                 success, events = generate_events("https://cerebralvalley.ai/events", "Cerebral Valley", days_to_scrape)
                 if success:
@@ -1753,68 +1601,17 @@ def main():
                 else:
                     st.error("❌ Failed to scrape Cerebral Valley events")
 
-    with col3:
-        st.write("**Web Search Events**")
-        st.markdown("*Meetup, Eventbrite, StartupGrind, Y Combinator, 500 Startups, a16z, Stanford, Berkeley, LinkedIn, Silicon Valley Forum, Galvanize, StrictlyVC, Bay Area Tech*")
-        button3 = st.button("Search Web Events", key="web_button")
-        if button3:
-            with st.spinner("Searching web for AI events..."):
-                # Perform web search
-                sources = [
-                    "Meetup", "eventbrite", "startupgrind", "Y combinator", "500 startups",
-                    "Andreessen Horowitz a16z", "Stanford Events", "Berkeley Events",
-                    "LinkedIn Events", "Silicon Valley Forum", "Galvanize", "StrictlyVC",
-                    "Bay Area Tech Events"
-                ]
-                sources_str = ", ".join(sources)
-                search_query = f"AI artificial intelligence GenAI events next {days_to_scrape} days {sources_str} San Francisco Bay Area 2024"
+    with st.expander("🚀 Bulk Actions", expanded=True):
+        button_all = st.button("Scrape Both Sources", key="all_button", type="primary")
+        if button_all:
+            with st.spinner("Scraping all event sources..."):
+                total_sources = 2
+                success_count = 0
+                all_events = []
 
-                # Use real web search results
-                sample_search_results = """
-Generative AI San Francisco and Bay Area · Events Calendar - https://lu.ma/genai-sf
-Generative AI Summit | Silicon Valley - https://world.aiacceleratorinstitute.com/location/siliconvalley/
-Discover Artificial Intelligence Events & Activities in San Francisco, CA | Eventbrite - https://www.eventbrite.com/d/ca--san-francisco/artificial-intelligence/
-The AI Conference 2025 - Shaping the future of AI - https://aiconference.com/
-Scaling GenAI with Microsoft for Startups | SF #TechWeek at Startup Grind - https://www.startupgrind.com/events/details/startup-grind-silicon-valley-san-francisco-bay-area-presents-scaling-genai-with-microsoft-for-startups-sf-techweek/
-Startup Grind Silicon Valley, San Francisco Bay Area - https://www.startupgrind.com/silicon-valley-san-francisco-bay-area/
-CV Events - https://cerebralvalley.ai/events
-AWS GenAI Loft San Francisco at Startup Grind - https://www.startupgrind.com/events/details/startup-grind-silicon-valley-san-francisco-bay-area-presents-aws-genai-loft-san-francisco/
-Startup Grind Conference 2025 - https://www.startupgrind.com/events/details/startup-grind-silicon-valley-san-francisco-bay-area-presents-startup-grind-conference-2025/
-                """
-
-                # Format the search results
-                formatted_results = format_web_search_results(sample_search_results, days_to_scrape)
-
-                if formatted_results:
-                    # Store results in session state
-                    st.session_state.web_search_results = formatted_results
-                    st.session_state.web_search_executed = True
-                    st.success("✅ Web search completed successfully!")
-                else:
-                    st.warning("⚠️ Web search completed but no relevant AI events found")
-
-    # Display web search results if they exist
-    if 'web_search_results' in st.session_state and st.session_state.web_search_results:
-        st.divider()
-        st.subheader("🔍 Web Search Results")
-        st.markdown("**AI Events from Web Search:**")
-        with st.container():
-            st.markdown(st.session_state.web_search_results)
-
-    st.divider()
-
-    # Add a button to scrape all sources including web search
-    st.subheader("🚀 Bulk Actions")
-    button_all = st.button("Scrape All Sources", key="all_button", type="primary")
-    if button_all:
-        with st.spinner("Scraping all event sources..."):
-            success_count = 0
-            all_events = []
-
-            # Initialize all_events with placeholders to maintain consistent order
+            # Initialize placeholders
             luma_events = None
             cv_events = None
-            web_events = None
 
             # Scrape Lu.ma (genai-sf + sf)
             st.write("1️⃣ Scraping Lu.ma (genai-sf + sf)...")
@@ -1836,59 +1633,8 @@ Startup Grind Conference 2025 - https://www.startupgrind.com/events/details/star
             else:
                 st.warning("⚠️ Cerebral Valley scraping failed")
 
-            # Web Search Events
-            st.write("3️⃣ Searching web for AI events...")
-            sources = [
-                "Meetup", "eventbrite", "startupgrind", "Y combinator", "500 startups",
-                "Andreessen Horowitz a16z", "Stanford Events", "Berkeley Events",
-                "LinkedIn Events", "Silicon Valley Forum", "Galvanize", "StrictlyVC",
-                "Bay Area Tech Events"
-            ]
-            sources_str = ", ".join(sources)
-
-            # Use real web search results
-            sample_search_results = """
-Generative AI San Francisco and Bay Area · Events Calendar - https://lu.ma/genai-sf
-Generative AI Summit | Silicon Valley - https://world.aiacceleratorinstitute.com/location/siliconvalley/
-Discover Artificial Intelligence Events & Activities in San Francisco, CA | Eventbrite - https://www.eventbrite.com/d/ca--san-francisco/artificial-intelligence/
-The AI Conference 2025 - Shaping the future of AI - https://aiconference.com/
-Scaling GenAI with Microsoft for Startups | SF #TechWeek at Startup Grind - https://www.startupgrind.com/events/details/startup-grind-silicon-valley-san-francisco-bay-area-presents-scaling-genai-with-microsoft-for-startups-sf-techweek/
-Startup Grind Silicon Valley, San Francisco Bay Area - https://www.startupgrind.com/silicon-valley-san-francisco-bay-area/
-CV Events - https://cerebralvalley.ai/events
-AWS GenAI Loft San Francisco at Startup Grind - https://www.startupgrind.com/events/details/startup-grind-silicon-valley-san-francisco-bay-area-presents-aws-genai-loft-san-francisco/
-Startup Grind Conference 2025 - https://www.startupgrind.com/events/details/startup-grind-silicon-valley-san-francisco-bay-area-presents-startup-grind-conference-2025/
-            """
-
-            # Format the web search results
-            formatted_web_results = format_web_search_results(sample_search_results, days_to_scrape)
-
-            if formatted_web_results:
-                success_count += 1
-                web_events = formatted_web_results
-                st.success("✅ Web search completed!")
-            else:
-                # Fallback to structured placeholder
-                web_search_placeholder = f"""Web Search Results - {sources_str} Events
-
-=================================================
-
-AI/GenAI Events from Web Search Sources - Next {days_to_scrape} Days
-
-Event Name: AI Events from {sources_str}
-Date and Time: Various dates within next {days_to_scrape} days
-Location/Venue: San Francisco Bay Area + Virtual
-Brief Description: Events from major platforms including Meetup, Eventbrite, StartupGrind, Y Combinator, 500 Startups, Andreessen Horowitz (a16z), Stanford Events, Berkeley Events, LinkedIn Events, Silicon Valley Forum, Galvanize, StrictlyVC, and Bay Area Tech Events
-Event URL: Various - check individual platforms
-
-=================================================
-Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-"""
-                success_count += 1
-                web_events = web_search_placeholder
-                st.success("✅ Web search placeholder created!")
-
-            # Always create all_events array in the correct order: [Lu.ma, Cerebral Valley, Web Search]
-            all_events = [luma_events, cv_events, web_events]
+            # Build final list of sources (Lu.ma + Cerebral Valley)
+            all_events = [luma_events, cv_events]
 
             # Store all events in session state for persistence
             if all_events:
@@ -1899,8 +1645,7 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                 st.divider()
                 st.subheader("📊 Results Summary")
 
-                # Always show 4 tabs for the 3 sources + combined
-                tab1, tab2, tab3, tab4 = st.tabs(["Lu.ma Events", "Cerebral Valley Events", "Web Search Events", "📋 Combined Results"])
+                tab1, tab2, tab3 = st.tabs(["Lu.ma Events", "Cerebral Valley Events", "📋 Combined Results"])
 
                 with tab1:
                     st.markdown("**Lu.ma Events**")
@@ -1917,15 +1662,8 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                         st.info("❌ Cerebral Valley scraping failed or no events found")
 
                 with tab3:
-                    st.markdown("**Web Search Events**")
-                    if all_events[2]:
-                        st.markdown(all_events[2])
-                    else:
-                        st.info("❌ Web search failed or no events found")
-
-                with tab4:
                     # Filter out None values for combining while keeping labels
-                    source_labels = ["Lu.ma Events", "Cerebral Valley Events", "Web Search Events"]
+                    source_labels = ["Lu.ma Events", "Cerebral Valley Events"]
                     valid_events = [
                         (source_labels[idx] if idx < len(source_labels) else f"Source {idx + 1}", content)
                         for idx, content in enumerate(all_events)
@@ -1988,317 +1726,203 @@ Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                         st.warning("❌ All sources failed - no events to combine")
 
             st.balloons()
-            st.success(f"🎉 Completed! Successfully scraped {success_count}/3 sources")
+            st.success(f"🎉 Completed! Successfully scraped {success_count}/{total_sources} sources")
 
     # Display stored events if they exist (persists after page rerun)
     if 'all_events' in st.session_state and st.session_state.all_events:
-        st.divider()
-        st.subheader("📊 Stored Results")
+        with st.expander("📊 Stored Results", expanded=False):
+            if len(st.session_state.all_events) >= 2:
+                tab1, tab2, tab3 = st.tabs(["Lu.ma Events", "Cerebral Valley Events", "All Events Combined"])
 
-        # Always show 4 tabs for consistency when all_events has 3 elements
-        if len(st.session_state.all_events) >= 3:
-            tab1, tab2, tab3, tab4 = st.tabs(["Lu.ma Events", "Cerebral Valley Events", "Web Search Events", "All Events Combined"])
+                with tab1:
+                    if st.session_state.all_events[0]:
+                        st.markdown(st.session_state.all_events[0])
+                    else:
+                        st.info("❌ Lu.ma events not available")
 
-            with tab1:
-                st.markdown("**Lu.ma Events**")
+                with tab2:
+                    if st.session_state.all_events[1]:
+                        st.markdown(st.session_state.all_events[1])
+                    else:
+                        st.info("❌ Cerebral Valley events not available")
+
+                with tab3:
+                    stored_labels = ["Lu.ma Events", "Cerebral Valley Events"]
+                    valid_events = [
+                        (stored_labels[idx] if idx < len(stored_labels) else f"Source {idx + 1}", content)
+                        for idx, content in enumerate(st.session_state.all_events)
+                        if content is not None
+                    ]
+
+                    if valid_events:
+                        formatted_combined = parse_and_format_combined_events(valid_events)
+                        col_header1, col_header2 = st.columns([3, 1])
+                        with col_header1:
+                            st.markdown("**All Events Combined (All Sources)**")
+                        with col_header2:
+                            copy_clicked_2 = st.button("📋 Copy", key="copy_btn_2", use_container_width=True)
+                            if copy_clicked_2:
+                                st.session_state.show_copy_area_2 = True
+                                st.success("👆 Text area shown below - select all and copy!")
+
+                        if formatted_combined.strip():
+                            with st.expander("📋 View Combined Events", expanded=False):
+                                st.markdown(formatted_combined)
+
+                            if st.session_state.get('show_copy_area_2', False) or copy_clicked_2:
+                                st.text_area(
+                                    "📋 Copy text (Select all: Cmd+A / Ctrl+A, then Copy: Cmd+C / Ctrl+C)",
+                                    value=formatted_combined,
+                                    height=300,
+                                    key="combined_events_text_2",
+                                    label_visibility="visible"
+                                )
+                                if st.button("✅ Done copying", key="done_copy_2"):
+                                    st.session_state.show_copy_area_2 = False
+                                    st.rerun()
+                            else:
+                                st.text_area(
+                                    "📋 Click 'Copy' button above to show full text for copying",
+                                    value=formatted_combined[:200] + "\n\n... (click Copy button to see full text) ...",
+                                    height=100,
+                                    key="combined_events_preview_2",
+                                    label_visibility="visible",
+                                    disabled=True
+                                )
+                            st.session_state.combined_events = formatted_combined
+                        else:
+                            st.warning("No combined events found.")
+                    else:
+                        st.warning("❌ No valid events to combine")
+
+            elif len(st.session_state.all_events) == 1:
                 if st.session_state.all_events[0]:
                     st.markdown(st.session_state.all_events[0])
                 else:
-                    st.info("❌ Lu.ma events not available")
+                    st.info("❌ No events available")
 
-            with tab2:
-                st.markdown("**Cerebral Valley Events**")
-                if st.session_state.all_events[1]:
-                    st.markdown(st.session_state.all_events[1])
-                else:
-                    st.info("❌ Cerebral Valley events not available")
-
-            with tab3:
-                st.markdown("**Web Search Events**")
-                if st.session_state.all_events[2]:
-                    st.markdown(st.session_state.all_events[2])
-                else:
-                    st.info("❌ Web search events not available")
-
-            with tab4:
-                # Filter out None values for combining with labels
-                stored_labels = ["Lu.ma Events", "Cerebral Valley Events", "Web Search Events"]
-                valid_events = [
-                    (stored_labels[idx] if idx < len(stored_labels) else f"Source {idx + 1}", content)
-                    for idx, content in enumerate(st.session_state.all_events)
-                    if content is not None
-                ]
-
-                if valid_events:
-                    formatted_combined = parse_and_format_combined_events(valid_events)
-                    
-                    # Header with copy button
-                    col_header1, col_header2 = st.columns([3, 1])
-                    with col_header1:
-                        st.markdown("**All Events Combined (All Sources)**")
-                    with col_header2:
-                        copy_clicked_2 = st.button("📋 Copy", key="copy_btn_2", use_container_width=True)
-                        if copy_clicked_2:
-                            st.session_state.show_copy_area_2 = True
-                            st.success("👆 Text area shown below - select all and copy!")
-
-                    if formatted_combined.strip():
-                        # Display in collapsed expander by default
-                        with st.expander("📋 View Combined Events", expanded=False):
-                            st.markdown(formatted_combined)
-                        
-                        # Show copy text area if copy button was clicked
-                        if st.session_state.get('show_copy_area_2', False) or copy_clicked_2:
-                            st.text_area(
-                                "📋 Copy text (Select all: Cmd+A / Ctrl+A, then Copy: Cmd+C / Ctrl+C)",
-                                value=formatted_combined,
-                                height=300,
-                                key="combined_events_text_2",
-                                label_visibility="visible"
-                            )
-                            if st.button("✅ Done copying", key="done_copy_2"):
-                                st.session_state.show_copy_area_2 = False
-                                st.rerun()
-                        else:
-                            # Show a preview snippet
-                            st.text_area(
-                                "📋 Click 'Copy' button above to show full text for copying",
-                                value=formatted_combined[:200] + "\n\n... (click Copy button to see full text) ...",
-                                height=100,
-                                key="combined_events_preview_2",
-                                label_visibility="visible",
-                                disabled=True
-                            )
-                        # Store combined events for essay generation
-                        st.session_state.combined_events = formatted_combined
-                    else:
-                        st.warning("No combined events found.")
-                else:
-                    st.warning("❌ No valid events to combine")
-
-        elif len(st.session_state.all_events) == 2:
-            tab1, tab2, tab3 = st.tabs(["Lu.ma Events", "Cerebral Valley Events", "All Events Combined"])
-
-            with tab1:
-                st.markdown("**Lu.ma Events**")
-                if st.session_state.all_events[0]:
-                    st.markdown(st.session_state.all_events[0])
-                else:
-                    st.info("❌ Lu.ma events not available")
-
-            with tab2:
-                st.markdown("**Cerebral Valley Events**")
-                if st.session_state.all_events[1]:
-                    st.markdown(st.session_state.all_events[1])
-                else:
-                    st.info("❌ Cerebral Valley events not available")
-
-            with tab3:
-                # Filter valid events with labels
-                stored_labels = ["Lu.ma Events", "Cerebral Valley Events"]
-                valid_events = [
-                    (stored_labels[idx] if idx < len(stored_labels) else f"Source {idx + 1}", content)
-                    for idx, content in enumerate(st.session_state.all_events)
-                    if content is not None
-                ]
-
-                if valid_events:
-                    formatted_combined = parse_and_format_combined_events(valid_events)
-                    
-                    # Header with copy button
-                    col_header1, col_header2 = st.columns([3, 1])
-                    with col_header1:
-                        st.markdown("**All Events Combined (All Sources)**")
-                    with col_header2:
-                        copy_clicked_3 = st.button("📋 Copy", key="copy_btn_3", use_container_width=True)
-                        if copy_clicked_3:
-                            st.session_state.show_copy_area_3 = True
-                            st.success("👆 Text area shown below - select all and copy!")
-
-                    if formatted_combined.strip():
-                        # Display in collapsed expander by default
-                        with st.expander("📋 View Combined Events", expanded=False):
-                            st.markdown(formatted_combined)
-                        
-                        # Show copy text area if copy button was clicked
-                        if st.session_state.get('show_copy_area_3', False) or copy_clicked_3:
-                            st.text_area(
-                                "📋 Copy text (Select all: Cmd+A / Ctrl+A, then Copy: Cmd+C / Ctrl+C)",
-                                value=formatted_combined,
-                                height=300,
-                                key="combined_events_text_3",
-                                label_visibility="visible"
-                            )
-                            if st.button("✅ Done copying", key="done_copy_3"):
-                                st.session_state.show_copy_area_3 = False
-                                st.rerun()
-                        else:
-                            # Show a preview snippet
-                            st.text_area(
-                                "📋 Click 'Copy' button above to show full text for copying",
-                                value=formatted_combined[:200] + "\n\n... (click Copy button to see full text) ...",
-                                height=100,
-                                key="combined_events_preview_3",
-                                label_visibility="visible",
-                                disabled=True
-                            )
-                        # Store combined events for essay generation
-                        st.session_state.combined_events = formatted_combined
-                    else:
-                        st.warning("No combined events found.")
-                else:
-                    st.warning("❌ No valid events to combine")
-
-        elif len(st.session_state.all_events) == 1:
-            st.markdown("**Scraped Events**")
-            if st.session_state.all_events[0]:
-                st.markdown(st.session_state.all_events[0])
+    with st.expander("💽 Save / Load Events", expanded=False):
+        col_save, col_load = st.columns(2)
+        with col_save:
+            if 'combined_events' in st.session_state and st.session_state.combined_events.strip():
+                st.download_button(
+                    "Save Combined Events",
+                    data=st.session_state.combined_events,
+                    file_name="combined_events.txt",
+                    mime="text/plain",
+                    help="Save the latest combined events to reuse later without scraping."
+                )
             else:
-                st.info("❌ No events available")
+                st.info("No combined events available to save yet.")
 
-    # Save Current Events section moved after Stored Results to maintain event display
-    if 'combined_events' in st.session_state and st.session_state.combined_events.strip():
-        st.divider()
-        st.subheader("💽 Save Current Events")
-        st.download_button(
-            "Save Combined Events",
-            data=st.session_state.combined_events,
-            file_name="combined_events.txt",
-            mime="text/plain",
-            help="Save the latest combined events to reuse later without scraping."
-        )
+        with col_load:
+            st.write("Upload previously saved events to skip scraping.")
+            uploaded_events_file = st.file_uploader(
+                "Load saved events file",
+                type=["txt", "json"],
+                key="upload_saved_events",
+                help="Upload a file previously saved from this app to reuse event data."
+            )
+            if uploaded_events_file is not None:
+                try:
+                    uploaded_content = uploaded_events_file.getvalue().decode("utf-8")
+                    if uploaded_content.strip():
+                        st.session_state.combined_events = uploaded_content
+                        st.session_state.loaded_events_source = "Uploaded file"
+                        st.success("Saved events loaded successfully. You can generate an essay without scraping.")
 
-    st.divider()
+                        with st.expander("Preview Loaded Events", expanded=False):
+                            st.markdown(uploaded_content)
+                    else:
+                        st.warning("Uploaded file is empty.")
+                except Exception as exc:
+                    st.error(f"Unable to read uploaded file: {exc}")
 
-    st.subheader("💾 Load Saved Events")
-    st.write("Upload previously saved events to skip scraping.")
-    uploaded_events_file = st.file_uploader(
-        "Load saved events file",
-        type=["txt", "json"],
-        key="upload_saved_events",
-        help="Upload a file previously saved from this app to reuse event data."
-    )
-    if uploaded_events_file is not None:
-        try:
-            uploaded_content = uploaded_events_file.getvalue().decode("utf-8")
-            if uploaded_content.strip():
-                st.session_state.combined_events = uploaded_content
-                st.session_state.loaded_events_source = "Uploaded file"
-                st.success("Saved events loaded successfully. You can generate an essay without scraping.")
+    with st.expander("📝 Essay Generation", expanded=False):
+        st.write("Generate an essay based on the scraped events")
+        button_essay = False
+        if 'combined_events' in st.session_state:
+            button_essay = st.button("Generate Essay from Scraped Events", key="essay_button")
+            if button_essay:
+                with st.spinner("Generating essay from scraped events..."):
+                    success, essay_text = generate_essay(st.session_state.combined_events)
+                    if success:
+                        st.session_state.generated_essay = essay_text
+                        st.success("✅ Essay generated successfully!")
+                        st.markdown("**Essay based on scraped events:**")
+                        st.markdown(essay_text)
+                        st.text_area(
+                            "Generated essay (copy or edit):",
+                            value=essay_text,
+                            height=400,
+                            key="generated_essay_live",
+                            label_visibility="visible"
+                        )
+                    else:
+                        st.error("❌ Failed to generate essay")
+        else:
+            st.info("📋 Please scrape events first using 'Scrape All Sources' to generate an essay.")
+            st.button("Generate Essay from Scraped Events", key="essay_button", disabled=True)
 
-                # Display loaded events in an expander to keep the UI clean
-                with st.expander("Preview Loaded Events", expanded=False):
-                    st.markdown(uploaded_content)
-            else:
-                st.warning("Uploaded file is empty.")
-        except Exception as exc:
-            st.error(f"Unable to read uploaded file: {exc}")
+        if st.session_state.get('generated_essay') and not button_essay:
+            st.markdown("**Essay based on scraped events:**")
+            st.markdown(st.session_state.generated_essay)
+            st.text_area(
+                "Generated essay (copy or edit):",
+                value=st.session_state.generated_essay,
+                height=400,
+                key="generated_essay_saved",
+                label_visibility="visible"
+            )
 
-    st.divider()
+    with st.expander("🎨 Image Generation", expanded=False):
+        st.write("Generate a promotional image based on the scraped events using OpenAI's DALL-E 3 API")
 
-    # Add essay generation section
-    st.subheader("📝 Essay Generation")
-    st.write("Generate an essay based on the scraped events")
+        if 'combined_events' in st.session_state:
+            col_img1, col_img2 = st.columns([1, 1])
 
-    # Check if we have combined events data in session state
-    button_essay = False
-    if 'combined_events' in st.session_state:
-        button_essay = st.button("Generate Essay from Scraped Events", key="essay_button")
-        if button_essay:
-            with st.spinner("Generating essay from scraped events..."):
-                success, essay_text = generate_essay(st.session_state.combined_events)
-                if success:
-                    st.session_state.generated_essay = essay_text
-                    st.success("✅ Essay generated successfully!")
-                    st.subheader("📝 Generated Essay")
-                    st.markdown("**Essay based on scraped events:**")
-                    st.markdown(essay_text)
-                    st.text_area(
-                        "Generated essay (copy or edit):",
-                        value=essay_text,
-                        height=400,
-                        key="generated_essay_live",
-                        label_visibility="visible"
-                    )
-                else:
-                    st.error("❌ Failed to generate essay")
-    else:
-        st.info("📋 Please scrape events first using 'Scrape All Sources' to generate an essay.")
-        st.button("Generate Essay from Scraped Events", key="essay_button", disabled=True)
+            with col_img1:
+                button_image = st.button("Generate Event Image", key="image_button", type="primary")
 
-    if st.session_state.get('generated_essay') and not button_essay:
-        st.subheader("📝 Generated Essay")
-        st.markdown("**Essay based on scraped events:**")
-        st.markdown(st.session_state.generated_essay)
-        st.text_area(
-            "Generated essay (copy or edit):",
-            value=st.session_state.generated_essay,
-            height=400,
-            key="generated_essay_saved",
-            label_visibility="visible"
-        )
+            with col_img2:
+                if 'generated_image' in st.session_state:
+                    st.success("✅ Image generated! Displayed below.")
 
-    st.divider()
+            if button_image:
+                with st.spinner("Generating image from events..."):
+                    success, image_payload, error = generate_event_image(st.session_state.combined_events)
 
-    # Add image generation section
-    st.subheader("🎨 Image Generation")
-    st.write("Generate a promotional image based on the scraped events using OpenAI's DALL-E 3 API")
-
-    # Check if we have combined events data in session state
-    if 'combined_events' in st.session_state:
-        col_img1, col_img2 = st.columns([1, 1])
-        
-        with col_img1:
-            button_image = st.button("Generate Event Image", key="image_button", type="primary")
-        
-        with col_img2:
-            if 'generated_image' in st.session_state:
-                st.success("✅ Image generated! Displayed below.")
-        
-        if button_image:
-            with st.spinner("Generating image from events..."):
-                success, image_payload, error = generate_event_image(st.session_state.combined_events)
-                
-                if success and image_payload:
-                    # Store image bytes in session state
-                    st.session_state.generated_image = image_payload
-                    st.success("✅ Image generated successfully!")
-                    
-                    # Display the image
-                    st.markdown("### Generated Image")
-                    st.image(
-                        image_payload["bytes"],
-                        caption="AI Events Promotional Image",
-                        use_container_width=True,
-                    )
-                    
-                    # Add download option
-                    st.download_button(
-                        "Download Image",
-                        data=image_payload["bytes"],
-                        file_name="ai_events_image.png",
-                        mime=image_payload.get("mime_type", "image/png"),
-                        help="Download the generated image",
-                    )
-                else:
-                    error_msg = error or "Failed to generate image"
-                    st.error(f"❌ {error_msg}")
-                    
-                    # Show more detailed error information
-                    with st.expander("🔍 Error Details", expanded=False):
-                        st.code(error_msg, language="text")
-                        st.markdown("""
-                        **Troubleshooting:**
-                        - Make sure your OpenAI API key has DALL-E access
-                        - Check if you have sufficient API quota/credits
-                        - Verify that DALL-E 3 is available for your account
-                        - Check OpenAI API status for outages
-                    """)
-
-                    st.info("💡 Tip: Ensure your OpenAI API key has access to DALL-E 3 image generation.")
-    else:
-        st.info("📋 Please scrape events first using 'Scrape All Sources' to generate an image.")
-        st.button("Generate Event Image", key="image_button", disabled=True)
+                    if success and image_payload:
+                        st.session_state.generated_image = image_payload
+                        st.success("✅ Image generated successfully!")
+                        st.image(
+                            image_payload["bytes"],
+                            caption="AI Events Promotional Image",
+                            use_container_width=True,
+                        )
+                        st.download_button(
+                            "Download Image",
+                            data=image_payload["bytes"],
+                            file_name="ai_events_image.png",
+                            mime=image_payload.get("mime_type", "image/png"),
+                            help="Download the generated image",
+                        )
+                    else:
+                        error_msg = error or "Failed to generate image"
+                        st.error(f"❌ {error_msg}")
+                        with st.expander("🔍 Error Details", expanded=False):
+                            st.code(error_msg, language="text")
+                            st.markdown("""
+                            **Troubleshooting:**
+                            - Make sure your OpenAI API key has DALL-E access
+                            - Check if you have sufficient API quota/credits
+                            - Verify that DALL-E 3 is available for your account
+                            - Check OpenAI API status for outages
+                        """)
+                        st.info("💡 Tip: Ensure your OpenAI API key has access to DALL-E 3 image generation.")
+        else:
+            st.info("📋 Please scrape events first using 'Scrape All Sources' to generate an image.")
+            st.button("Generate Event Image", key="image_button", disabled=True)
     
     # Display previously generated image if available
     if 'generated_image' in st.session_state and st.session_state.generated_image:

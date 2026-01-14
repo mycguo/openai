@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 from urllib.parse import urljoin
 
 import streamlit as st
+import streamlit.components.v1 as st_components
 from openai import OpenAI
 from anthropic import Anthropic
 import requests
@@ -18,6 +19,91 @@ from bs4 import BeautifulSoup
 logger = logging.getLogger(__name__)
 
 _browser_use_file_patch_applied = False
+
+
+def render_copy_button(content: str, key_suffix: str, label: str = "📋 Copy") -> None:
+    if not content or not content.strip():
+        st.caption("Copy unavailable (no text)")
+        return
+
+    safe_id = re.sub(r"[^0-9a-zA-Z_-]", "-", key_suffix)
+    button_id = f"copy-btn-{safe_id}"
+    escaped = json.dumps(content).replace("</", "<\\/")
+    html = f"""
+        <style>
+        #{button_id} {{
+            width: 100%;
+            padding: 0.6rem 1rem;
+            border-radius: 0.5rem;
+            border: 1px solid #2b6cb0;
+            background: linear-gradient(90deg, #3182ce, #2c5282);
+            color: white;
+            font-weight: 600;
+            cursor: pointer;
+        }}
+        #{button_id}:hover {{
+            background: linear-gradient(90deg, #2c5282, #2a4365);
+        }}
+        </style>
+        <button id="{button_id}">{label}</button>
+        <script>
+        (function() {{
+            const btn = document.getElementById("{button_id}");
+            if (!btn) {{
+                return;
+            }}
+            const text = {escaped};
+            const defaultLabel = "{label}";
+            const successLabel = "✅ Copied!";
+            const failureLabel = "⚠️ Copy failed";
+
+            const fallbackCopy = () => {{
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.style.position = 'fixed';
+                textarea.style.opacity = '0';
+                textarea.style.left = '-1000px';
+                textarea.style.top = '0';
+                document.body.appendChild(textarea);
+                textarea.focus();
+                textarea.select();
+                try {{
+                    if (!document.execCommand('copy')) {{
+                        btn.textContent = failureLabel;
+                    }} else {{
+                        btn.textContent = successLabel;
+                    }}
+                }} catch (err) {{
+                    console.error('execCommand copy failed', err);
+                    btn.textContent = failureLabel;
+                }} finally {{
+                    document.body.removeChild(textarea);
+                    setTimeout(() => (btn.textContent = defaultLabel), 2000);
+                }}
+            }};
+
+            const handleClick = () => {{
+                if (navigator.clipboard && navigator.clipboard.writeText) {{
+                    navigator.clipboard
+                        .writeText(text)
+                        .then(() => {{
+                            btn.textContent = successLabel;
+                            setTimeout(() => (btn.textContent = defaultLabel), 2000);
+                        }})
+                        .catch((err) => {{
+                            console.warn('Clipboard API copy failed', err);
+                            fallbackCopy();
+                        }});
+                }} else {{
+                    fallbackCopy();
+                }}
+            }};
+
+            btn.addEventListener('click', handleClick);
+        }})();
+        </script>
+    """
+    st_components.html(html, height=70)
 
 
 def _disable_browser_use_file_saving() -> None:
@@ -1679,10 +1765,7 @@ def main():
                         with col_header1:
                             st.markdown("**All Events Combined (All Sources)**")
                         with col_header2:
-                            copy_clicked_1 = st.button("📋 Copy", key="copy_btn_1", use_container_width=True)
-                            if copy_clicked_1:
-                                st.session_state.show_copy_area_1 = True
-                                st.success("👆 Text area shown below - select all and copy!")
+                            render_copy_button(formatted_combined, "combined-live-1")
 
                         # Debug info
                         if not formatted_combined.strip():
@@ -1697,27 +1780,26 @@ def main():
                             with st.expander("📋 View Combined Events", expanded=False):
                                 st.markdown(formatted_combined)
                             
-                            # Show copy text area if copy button was clicked or always show a compact version
-                            if st.session_state.get('show_copy_area_1', False) or copy_clicked_1:
+                            # Preview snippet and optional full text expander
+                            st.text_area(
+                                "📋 Preview (first 200 characters)",
+                                value=(
+                                    formatted_combined[:200] +
+                                    ("\n\n... (open expander for full text) ..." if len(formatted_combined) > 200 else "")
+                                ),
+                                height=100,
+                                key="combined_events_preview_1",
+                                label_visibility="visible",
+                                disabled=True
+                            )
+
+                            with st.expander("✏️ View / edit full combined text", expanded=False):
                                 st.text_area(
-                                    "📋 Copy text (Select all: Cmd+A / Ctrl+A, then Copy: Cmd+C / Ctrl+C)",
+                                    "Combined events text",
                                     value=formatted_combined,
                                     height=300,
                                     key="combined_events_text_1",
-                                    label_visibility="visible"
-                                )
-                                if st.button("✅ Done copying", key="done_copy_1"):
-                                    st.session_state.show_copy_area_1 = False
-                                    st.rerun()
-                            else:
-                                # Show a preview snippet
-                                st.text_area(
-                                    "📋 Click 'Copy' button above to show full text for copying",
-                                    value=formatted_combined[:200] + "\n\n... (click Copy button to see full text) ...",
-                                    height=100,
-                                    key="combined_events_preview_1",
-                                    label_visibility="visible",
-                                    disabled=True
+                                    label_visibility="collapsed"
                                 )
 
                         # Store combined events in session state for essay generation
@@ -1760,34 +1842,31 @@ def main():
                         with col_header1:
                             st.markdown("**All Events Combined (All Sources)**")
                         with col_header2:
-                            copy_clicked_2 = st.button("📋 Copy", key="copy_btn_2", use_container_width=True)
-                            if copy_clicked_2:
-                                st.session_state.show_copy_area_2 = True
-                                st.success("👆 Text area shown below - select all and copy!")
+                            render_copy_button(formatted_combined, "combined-stored-1")
 
                         if formatted_combined.strip():
                             with st.expander("📋 View Combined Events", expanded=False):
                                 st.markdown(formatted_combined)
 
-                            if st.session_state.get('show_copy_area_2', False) or copy_clicked_2:
+                            st.text_area(
+                                "📋 Preview (first 200 characters)",
+                                value=(
+                                    formatted_combined[:200] +
+                                    ("\n\n... (open expander for full text) ..." if len(formatted_combined) > 200 else "")
+                                ),
+                                height=100,
+                                key="combined_events_preview_2",
+                                label_visibility="visible",
+                                disabled=True
+                            )
+
+                            with st.expander("✏️ View / edit full combined text", expanded=False):
                                 st.text_area(
-                                    "📋 Copy text (Select all: Cmd+A / Ctrl+A, then Copy: Cmd+C / Ctrl+C)",
+                                    "Combined events text",
                                     value=formatted_combined,
                                     height=300,
                                     key="combined_events_text_2",
-                                    label_visibility="visible"
-                                )
-                                if st.button("✅ Done copying", key="done_copy_2"):
-                                    st.session_state.show_copy_area_2 = False
-                                    st.rerun()
-                            else:
-                                st.text_area(
-                                    "📋 Click 'Copy' button above to show full text for copying",
-                                    value=formatted_combined[:200] + "\n\n... (click Copy button to see full text) ...",
-                                    height=100,
-                                    key="combined_events_preview_2",
-                                    label_visibility="visible",
-                                    disabled=True
+                                    label_visibility="collapsed"
                                 )
                             st.session_state.combined_events = formatted_combined
                         else:
@@ -1832,7 +1911,34 @@ def main():
                         st.success("Saved events loaded successfully. You can generate an essay without scraping.")
 
                         with st.expander("Preview Loaded Events", expanded=False):
+                            col_header1, col_header2 = st.columns([3, 1])
+                            with col_header1:
+                                st.markdown("**Loaded Events (Uploaded Preview)**")
+                            with col_header2:
+                                render_copy_button(uploaded_content, "loaded-preview")
+
                             st.markdown(uploaded_content)
+
+                            st.text_area(
+                                "📋 Preview (first 200 characters)",
+                                value=(
+                                    uploaded_content[:200]
+                                    + ("\n\n... (open expander for full text) ..." if len(uploaded_content) > 200 else "")
+                                ),
+                                height=100,
+                                key="loaded_events_preview",
+                                label_visibility="visible",
+                                disabled=True
+                            )
+
+                            with st.expander("✏️ View / edit full loaded text", expanded=False):
+                                st.text_area(
+                                    "Loaded events text",
+                                    value=uploaded_content,
+                                    height=300,
+                                    key="loaded_events_text",
+                                    label_visibility="collapsed"
+                                )
                     else:
                         st.warning("Uploaded file is empty.")
                 except Exception as exc:

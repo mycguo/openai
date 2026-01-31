@@ -10,6 +10,7 @@ from datetime import datetime
 import requests
 import streamlit as st
 from anthropic import Anthropic
+from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ ANTHROPIC_SONNET_MODEL = (
     or "claude-sonnet-4-5"
 )
 ASSEMBLYAI_API_KEY = st.secrets.get("ASSEMBLYAI_API_KEY")
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 UPLOAD_ENDPOINT = "https://api.assemblyai.com/v2/upload"
 TRANSCRIPT_ENDPOINT = "https://api.assemblyai.com/v2/transcript"
 CHUNK_SIZE = 5_242_880  # 5 MB
@@ -40,6 +42,8 @@ _SESSION_ARTICLE_CACHE = os.path.join(SCRAPED_DIR, ".pending_article.txt")
 # LinkedIn
 LINKEDIN_API_URL = "https://api.linkedin.com/rest/posts"
 LINKEDIN_API_VERSION = os.getenv("LINKEDIN_API_VERSION", "202509")
+LINKEDIN_IMAGE_INIT_URL = "https://api.linkedin.com/rest/images?action=initializeUpload"
+DALLE_MODEL = "dall-e-3"
 LINKEDIN_AUTH_URL = "https://www.linkedin.com/oauth/v2/authorization"
 LINKEDIN_TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
 LINKEDIN_USERINFO_URL = "https://api.linkedin.com/v2/userinfo"
@@ -47,6 +51,8 @@ LINKEDIN_ME_URL = "https://api.linkedin.com/v2/me"
 
 if ANTHROPIC_API_KEY:
     os.environ["ANTHROPIC_API_KEY"] = ANTHROPIC_API_KEY
+if OPENAI_API_KEY:
+    os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
 
 # ─── Playwright helpers ──────────────────────────────────────────
@@ -354,6 +360,13 @@ def _create_anthropic_client() -> Anthropic:
     return Anthropic(api_key=ANTHROPIC_API_KEY)
 
 
+@st.cache_resource
+def _create_openai_client() -> OpenAI:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OpenAI API key is not configured. Set OPENAI_API_KEY in secrets or env.")
+    return OpenAI(api_key=OPENAI_API_KEY)
+
+
 def generate_with_claude(prompt: str, temperature: float = 1.0, max_tokens: int = 4000) -> str:
     client = _create_anthropic_client()
     response = client.messages.create(
@@ -409,6 +422,54 @@ Shorten it while keeping the key insights and engaging tone. Output ONLY the sho
         if len(article) <= 3000:
             return article
     return article
+
+
+def _build_article_image_prompt(article_text: str, episode_title: str = "") -> str:
+    clean_text = re.sub(r"#\w+", "", article_text or "").strip()
+    snippet = clean_text.replace("\n", " ")
+    snippet = re.sub(r"\s+", " ", snippet)[:500]
+    title = episode_title.strip() if episode_title else "AI podcast highlights"
+    return (
+        "Create a clean, modern, professional LinkedIn image that summarizes an article. "
+        f"Episode title: {title}. "
+        f"Key themes: {snippet}. "
+        "Use bold typography, abstract tech shapes, and a polished gradient background. "
+        "No logos, no trademarks, no faces."
+    )
+
+
+def generate_article_image(article_text: str, episode_title: str = "", prompt_override: str = ""):
+    """Generate an image for the LinkedIn article using OpenAI's DALL-E 3 model."""
+    try:
+        if not article_text or not article_text.strip():
+            return False, None, None, "No article content available to build an image."
+
+        prompt_for_image = prompt_override.strip() if prompt_override else _build_article_image_prompt(article_text, episode_title)
+        client = _create_openai_client()
+        response = client.images.generate(
+            model=DALLE_MODEL,
+            prompt=prompt_for_image,
+            size="1024x1024",
+            quality="standard",
+            n=1,
+        )
+
+        if response.data and len(response.data) > 0:
+            image_url = response.data[0].url
+            image_response = requests.get(image_url, timeout=30)
+            if image_response.status_code == 200:
+                payload = {
+                    "bytes": image_response.content,
+                    "mime_type": "image/png",
+                    "alt_text": f"Illustration for {episode_title or 'AI podcast highlights'}",
+                }
+                return True, payload, prompt_for_image, None
+            error_msg = f"Failed to download image from URL: {image_url}"
+            return False, None, prompt_for_image, error_msg
+
+        return False, None, prompt_for_image, "DALL-E 3 returned no image data"
+    except Exception as e:
+        return False, None, None, f"Error generating image: {str(e)}"
 
 
 # ─── Step 5: LinkedIn OAuth & Publish ────────────────────────────
@@ -497,7 +558,35 @@ def fetch_authenticated_member_urn(access_token):
         return None
 
 
-def post_to_linkedin(content, access_token, author_id):
+def initialize_linkedin_image_upload(access_token: str, owner_urn: str):
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "X-Restli-Protocol-Version": "2.0.0",
+        "Linkedin-Version": LINKEDIN_API_VERSION,
+    }
+    payload = {"initializeUploadRequest": {"owner": owner_urn}}
+    response = requests.post(LINKEDIN_IMAGE_INIT_URL, json=payload, headers=headers, timeout=30)
+    if response.status_code >= 400:
+        return False, None, None, f"{response.status_code}: {response.text}"
+    data = response.json()
+    value = data.get("value", {})
+    upload_url = value.get("uploadUrl")
+    image_urn = value.get("image")
+    if not upload_url or not image_urn:
+        return False, None, None, "LinkedIn image initialize response missing uploadUrl or image URN."
+    return True, upload_url, image_urn, None
+
+
+def upload_linkedin_image(upload_url: str, image_bytes: bytes, mime_type: str):
+    headers = {"Content-Type": mime_type or "image/png"}
+    response = requests.put(upload_url, data=image_bytes, headers=headers, timeout=60)
+    if response.status_code >= 400:
+        return False, f"{response.status_code}: {response.text}"
+    return True, None
+
+
+def post_to_linkedin(content, access_token, author_id, image_payload=None):
     if not author_id:
         return False, "Missing LinkedIn author ID. Please reconnect your account."
 
@@ -524,6 +613,24 @@ def post_to_linkedin(content, access_token, author_id):
         "lifecycleState": "PUBLISHED",
         "isReshareDisabledByAuthor": False,
     }
+    if image_payload:
+        if not image_payload.get("bytes"):
+            return False, "Image payload is empty."
+        init_ok, upload_url, image_urn, init_error = initialize_linkedin_image_upload(
+            access_token,
+            author_urn,
+        )
+        if not init_ok:
+            return False, f"Image upload init failed: {init_error}"
+        upload_ok, upload_error = upload_linkedin_image(
+            upload_url,
+            image_payload.get("bytes", b""),
+            image_payload.get("mime_type", "image/png"),
+        )
+        if not upload_ok:
+            return False, f"Image upload failed: {upload_error}"
+        alt_text = image_payload.get("alt_text") or "AI podcast illustration"
+        payload["content"] = {"media": {"id": image_urn, "altText": alt_text}}
     try:
         response = requests.post(LINKEDIN_API_URL, json=payload, headers=headers)
         if response.status_code >= 400:
@@ -603,12 +710,38 @@ def _handle_linkedin_oauth():
 
 def main():
     st.title("🎙️ AI Podcast to LinkedIn Article")
-    st.markdown("Scrape **The AI Daily Brief**, transcribe, generate a LinkedIn article, and publish.")
+    st.markdown("Scrape **podcast**, transcribe, generate a LinkedIn article, and publish.")
 
     _handle_linkedin_oauth()
 
+    # ── Connect LinkedIn Account ──
+    st.subheader("Connect LinkedIn Account")
+    token_active = (
+        "linkedin_token" in st.session_state
+        and time.time() < st.session_state.get("token_expires", 0)
+    )
+
+    if not token_active:
+        config = get_linkedin_config()
+        if config:
+            if st.button("Connect LinkedIn Account"):
+                # Save article to disk so it survives the OAuth redirect
+                article = st.session_state.get("article", "").strip()
+                if article:
+                    os.makedirs(SCRAPED_DIR, exist_ok=True)
+                    with open(_SESSION_ARTICLE_CACHE, "w") as f:
+                        f.write(article)
+                auth_url = generate_auth_url(config)
+                st.markdown(f"[Click here to authorize]({auth_url})")
+    else:
+        st.success("LinkedIn connected!")
+        if st.button("Disconnect LinkedIn"):
+            for key in ["linkedin_token", "token_expires", "author_id"]:
+                st.session_state.pop(key, None)
+            st.rerun()
+
     # ── Step 1: Fetch Episode ──
-    st.header("Step 1: Fetch Latest Episode")
+    st.subheader("Step 1: Fetch Latest Episode")
     if st.button("Fetch Latest Episode", type="primary"):
         with st.spinner("Scraping Podchaser for latest episode..."):
             try:
@@ -654,10 +787,8 @@ def main():
             st.success("Audio URL set!")
             st.rerun()
 
-    st.divider()
-
     # ── Step 2: Transcribe ──
-    st.header("Step 2: Transcribe Audio")
+    st.subheader("Step 2: Transcribe Audio")
     audio_url = st.session_state.get("episode", {}).get("audio_url", "")
     can_transcribe = bool(audio_url)
 
@@ -722,10 +853,8 @@ def main():
         with st.expander("View Transcript", expanded=False):
             st.text_area("Transcript", st.session_state.transcript, height=300, disabled=True)
 
-    st.divider()
-
     # ── Step 3: Generate Article ──
-    st.header("Step 3: Generate LinkedIn Article")
+    st.subheader("Step 3: Generate LinkedIn Article")
     has_transcript = "transcript" in st.session_state
 
     # Load a previously saved article
@@ -778,30 +907,72 @@ def main():
             st.caption(f"{char_count}/3000 characters")
         st.session_state.article = edited
 
-    st.divider()
+    st.markdown("**Optional: Generate a LinkedIn image from the article**")
+    if not OPENAI_API_KEY:
+        st.info("Set OPENAI_API_KEY to enable image generation.")
+    else:
+        has_article = bool(st.session_state.get("article", "").strip())
+        if "article_image_prompt" not in st.session_state:
+            st.session_state.article_image_prompt = ""
+        ep_title = st.session_state.get("episode", {}).get("title", "")
+        default_prompt = _build_article_image_prompt(
+            st.session_state.get("article", ""),
+            ep_title,
+        )
+        prompt_col, reset_col = st.columns([5, 1])
+        with prompt_col:
+            prompt_value = st.text_area(
+                "Image prompt",
+                value=st.session_state.article_image_prompt or default_prompt,
+                height=140,
+            )
+        with reset_col:
+            if st.button("Reset prompt"):
+                st.session_state.article_image_prompt = default_prompt
+                st.rerun()
+        st.session_state.article_image_prompt = prompt_value
+        if st.button("Generate Article Image", disabled=not has_article):
+            with st.spinner("Generating image from article..."):
+                success, image_payload, prompt_used, error = generate_article_image(
+                    st.session_state.article,
+                    ep_title,
+                    prompt_override=st.session_state.article_image_prompt,
+                )
+            if success and image_payload:
+                st.session_state.article_image = image_payload
+                st.session_state.article_image_prompt = prompt_used
+                st.success("Image generated!")
+            else:
+                st.error(error or "Failed to generate image.")
+
+        if st.session_state.get("article_image"):
+            st.image(
+                st.session_state.article_image["bytes"],
+                caption="Generated image",
+                use_container_width=True,
+            )
+            st.download_button(
+                label="Download image",
+                data=st.session_state.article_image["bytes"],
+                file_name="linkedin_article_image.png",
+                mime=st.session_state.article_image.get("mime_type", "image/png"),
+            )
+            if st.button("Clear image"):
+                st.session_state.pop("article_image", None)
+                st.session_state.pop("article_image_prompt", None)
+                st.rerun()
 
     # ── Step 4: Publish to LinkedIn ──
-    st.header("Step 4: Publish to LinkedIn")
-
-    token_active = (
-        "linkedin_token" in st.session_state
-        and time.time() < st.session_state.get("token_expires", 0)
-    )
+    st.subheader("Step 4: Publish to LinkedIn")
 
     if not token_active:
-        config = get_linkedin_config()
-        if config:
-            if st.button("Connect LinkedIn Account"):
-                # Save article to disk so it survives the OAuth redirect
-                article = st.session_state.get("article", "").strip()
-                if article:
-                    os.makedirs(SCRAPED_DIR, exist_ok=True)
-                    with open(_SESSION_ARTICLE_CACHE, "w") as f:
-                        f.write(article)
-                auth_url = generate_auth_url(config)
-                st.markdown(f"[Click here to authorize]({auth_url})")
+        st.warning("LinkedIn not connected.")
+        st.info("Connect your LinkedIn account above to enable publishing.")
     else:
         st.success("LinkedIn connected!")
+        include_image = False
+        if st.session_state.get("article_image"):
+            include_image = st.checkbox("Include generated image in post", value=True)
         if st.button("Publish to LinkedIn", type="primary"):
             content = st.session_state.get("article", "").strip()
             if not content:
@@ -810,10 +981,12 @@ def main():
                 st.error(f"Article is {len(content)} characters. LinkedIn's limit is 3000. Please shorten it.")
             else:
                 with st.spinner("Publishing..."):
+                    image_payload = st.session_state.article_image if include_image else None
                     success, result = post_to_linkedin(
                         content,
                         st.session_state.linkedin_token,
                         st.session_state.author_id,
+                        image_payload=image_payload,
                     )
                 if success:
                     st.success("Published to LinkedIn!")
@@ -832,12 +1005,6 @@ def main():
                     st.balloons()
                 else:
                     st.error(f"Failed to publish: {result}")
-
-        if st.button("Disconnect LinkedIn"):
-            for key in ["linkedin_token", "token_expires", "author_id"]:
-                st.session_state.pop(key, None)
-            st.rerun()
-
 
 if __name__ == "__main__":
     main()

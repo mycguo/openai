@@ -867,72 +867,79 @@ def _enrich_events_with_details(events: List[Dict]) -> List[Dict]:
     return enriched
 
 
-async def scrape_cerebral_valley_events_async(days=8):
-    """Scrape cerebralvalley.ai/events using Playwright (requires JavaScript rendering)."""
+def _ensure_playwright_browsers() -> None:
+    """Install Playwright Chromium if not already present."""
+    import subprocess
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            path = p.chromium.executable_path
+            if os.path.exists(path):
+                return
+    except Exception:
+        pass
+    logger.info("Installing Playwright Chromium browser...")
+    subprocess.run(["playwright", "install", "chromium"], check=True)
+
+
+async def _scrape_cerebral_valley_async(days=8):
+    """Scrape cerebralvalley.ai/events using Playwright (JS-rendered page)."""
     from playwright.async_api import async_playwright
 
     target_url = "https://cerebralvalley.ai/events"
     logger.info("Fetching Cerebral Valley events from %s using Playwright", target_url)
 
+    async with async_playwright() as p:
+        # Try system chromium first, then fall back to Playwright-managed browser
+        launch_kwargs = {"headless": True}
+        for path in ["/usr/bin/chromium", "/usr/bin/chromium-browser",
+                     "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"]:
+            if os.path.exists(path):
+                launch_kwargs["executable_path"] = path
+                break
+
+        browser = await p.chromium.launch(**launch_kwargs)
+        page = await browser.new_page()
+        await page.goto(target_url, wait_until="networkidle")
+        await page.wait_for_timeout(3000)
+
+        events_data = await page.evaluate("""
+            () => {
+                const links = Array.from(document.querySelectorAll('a[aria-label^="Open event"]'));
+                return links.map(a => {
+                    const title = a.getAttribute('aria-label')?.replace(/^Open event:\\s*/i, '').trim() || '';
+                    const href = a.getAttribute('href') || '';
+                    let host = '';
+                    const parent = a.closest('div');
+                    if (parent) {
+                        const paragraphs = parent.querySelectorAll('p');
+                        const locations = [];
+                        paragraphs.forEach(p => {
+                            const text = p.textContent?.trim() || '';
+                            if (text && !/AM|PM|·/.test(text)) locations.push(text);
+                        });
+                        host = locations.slice(0, 2).join(' ');
+                    }
+                    return { title, url: href, host };
+                });
+            }
+        """)
+
+        await browser.close()
+        logger.info("Extracted %d Cerebral Valley events", len(events_data))
+        return events_data
+
+
+def scrape_cerebral_valley_events(days=8):
+    """Scrape Cerebral Valley events, installing Playwright browsers if needed."""
     try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
-
-            # Navigate and wait for network to be idle
-            await page.goto(target_url, wait_until="networkidle")
-
-            # Wait a bit for dynamic content to load
-            await page.wait_for_timeout(2000)
-
-            # Extract events using JavaScript
-            events_data = await page.evaluate("""
-                () => {
-                    const links = Array.from(document.querySelectorAll('a[aria-label^="Open event"]'));
-                    return links.map(a => {
-                        const title = a.getAttribute('aria-label')?.replace(/^Open event:\\s*/i, '').trim() || '';
-                        const href = a.getAttribute('href') || '';
-
-                        // Try to find location info in parent container
-                        let host = '';
-                        const parent = a.closest('div');
-                        if (parent) {
-                            const paragraphs = parent.querySelectorAll('p');
-                            const locations = [];
-                            paragraphs.forEach(p => {
-                                const text = p.textContent?.trim() || '';
-                                // Skip time-related paragraphs
-                                if (text && !/AM|PM|·/.test(text)) {
-                                    locations.push(text);
-                                }
-                            });
-                            host = locations.slice(0, 2).join(' ');
-                        }
-
-                        return {
-                            title: title,
-                            url: href,
-                            host: host
-                        };
-                    });
-                }
-            """)
-
-            await browser.close()
-
-            logger.info("Successfully extracted %d Cerebral Valley events", len(events_data))
-            return events_data
-
+        _ensure_playwright_browsers()
+        return asyncio.run(_scrape_cerebral_valley_async(days))
     except Exception as exc:
         logger.error("Failed to fetch Cerebral Valley events: %s", exc)
         import traceback
         traceback.print_exc()
         return []
-
-
-def scrape_cerebral_valley_events(days=8):
-    """Wrapper to run async Cerebral Valley scraper synchronously."""
-    return asyncio.run(scrape_cerebral_valley_events_async(days))
 
 
 def _extract_event_links(events_block: str):
@@ -1646,6 +1653,26 @@ def fix_example_com_urls(line, base_url=LUMA_BASE_URL):
 
 
 
+def _auto_save_results(content: str, source_name: str) -> Optional[str]:
+    """Save scraped results to a timestamped file in the scraped_results directory."""
+    if not content or not content.strip():
+        return None
+    try:
+        save_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scraped_results")
+        os.makedirs(save_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", source_name).strip("_").lower()
+        filename = f"{safe_name}_{timestamp}.txt"
+        filepath = os.path.join(save_dir, filename)
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(content)
+        logger.info("Auto-saved scraped results to %s", filepath)
+        return filepath
+    except Exception as exc:
+        logger.warning("Failed to auto-save results: %s", exc)
+        return None
+
+
 def main():
     st.title("AI Events Scraper")
     st.header("Automatically extract and display AI events")
@@ -1669,21 +1696,29 @@ def main():
 
     with tab_luma:
         st.caption("Covers both genai-sf and sf calendars")
-        if st.button("Scrape Lu.ma", key="luma_button", use_container_width=True):
+        if st.button("Scrape Lu.ma", key="luma_button", width="stretch"):
             with st.spinner("Scraping Lu.ma events from genai-sf and sf..."):
                 success, events = generate_events("LUMA_COMBINED", "Lu.ma Events", days_to_scrape)
                 if success:
-                    st.success("✅ Lu.ma events scraped successfully!")
+                    saved = _auto_save_results(events, "luma_events")
+                    if saved:
+                        st.success(f"✅ Lu.ma events scraped and saved to `{os.path.basename(saved)}`")
+                    else:
+                        st.success("✅ Lu.ma events scraped successfully!")
                 else:
                     st.error("❌ Failed to scrape Lu.ma events")
 
     with tab_cv:
         st.caption("Direct scrape from cerebralvalley.ai/events")
-        if st.button("Scrape Cerebral Valley", key="cv_button", use_container_width=True):
+        if st.button("Scrape Cerebral Valley", key="cv_button", width="stretch"):
             with st.spinner("Scraping Cerebral Valley events..."):
                 success, events = generate_events("https://cerebralvalley.ai/events", "Cerebral Valley", days_to_scrape)
                 if success:
-                    st.success("✅ Cerebral Valley events scraped successfully!")
+                    saved = _auto_save_results(events, "cerebral_valley")
+                    if saved:
+                        st.success(f"✅ Cerebral Valley events scraped and saved to `{os.path.basename(saved)}`")
+                    else:
+                        st.success("✅ Cerebral Valley events scraped successfully!")
                 else:
                     st.error("❌ Failed to scrape Cerebral Valley events")
 
@@ -1804,6 +1839,11 @@ def main():
 
                         # Store combined events in session state for essay generation
                         st.session_state.combined_events = formatted_combined
+
+                        # Auto-save combined results
+                        saved = _auto_save_results(formatted_combined, "combined_events")
+                        if saved:
+                            st.info(f"💾 Results auto-saved to `{os.path.basename(saved)}`")
                     else:
                         st.warning("❌ All sources failed - no events to combine")
 
@@ -1880,69 +1920,55 @@ def main():
                 else:
                     st.info("❌ No events available")
 
-    with st.expander("💽 Save / Load Events", expanded=False):
-        col_save, col_load = st.columns(2)
-        with col_save:
-            if 'combined_events' in st.session_state and st.session_state.combined_events.strip():
-                st.download_button(
-                    "Save Combined Events",
-                    data=st.session_state.combined_events,
-                    file_name="combined_events.txt",
-                    mime="text/plain",
-                    help="Save the latest combined events to reuse later without scraping."
-                )
-            else:
-                st.info("No combined events available to save yet.")
+    with st.expander("💽 Load Events", expanded=False):
+        st.write("Upload previously saved events to skip scraping.")
+        uploaded_events_file = st.file_uploader(
+            "Load saved events file",
+            type=["txt", "json"],
+            key="upload_saved_events",
+            help="Upload a file previously saved from this app to reuse event data."
+        )
+        if uploaded_events_file is not None:
+            try:
+                uploaded_content = uploaded_events_file.getvalue().decode("utf-8")
+                if uploaded_content.strip():
+                    st.session_state.combined_events = uploaded_content
+                    st.session_state.loaded_events_source = "Uploaded file"
+                    st.success("Saved events loaded successfully. You can generate an essay without scraping.")
 
-        with col_load:
-            st.write("Upload previously saved events to skip scraping.")
-            uploaded_events_file = st.file_uploader(
-                "Load saved events file",
-                type=["txt", "json"],
-                key="upload_saved_events",
-                help="Upload a file previously saved from this app to reuse event data."
-            )
-            if uploaded_events_file is not None:
-                try:
-                    uploaded_content = uploaded_events_file.getvalue().decode("utf-8")
-                    if uploaded_content.strip():
-                        st.session_state.combined_events = uploaded_content
-                        st.session_state.loaded_events_source = "Uploaded file"
-                        st.success("Saved events loaded successfully. You can generate an essay without scraping.")
+                    with st.expander("Preview Loaded Events", expanded=False):
+                        col_header1, col_header2 = st.columns([3, 1])
+                        with col_header1:
+                            st.markdown("**Loaded Events (Uploaded Preview)**")
+                        with col_header2:
+                            render_copy_button(uploaded_content, "loaded-preview")
 
-                        with st.expander("Preview Loaded Events", expanded=False):
-                            col_header1, col_header2 = st.columns([3, 1])
-                            with col_header1:
-                                st.markdown("**Loaded Events (Uploaded Preview)**")
-                            with col_header2:
-                                render_copy_button(uploaded_content, "loaded-preview")
+                        st.markdown(uploaded_content)
 
-                            st.markdown(uploaded_content)
+                        st.text_area(
+                            "📋 Preview (first 200 characters)",
+                            value=(
+                                uploaded_content[:200]
+                                + ("\n\n... (open expander for full text) ..." if len(uploaded_content) > 200 else "")
+                            ),
+                            height=100,
+                            key="loaded_events_preview",
+                            label_visibility="visible",
+                            disabled=True
+                        )
 
+                        with st.expander("✏️ View / edit full loaded text", expanded=False):
                             st.text_area(
-                                "📋 Preview (first 200 characters)",
-                                value=(
-                                    uploaded_content[:200]
-                                    + ("\n\n... (open expander for full text) ..." if len(uploaded_content) > 200 else "")
-                                ),
-                                height=100,
-                                key="loaded_events_preview",
-                                label_visibility="visible",
-                                disabled=True
+                                "Loaded events text",
+                                value=uploaded_content,
+                                height=300,
+                                key="loaded_events_text",
+                                label_visibility="collapsed"
                             )
-
-                            with st.expander("✏️ View / edit full loaded text", expanded=False):
-                                st.text_area(
-                                    "Loaded events text",
-                                    value=uploaded_content,
-                                    height=300,
-                                    key="loaded_events_text",
-                                    label_visibility="collapsed"
-                                )
-                    else:
-                        st.warning("Uploaded file is empty.")
-                except Exception as exc:
-                    st.error(f"Unable to read uploaded file: {exc}")
+                else:
+                    st.warning("Uploaded file is empty.")
+            except Exception as exc:
+                st.error(f"Unable to read uploaded file: {exc}")
 
     with st.expander("📝 Essay Generation", expanded=False):
         st.write("Generate an essay based on the scraped events")
@@ -2004,7 +2030,7 @@ def main():
                         st.image(
                             image_payload["bytes"],
                             caption="AI Events Promotional Image",
-                            use_container_width=True,
+                            width="stretch",
                         )
                         st.download_button(
                             "Download Image",
@@ -2037,7 +2063,7 @@ def main():
         st.image(
             st.session_state.generated_image["bytes"], 
             caption="AI Events Promotional Image", 
-            use_container_width=True
+            width="stretch"
         )
 
 

@@ -38,6 +38,7 @@ PODCHASER_URL = "https://www.podchaser.com/podcasts/the-ai-daily-brief-artificia
 
 SCRAPED_DIR = "scraped_results"
 _SESSION_ARTICLE_CACHE = os.path.join(SCRAPED_DIR, ".pending_article.txt")
+_SESSION_SOURCE_CACHE = os.path.join(SCRAPED_DIR, ".pending_source.json")
 
 # LinkedIn
 LINKEDIN_API_URL = "https://api.linkedin.com/rest/posts"
@@ -698,6 +699,21 @@ def _handle_linkedin_oauth():
                         st.session_state.article = cached
                         st.session_state.article_editor = cached
                     os.remove(_SESSION_ARTICLE_CACHE)
+                if os.path.exists(_SESSION_SOURCE_CACHE):
+                    try:
+                        import json
+                        with open(_SESSION_SOURCE_CACHE) as f:
+                            source_data = json.load(f) or {}
+                        if source_data.get("episode"):
+                            st.session_state.episode = source_data["episode"]
+                        if source_data.get("direct_audio_url"):
+                            st.session_state.direct_audio_url = source_data["direct_audio_url"]
+                        if source_data.get("source_mode"):
+                            st.session_state.source_mode = source_data["source_mode"]
+                    except Exception as exc:
+                        logger.warning("Failed to restore source data: %s", exc)
+                    finally:
+                        os.remove(_SESSION_SOURCE_CACHE)
                 try:
                     st.query_params.clear()
                 except AttributeError:
@@ -714,121 +730,207 @@ def main():
 
     _handle_linkedin_oauth()
 
-    # ── Connect LinkedIn Account ──
-    st.subheader("Connect LinkedIn Account")
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stHorizontalBlock"]:nth-of-type(1),
+        div[data-testid="stHorizontalBlock"]:nth-of-type(2) {
+            padding: 0.5rem;
+            border-radius: 0.75rem;
+        }
+        div[data-testid="stHorizontalBlock"]:nth-of-type(1) {
+            background: #f2f5ff;
+        }
+        div[data-testid="stHorizontalBlock"]:nth-of-type(2) {
+            background: #f7f3ff;
+        }
+        div[data-testid="stHorizontalBlock"]:nth-of-type(1) > div,
+        div[data-testid="stHorizontalBlock"]:nth-of-type(2) > div {
+            padding: 0.75rem;
+            border-radius: 0.6rem;
+        }
+        div[data-testid="stHorizontalBlock"]:nth-of-type(1) > div:nth-child(1) {
+            background: #e6ecff;
+        }
+        div[data-testid="stHorizontalBlock"]:nth-of-type(1) > div:nth-child(2) {
+            background: #e9f7ff;
+        }
+        div[data-testid="stHorizontalBlock"]:nth-of-type(2) > div:nth-child(1) {
+            background: #fff0f3;
+        }
+        div[data-testid="stHorizontalBlock"]:nth-of-type(2) > div:nth-child(2) {
+            background: #f0fff4;
+        }
+        button[kind="primary"] {
+            background: #9ad1ff;
+            border: 1px solid #7fbef2;
+            color: #0b2e4b;
+        }
+        button[kind="primary"]:hover {
+            background: #7fbef2;
+            border-color: #6aaee6;
+            color: #0b2e4b;
+        }
+        div[data-testid="stAlert"][data-baseweb="notification"] svg {
+            color: #7fbef2;
+        }
+        input[type="checkbox"] {
+            accent-color: #7fbef2;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     token_active = (
         "linkedin_token" in st.session_state
         and time.time() < st.session_state.get("token_expires", 0)
     )
 
-    if not token_active:
-        config = get_linkedin_config()
-        if config:
-            if st.button("Connect LinkedIn Account"):
-                # Save article to disk so it survives the OAuth redirect
-                article = st.session_state.get("article", "").strip()
-                if article:
-                    os.makedirs(SCRAPED_DIR, exist_ok=True)
-                    with open(_SESSION_ARTICLE_CACHE, "w") as f:
-                        f.write(article)
-                auth_url = generate_auth_url(config)
-                st.markdown(f"[Click here to authorize]({auth_url})")
-    else:
-        st.success("LinkedIn connected!")
-        if st.button("Disconnect LinkedIn"):
-            for key in ["linkedin_token", "token_expires", "author_id"]:
-                st.session_state.pop(key, None)
-            st.rerun()
-
-    # ── Step 1: Fetch Episode ──
-    st.subheader("Step 1: Fetch Latest Episode")
-    if st.button("Fetch Latest Episode", type="primary"):
-        with st.spinner("Scraping Podchaser for latest episode..."):
-            try:
-                episode = scrape_latest_episode()
-                st.session_state.episode = episode
-                st.success(f"Found: **{episode['title']}**")
-                logger.info("Episode URL: %s", episode.get("url", ""))
-                logger.info("Audio URL: %s", episode.get("audio_url", ""))
-                st.info(f"Episode URL: {episode.get('url', 'N/A')}")
-                st.info(f"Audio URL: {episode.get('audio_url', 'N/A') or 'Not found'}")
-            except Exception as e:
-                st.error(f"Failed to scrape episode: {e}")
-
-    if "episode" in st.session_state:
-        ep = st.session_state.episode
-        st.markdown(f"**Title:** {ep['title']}")
-        if ep.get("date"):
-            st.markdown(f"**Date:** {ep['date']}")
-        if ep.get("description"):
-            st.markdown(f"**Description:** {ep['description'][:300]}")
-        st.markdown(f"**Episode URL:** {ep['url']}")
-        if ep.get("audio_url"):
-            st.markdown(f"**Audio URL:** `{ep['audio_url'][:100]}...`")
+    # ── Row 1 ──
+    row1_left, row1_right = st.columns(2)
+    with row1_left:
+        st.subheader("Connect LinkedIn Account")
+        if not token_active:
+            config = get_linkedin_config()
+            if config:
+                if st.button("Connect LinkedIn Account"):
+                    # Save article to disk so it survives the OAuth redirect
+                    article = st.session_state.get("article", "").strip()
+                    if article:
+                        os.makedirs(SCRAPED_DIR, exist_ok=True)
+                        with open(_SESSION_ARTICLE_CACHE, "w") as f:
+                            f.write(article)
+                    source_payload = {
+                        "episode": st.session_state.get("episode"),
+                        "direct_audio_url": st.session_state.get("direct_audio_url", ""),
+                        "source_mode": st.session_state.get("source_mode", ""),
+                    }
+                    try:
+                        os.makedirs(SCRAPED_DIR, exist_ok=True)
+                        with open(_SESSION_SOURCE_CACHE, "w") as f:
+                            import json
+                            json.dump(source_payload, f)
+                    except Exception as exc:
+                        logger.warning("Failed to cache source data: %s", exc)
+                    auth_url = generate_auth_url(config)
+                    st.markdown(f"[Click here to authorize]({auth_url})")
         else:
-            st.warning("No audio URL found automatically. You can paste one below.")
-            manual_url = st.text_input("Paste audio URL (mp3/m4a):", key="manual_audio_url")
-            if manual_url:
-                st.session_state.episode["audio_url"] = manual_url
-
-    st.markdown("**— or paste an audio URL directly —**")
-    col_url, col_btn = st.columns([3, 1])
-    with col_url:
-        direct_url = st.text_input("Audio URL (mp3/m4a):", key="direct_audio_url", label_visibility="collapsed", placeholder="Paste audio URL here...")
-    with col_btn:
-        if st.button("Use URL", disabled=not direct_url):
-            st.session_state.episode = {
-                "title": "Manual Audio",
-                "date": "",
-                "url": "",
-                "audio_url": direct_url,
-                "description": "",
-            }
-            st.success("Audio URL set!")
-            st.rerun()
-
-    # ── Step 2: Transcribe ──
-    st.subheader("Step 2: Transcribe Audio")
-    audio_url = st.session_state.get("episode", {}).get("audio_url", "")
-    can_transcribe = bool(audio_url)
-
-    # Load a previously saved transcript
-    saved_transcripts = sorted(
-        [f for f in os.listdir(SCRAPED_DIR) if f.startswith("podcast_transcript_") and f.endswith(".txt")]
-        if os.path.isdir(SCRAPED_DIR) else [],
-        reverse=True,
-    )
-    if saved_transcripts:
-        selected_transcript = st.selectbox("Load saved transcript", ["(none)"] + saved_transcripts, key="transcript_selector")
-        if selected_transcript != "(none)":
-            if st.button("Load Transcript"):
-                with open(os.path.join(SCRAPED_DIR, selected_transcript)) as f:
-                    st.session_state.transcript = f.read()
-                st.success(f"Loaded {selected_transcript}")
+            st.success("LinkedIn connected!")
+            if st.button("Disconnect LinkedIn"):
+                for key in ["linkedin_token", "token_expires", "author_id"]:
+                    st.session_state.pop(key, None)
                 st.rerun()
 
-    col1, col2 = st.columns(2)
-    with col1:
-        save_audio = st.checkbox("Save audio to disk", value=True)
-    with col2:
-        if st.button("Download & Transcribe", disabled=not can_transcribe):
-            if not ASSEMBLYAI_API_KEY:
-                st.error("ASSEMBLYAI_API_KEY not configured in secrets.")
-            else:
+    with row1_right:
+        st.subheader("Set Source")
+        if st.button("Latest", type="primary"):
+            with st.spinner("Scraping Podchaser for latest episode..."):
                 try:
-                    if save_audio:
+                    episode = scrape_latest_episode()
+                    st.session_state.episode = episode
+                    st.session_state.source_mode = "latest"
+                    st.success(f"Found: **{episode['title']}**")
+                    logger.info("Episode URL: %s", episode.get("url", ""))
+                    logger.info("Audio URL: %s", episode.get("audio_url", ""))
+                    st.info(f"Episode URL: {episode.get('url', 'N/A')}")
+                    st.info(f"Audio URL: {episode.get('audio_url', 'N/A') or 'Not found'}")
+                except Exception as e:
+                    st.error(f"Failed to scrape episode: {e}")
+
+        if "episode" in st.session_state:
+            ep = st.session_state.episode
+            st.markdown(f"**Title:** {ep['title']}")
+            if ep.get("date"):
+                st.markdown(f"**Date:** {ep['date']}")
+            if ep.get("description"):
+                st.markdown(f"**Description:** {ep['description'][:300]}")
+            st.markdown(f"**Episode URL:** {ep['url']}")
+            if ep.get("audio_url"):
+                st.markdown(f"**Audio URL:** `{ep['audio_url'][:100]}...`")
+            else:
+                st.warning("No audio URL found automatically. You can paste one below.")
+                manual_url = st.text_input("Paste audio URL (mp3/m4a):", key="manual_audio_url")
+                if manual_url:
+                    st.session_state.episode["audio_url"] = manual_url
+                    st.session_state.source_mode = "url"
+
+        col_url, col_btn = st.columns([3, 1])
+        with col_url:
+            direct_url = st.text_input("Audio URL (mp3/m4a):", key="direct_audio_url", label_visibility="collapsed", placeholder="Paste audio URL here...")
+        with col_btn:
+            if st.button("Set URL", disabled=not direct_url):
+                st.session_state.episode = {
+                    "title": "Manual Audio",
+                    "date": "",
+                    "url": "",
+                    "audio_url": direct_url,
+                    "description": "",
+                }
+                st.session_state.source_mode = "url"
+                st.success("Audio URL set!")
+                st.rerun()
+
+    # ── Row 2 ──
+    row2_left, row2_right = st.columns(2)
+    with row2_right:
+        st.subheader("Do All (Fetch → Transcribe → Generate → Publish)")
+        save_audio_all = st.checkbox("Save audio to disk", value=True, key="doall_save_audio")
+        include_image_all = False
+        if OPENAI_API_KEY:
+            include_image_all = st.checkbox("Generate and include image", value=True, key="doall_include_image")
+        else:
+            st.caption("Set OPENAI_API_KEY to enable image generation.")
+        run_do_all = st.button("Do All", type="primary")
+
+        if run_do_all:
+            if not token_active:
+                st.error("Connect LinkedIn first to publish.")
+            else:
+                temp_audio_dir = None
+                try:
+                    episode = st.session_state.get("episode") or {}
+                    audio_url = episode.get("audio_url", "")
+                    direct_url = st.session_state.get("direct_audio_url", "").strip()
+                    source_mode = st.session_state.get("source_mode", "")
+
+                    if source_mode == "url" and direct_url:
+                        audio_url = direct_url
+                        episode = {
+                            "title": "Manual Audio",
+                            "date": "",
+                            "url": "",
+                            "audio_url": direct_url,
+                            "description": "",
+                        }
+                        st.session_state.episode = episode
+
+                    if source_mode == "url" and not audio_url:
+                        st.error("Audio URL not set. Use Set URL first.")
+                        st.stop()
+
+                    if not audio_url:
+                        with st.spinner("Fetching latest episode..."):
+                            episode = scrape_latest_episode()
+                        st.session_state.episode = episode
+                        st.session_state.source_mode = "latest"
+                        audio_url = episode.get("audio_url", "")
+
+                    if not audio_url:
+                        st.error("No audio URL found for the latest episode. Please paste one manually.")
+                        st.stop()
+
+                    if save_audio_all:
                         os.makedirs(SCRAPED_DIR, exist_ok=True)
                         audio_dir = SCRAPED_DIR
                     else:
-                        audio_dir = tempfile.mkdtemp()
+                        temp_audio_dir = tempfile.mkdtemp()
+                        audio_dir = temp_audio_dir
 
-                    st.info("Downloading audio...")
-                    filepath = download_audio(audio_url, audio_dir)
-                    file_size = os.path.getsize(filepath)
-                    st.success(f"Downloaded: {os.path.basename(filepath)} ({file_size // 1024}KB)")
+                    with st.spinner("Downloading audio..."):
+                        filepath = download_audio(audio_url, audio_dir)
 
-                    if save_audio:
-                        # Rename with timestamp for easy identification
+                    if save_audio_all:
                         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                         ext = os.path.splitext(filepath)[1] or ".mp3"
                         saved_name = f"podcast_audio_{ts}{ext}"
@@ -836,175 +938,286 @@ def main():
                         if filepath != saved_path:
                             os.rename(filepath, saved_path)
                             filepath = saved_path
-                        st.caption(f"Audio saved to {saved_path}")
 
-                    transcript = upload_and_transcribe(filepath)
+                    with st.spinner("Transcribing audio..."):
+                        transcript = upload_and_transcribe(filepath)
                     st.session_state.transcript = transcript
-                    st.success("Transcription complete!")
 
-                    # Clean up temp dir if not saving
-                    if not save_audio:
-                        import shutil
-                        shutil.rmtree(audio_dir, ignore_errors=True)
+                    ep_title = episode.get("title", "")
+                    with st.spinner("Generating LinkedIn article..."):
+                        article = generate_linkedin_article(transcript, ep_title)
+                    st.session_state.article = article
+                    st.session_state.article_editor = article
+
+                    os.makedirs(SCRAPED_DIR, exist_ok=True)
+                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    save_path = os.path.join(SCRAPED_DIR, f"podcast_article_{ts}.txt")
+                    with open(save_path, "w") as f:
+                        f.write(article)
+
+                    image_payload = None
+                    if include_image_all and OPENAI_API_KEY:
+                        with st.spinner("Generating image..."):
+                            success, img_payload, prompt_used, error = generate_article_image(
+                                article,
+                                ep_title,
+                                prompt_override=st.session_state.get("article_image_prompt", ""),
+                            )
+                        if success and img_payload:
+                            image_payload = img_payload
+                            st.session_state.article_image = img_payload
+                            st.session_state.article_image_prompt = prompt_used
+                        else:
+                            st.warning(error or "Image generation failed; publishing without image.")
+
+                    if len(article) > 3000:
+                        st.error(f"Article is {len(article)} characters. LinkedIn's limit is 3000. Please shorten it.")
+                    else:
+                        with st.spinner("Publishing to LinkedIn..."):
+                            success, result = post_to_linkedin(
+                                article,
+                                st.session_state.linkedin_token,
+                                st.session_state.author_id,
+                                image_payload=image_payload,
+                            )
+                        if success:
+                            st.success("Published to LinkedIn!")
+                            post_id = ""
+                            if isinstance(result, dict):
+                                post_id = result.get("id") or result.get("post_id") or ""
+                            if post_id:
+                                st.session_state.last_linkedin_post_urn = post_id
+                                st.info(f"Post URN: `{post_id}`")
+                                post_url = build_linkedin_post_url(post_id)
+                                if post_url:
+                                    st.session_state.last_linkedin_post_url = post_url
+                                    st.text_input("Post URL (copy)", value=post_url)
+                            st.balloons()
+                        else:
+                            st.error(f"Failed to publish: {result}")
                 except Exception as e:
-                    st.error(f"Transcription failed: {e}")
+                    st.error(f"Do All failed: {e}")
+                finally:
+                    if temp_audio_dir:
+                        import shutil
+                        shutil.rmtree(temp_audio_dir, ignore_errors=True)
 
-    if "transcript" in st.session_state:
-        with st.expander("View Transcript", expanded=False):
-            st.text_area("Transcript", st.session_state.transcript, height=300, disabled=True)
-
-    # ── Step 3: Generate Article ──
-    st.subheader("Step 3: Generate LinkedIn Article")
-    has_transcript = "transcript" in st.session_state
-
-    # Load a previously saved article
-    saved_articles = sorted(
-        [f for f in os.listdir(SCRAPED_DIR) if f.startswith("podcast_article_") and f.endswith(".txt")]
-        if os.path.isdir(SCRAPED_DIR) else [],
-        reverse=True,
-    )
-    if saved_articles:
-        selected_file = st.selectbox("Load saved article", ["(none)"] + saved_articles)
-        if selected_file != "(none)":
-            if st.button("Load"):
-                with open(os.path.join(SCRAPED_DIR, selected_file)) as f:
-                    content = f.read()
-                st.session_state.article = content
-                st.session_state.article_editor = content
-                st.success(f"Loaded {selected_file}")
-                st.rerun()
-
-    if st.button("Generate Article", disabled=not has_transcript):
-        try:
-            ep_title = st.session_state.get("episode", {}).get("title", "")
-            with st.spinner("Generating article with Claude..."):
-                article = generate_linkedin_article(st.session_state.transcript, ep_title)
-            st.session_state.article = article
-            st.session_state.article_editor = article
-            # Auto-save article
-            os.makedirs(SCRAPED_DIR, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            save_path = os.path.join(SCRAPED_DIR, f"podcast_article_{ts}.txt")
-            with open(save_path, "w") as f:
-                f.write(article)
-            st.success(f"Article generated! Saved to {save_path}")
-        except Exception as e:
-            st.error(f"Generation failed: {e}")
-
-    if "article" in st.session_state and st.session_state.article:
-        # Use the article value as default for a keyed widget; sync back on change
-        if "article_editor" not in st.session_state:
-            st.session_state.article_editor = st.session_state.article
-        edited = st.text_area(
-            "Edit Article",
-            height=400,
-            key="article_editor",
+    with row2_left:
+        # ── Step 2: Transcribe ──
+        st.subheader("Transcribe Audio")
+        audio_url = st.session_state.get("episode", {}).get("audio_url", "")
+        can_transcribe = bool(audio_url)
+    
+        # Load a previously saved transcript
+        saved_transcripts = sorted(
+            [f for f in os.listdir(SCRAPED_DIR) if f.startswith("podcast_transcript_") and f.endswith(".txt")]
+            if os.path.isdir(SCRAPED_DIR) else [],
+            reverse=True,
         )
-        char_count = len(edited)
-        if char_count > 3000:
-            st.warning(f"{char_count}/3000 characters — over LinkedIn's limit. Shorten before publishing.")
+        if saved_transcripts:
+            selected_transcript = st.selectbox("Load saved transcript", ["(none)"] + saved_transcripts, key="transcript_selector")
+            if selected_transcript != "(none)":
+                if st.button("Load Transcript"):
+                    with open(os.path.join(SCRAPED_DIR, selected_transcript)) as f:
+                        st.session_state.transcript = f.read()
+                    st.success(f"Loaded {selected_transcript}")
+                    st.rerun()
+    
+        col1, col2 = st.columns(2)
+        with col1:
+            save_audio = st.checkbox("Save audio to disk", value=True)
+        with col2:
+            if st.button("Download & Transcribe", disabled=not can_transcribe):
+                if not ASSEMBLYAI_API_KEY:
+                    st.error("ASSEMBLYAI_API_KEY not configured in secrets.")
+                else:
+                    try:
+                        if save_audio:
+                            os.makedirs(SCRAPED_DIR, exist_ok=True)
+                            audio_dir = SCRAPED_DIR
+                        else:
+                            audio_dir = tempfile.mkdtemp()
+    
+                        st.info("Downloading audio...")
+                        filepath = download_audio(audio_url, audio_dir)
+                        file_size = os.path.getsize(filepath)
+                        st.success(f"Downloaded: {os.path.basename(filepath)} ({file_size // 1024}KB)")
+    
+                        if save_audio:
+                            # Rename with timestamp for easy identification
+                            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            ext = os.path.splitext(filepath)[1] or ".mp3"
+                            saved_name = f"podcast_audio_{ts}{ext}"
+                            saved_path = os.path.join(SCRAPED_DIR, saved_name)
+                            if filepath != saved_path:
+                                os.rename(filepath, saved_path)
+                                filepath = saved_path
+                            st.caption(f"Audio saved to {saved_path}")
+    
+                        transcript = upload_and_transcribe(filepath)
+                        st.session_state.transcript = transcript
+                        st.success("Transcription complete!")
+    
+                        # Clean up temp dir if not saving
+                        if not save_audio:
+                            import shutil
+                            shutil.rmtree(audio_dir, ignore_errors=True)
+                    except Exception as e:
+                        st.error(f"Transcription failed: {e}")
+    
+        if "transcript" in st.session_state:
+            with st.expander("View Transcript", expanded=False):
+                st.text_area("Transcript", st.session_state.transcript, height=300, disabled=True)
+    
+        # ── Step 3: Generate Article ──
+        st.subheader("Generate LinkedIn Article")
+        has_transcript = "transcript" in st.session_state
+    
+        # Load a previously saved article
+        saved_articles = sorted(
+            [f for f in os.listdir(SCRAPED_DIR) if f.startswith("podcast_article_") and f.endswith(".txt")]
+            if os.path.isdir(SCRAPED_DIR) else [],
+            reverse=True,
+        )
+        if saved_articles:
+            selected_file = st.selectbox("Load saved article", ["(none)"] + saved_articles)
+            if selected_file != "(none)":
+                if st.button("Load"):
+                    with open(os.path.join(SCRAPED_DIR, selected_file)) as f:
+                        content = f.read()
+                    st.session_state.article = content
+                    st.session_state.article_editor = content
+                    st.success(f"Loaded {selected_file}")
+                    st.rerun()
+    
+        if st.button("Generate Article", disabled=not has_transcript):
+            try:
+                ep_title = st.session_state.get("episode", {}).get("title", "")
+                with st.spinner("Generating article with Claude..."):
+                    article = generate_linkedin_article(st.session_state.transcript, ep_title)
+                st.session_state.article = article
+                st.session_state.article_editor = article
+                # Auto-save article
+                os.makedirs(SCRAPED_DIR, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                save_path = os.path.join(SCRAPED_DIR, f"podcast_article_{ts}.txt")
+                with open(save_path, "w") as f:
+                    f.write(article)
+                st.success(f"Article generated! Saved to {save_path}")
+            except Exception as e:
+                st.error(f"Generation failed: {e}")
+    
+        if "article" in st.session_state and st.session_state.article:
+            # Use the article value as default for a keyed widget; sync back on change
+            if "article_editor" not in st.session_state:
+                st.session_state.article_editor = st.session_state.article
+            edited = st.text_area(
+                "Edit Article",
+                height=400,
+                key="article_editor",
+            )
+            char_count = len(edited)
+            if char_count > 3000:
+                st.warning(f"{char_count}/3000 characters — over LinkedIn's limit. Shorten before publishing.")
+            else:
+                st.caption(f"{char_count}/3000 characters")
+            st.session_state.article = edited
+    
+        st.markdown("**Optional: Generate a LinkedIn image from the article**")
+        if not OPENAI_API_KEY:
+            st.info("Set OPENAI_API_KEY to enable image generation.")
         else:
-            st.caption(f"{char_count}/3000 characters")
-        st.session_state.article = edited
-
-    st.markdown("**Optional: Generate a LinkedIn image from the article**")
-    if not OPENAI_API_KEY:
-        st.info("Set OPENAI_API_KEY to enable image generation.")
-    else:
-        has_article = bool(st.session_state.get("article", "").strip())
-        if "article_image_prompt" not in st.session_state:
-            st.session_state.article_image_prompt = ""
-        ep_title = st.session_state.get("episode", {}).get("title", "")
-        default_prompt = _build_article_image_prompt(
-            st.session_state.get("article", ""),
-            ep_title,
-        )
-        prompt_col, reset_col = st.columns([5, 1])
-        with prompt_col:
+            has_article = bool(st.session_state.get("article", "").strip())
+            if "article_image_prompt" not in st.session_state:
+                st.session_state.article_image_prompt = ""
+            ep_title = st.session_state.get("episode", {}).get("title", "")
+            default_prompt = _build_article_image_prompt(
+                st.session_state.get("article", ""),
+                ep_title,
+            )
             prompt_value = st.text_area(
                 "Image prompt",
                 value=st.session_state.article_image_prompt or default_prompt,
                 height=140,
             )
-        with reset_col:
             if st.button("Reset prompt"):
                 st.session_state.article_image_prompt = default_prompt
                 st.rerun()
-        st.session_state.article_image_prompt = prompt_value
-        if st.button("Generate Article Image", disabled=not has_article):
-            with st.spinner("Generating image from article..."):
-                success, image_payload, prompt_used, error = generate_article_image(
-                    st.session_state.article,
-                    ep_title,
-                    prompt_override=st.session_state.article_image_prompt,
-                )
-            if success and image_payload:
-                st.session_state.article_image = image_payload
-                st.session_state.article_image_prompt = prompt_used
-                st.success("Image generated!")
-            else:
-                st.error(error or "Failed to generate image.")
-
-        if st.session_state.get("article_image"):
-            st.image(
-                st.session_state.article_image["bytes"],
-                caption="Generated image",
-                use_container_width=True,
-            )
-            st.download_button(
-                label="Download image",
-                data=st.session_state.article_image["bytes"],
-                file_name="linkedin_article_image.png",
-                mime=st.session_state.article_image.get("mime_type", "image/png"),
-            )
-            if st.button("Clear image"):
-                st.session_state.pop("article_image", None)
-                st.session_state.pop("article_image_prompt", None)
-                st.rerun()
-
-    # ── Step 4: Publish to LinkedIn ──
-    st.subheader("Step 4: Publish to LinkedIn")
-
-    if not token_active:
-        st.warning("LinkedIn not connected.")
-        st.info("Connect your LinkedIn account above to enable publishing.")
-    else:
-        st.success("LinkedIn connected!")
-        include_image = False
-        if st.session_state.get("article_image"):
-            include_image = st.checkbox("Include generated image in post", value=True)
-        if st.button("Publish to LinkedIn", type="primary"):
-            content = st.session_state.get("article", "").strip()
-            if not content:
-                st.error("No article to publish. Generate or load one first.")
-            elif len(content) > 3000:
-                st.error(f"Article is {len(content)} characters. LinkedIn's limit is 3000. Please shorten it.")
-            else:
-                with st.spinner("Publishing..."):
-                    image_payload = st.session_state.article_image if include_image else None
-                    success, result = post_to_linkedin(
-                        content,
-                        st.session_state.linkedin_token,
-                        st.session_state.author_id,
-                        image_payload=image_payload,
+            st.session_state.article_image_prompt = prompt_value
+            if st.button("Generate Article Image", disabled=not has_article):
+                with st.spinner("Generating image from article..."):
+                    success, image_payload, prompt_used, error = generate_article_image(
+                        st.session_state.article,
+                        ep_title,
+                        prompt_override=st.session_state.article_image_prompt,
                     )
-                if success:
-                    st.success("Published to LinkedIn!")
-                    post_id = ""
-                    if isinstance(result, dict):
-                        post_id = result.get("id") or result.get("post_id") or ""
-                    if post_id:
-                        st.session_state.last_linkedin_post_urn = post_id
-                        st.info(f"Post URN: `{post_id}`")
-                        post_url = build_linkedin_post_url(post_id)
-                        if post_url:
-                            st.session_state.last_linkedin_post_url = post_url
-                            st.text_input("Post URL (copy)", value=post_url)
-                        else:
-                            st.caption("Public post URL not available for this URN type.")
-                    st.balloons()
+                if success and image_payload:
+                    st.session_state.article_image = image_payload
+                    st.session_state.article_image_prompt = prompt_used
+                    st.success("Image generated!")
                 else:
-                    st.error(f"Failed to publish: {result}")
-
+                    st.error(error or "Failed to generate image.")
+    
+            if st.session_state.get("article_image"):
+                st.image(
+                    st.session_state.article_image["bytes"],
+                    caption="Generated image",
+                    use_container_width=True,
+                )
+                st.download_button(
+                    label="Download image",
+                    data=st.session_state.article_image["bytes"],
+                    file_name="linkedin_article_image.png",
+                    mime=st.session_state.article_image.get("mime_type", "image/png"),
+                )
+                if st.button("Clear image"):
+                    st.session_state.pop("article_image", None)
+                    st.session_state.pop("article_image_prompt", None)
+                    st.rerun()
+    
+        # ── Step 4: Publish to LinkedIn ──
+        st.subheader("Publish to LinkedIn")
+    
+        if not token_active:
+            st.warning("LinkedIn not connected.")
+            st.info("Connect your LinkedIn account above to enable publishing.")
+        else:
+            st.success("LinkedIn connected!")
+            include_image = False
+            if st.session_state.get("article_image"):
+                include_image = st.checkbox("Include generated image in post", value=True)
+            if st.button("Publish to LinkedIn", type="primary"):
+                content = st.session_state.get("article", "").strip()
+                if not content:
+                    st.error("No article to publish. Generate or load one first.")
+                elif len(content) > 3000:
+                    st.error(f"Article is {len(content)} characters. LinkedIn's limit is 3000. Please shorten it.")
+                else:
+                    with st.spinner("Publishing..."):
+                        image_payload = st.session_state.article_image if include_image else None
+                        success, result = post_to_linkedin(
+                            content,
+                            st.session_state.linkedin_token,
+                            st.session_state.author_id,
+                            image_payload=image_payload,
+                        )
+                    if success:
+                        st.success("Published to LinkedIn!")
+                        post_id = ""
+                        if isinstance(result, dict):
+                            post_id = result.get("id") or result.get("post_id") or ""
+                        if post_id:
+                            st.session_state.last_linkedin_post_urn = post_id
+                            st.info(f"Post URN: `{post_id}`")
+                            post_url = build_linkedin_post_url(post_id)
+                            if post_url:
+                                st.session_state.last_linkedin_post_url = post_url
+                                st.text_input("Post URL (copy)", value=post_url)
+                            else:
+                                st.caption("Public post URL not available for this URN type.")
+                        st.balloons()
+                    else:
+                        st.error(f"Failed to publish: {result}")
+    
 if __name__ == "__main__":
     main()

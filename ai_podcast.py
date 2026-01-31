@@ -38,7 +38,8 @@ SCRAPED_DIR = "scraped_results"
 _SESSION_ARTICLE_CACHE = os.path.join(SCRAPED_DIR, ".pending_article.txt")
 
 # LinkedIn
-LINKEDIN_API_URL = "https://api.linkedin.com/v2/ugcPosts"
+LINKEDIN_API_URL = "https://api.linkedin.com/rest/posts"
+LINKEDIN_API_VERSION = os.getenv("LINKEDIN_API_VERSION", "202509")
 LINKEDIN_AUTH_URL = "https://www.linkedin.com/oauth/v2/authorization"
 LINKEDIN_TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
 LINKEDIN_USERINFO_URL = "https://api.linkedin.com/v2/userinfo"
@@ -484,7 +485,7 @@ def fetch_authenticated_member_urn(access_token):
         headers = {
             "Authorization": f"Bearer {access_token}",
             "X-Restli-Protocol-Version": "2.0.0",
-            "LinkedIn-Version": "202501",
+            "Linkedin-Version": LINKEDIN_API_VERSION,
         }
         resp = requests.get(LINKEDIN_ME_URL, headers=headers, params={"projection": "(id)"})
         if resp.status_code == 200:
@@ -509,27 +510,48 @@ def post_to_linkedin(content, access_token, author_id):
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
         "X-Restli-Protocol-Version": "2.0.0",
+        "Linkedin-Version": LINKEDIN_API_VERSION,
     }
     payload = {
         "author": author_urn,
-        "lifecycleState": "PUBLISHED",
-        "specificContent": {
-            "com.linkedin.ugc.ShareContent": {
-                "shareCommentary": {"text": content},
-                "shareMediaCategory": "NONE",
-            }
+        "commentary": content,
+        "visibility": "PUBLIC",
+        "distribution": {
+            "feedDistribution": "MAIN_FEED",
+            "targetEntities": [],
+            "thirdPartyDistributionChannels": [],
         },
-        "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"},
+        "lifecycleState": "PUBLISHED",
+        "isReshareDisabledByAuthor": False,
     }
     try:
         response = requests.post(LINKEDIN_API_URL, json=payload, headers=headers)
         if response.status_code >= 400:
             logger.error("LinkedIn API error: %s %s", response.status_code, response.text)
             return False, f"{response.status_code}: {response.text}"
+        if response.status_code == 201:
+            post_id = response.headers.get("x-restli-id") or response.headers.get("X-Restli-Id")
+            if post_id:
+                return True, {"id": post_id}
         response.raise_for_status()
-        return True, response.json()
+        if response.content:
+            return True, response.json()
+        return True, {}
     except requests.RequestException as e:
         return False, str(e)
+
+
+def build_linkedin_post_url(post_urn: str) -> str:
+    """Best-effort public URL for a LinkedIn post URN."""
+    if not post_urn:
+        return ""
+    urn = post_urn.strip()
+    if urn.startswith("urn:li:activity:"):
+        return f"https://www.linkedin.com/feed/update/{urn}/"
+    # Some posts can still resolve via feed/update with the URN, but this isn't guaranteed.
+    if urn.startswith("urn:li:share:") or urn.startswith("urn:li:ugcPost:"):
+        return f"https://www.linkedin.com/feed/update/{urn}/"
+    return ""
 
 
 # ─── LinkedIn OAuth callback handler ────────────────────────────
@@ -795,6 +817,18 @@ def main():
                     )
                 if success:
                     st.success("Published to LinkedIn!")
+                    post_id = ""
+                    if isinstance(result, dict):
+                        post_id = result.get("id") or result.get("post_id") or ""
+                    if post_id:
+                        st.session_state.last_linkedin_post_urn = post_id
+                        st.info(f"Post URN: `{post_id}`")
+                        post_url = build_linkedin_post_url(post_id)
+                        if post_url:
+                            st.session_state.last_linkedin_post_url = post_url
+                            st.text_input("Post URL (copy)", value=post_url)
+                        else:
+                            st.caption("Public post URL not available for this URN type.")
                     st.balloons()
                 else:
                     st.error(f"Failed to publish: {result}")

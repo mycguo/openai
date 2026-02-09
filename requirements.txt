@@ -21,3 +21,4 @@ pytube
 claude-agent-sdk
 python-dotenv
 anthropic
+psycopg2-binary

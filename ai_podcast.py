@@ -6,6 +6,7 @@ import tempfile
 import time
 import urllib.parse
 from datetime import datetime
+from typing import Optional, List, Dict, Any
 
 import requests
 import streamlit as st
@@ -13,6 +14,187 @@ from anthropic import Anthropic
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
+
+# ─── Cloud Detection & Database ───────────────────────────────────
+IS_STREAMLIT_CLOUD = os.getenv("STREAMLIT_RUNTIME_ENV") == "cloud" or os.getenv("STREAMLIT_SHARING_MODE") is not None
+
+NEON_DATABASE_URL = "postgresql://neondb_owner:npg_J0ctsQkMWb1L@ep-shy-meadow-akzmy4xi-pooler.c-3.us-west-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+
+
+def _get_db_connection():
+    """Get a PostgreSQL database connection for cloud storage."""
+    try:
+        import psycopg2
+        conn = psycopg2.connect(NEON_DATABASE_URL)
+        return conn
+    except ImportError:
+        logger.error("psycopg2 not installed. Run: pip install psycopg2-binary")
+        return None
+    except Exception as e:
+        logger.error("Failed to connect to database: %s", e)
+        return None
+
+
+def _init_db_tables():
+    """Initialize database tables if they don't exist."""
+    conn = _get_db_connection()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS podcast_articles (
+                    id SERIAL PRIMARY KEY,
+                    filename VARCHAR(255) UNIQUE NOT NULL,
+                    content TEXT NOT NULL,
+                    article_type VARCHAR(50) DEFAULT 'article',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS oauth_state_cache (
+                    id SERIAL PRIMARY KEY,
+                    cache_key VARCHAR(255) UNIQUE NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TIMESTAMP
+                )
+            """)
+            conn.commit()
+        return True
+    except Exception as e:
+        logger.error("Failed to initialize database tables: %s", e)
+        return False
+    finally:
+        conn.close()
+
+
+def _db_save_article(filename: str, content: str, article_type: str = "article") -> bool:
+    """Save an article to the database."""
+    conn = _get_db_connection()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO podcast_articles (filename, content, article_type)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (filename) DO UPDATE SET content = EXCLUDED.content, created_at = CURRENT_TIMESTAMP
+            """, (filename, content, article_type))
+            conn.commit()
+        logger.info("Saved article to database: %s", filename)
+        return True
+    except Exception as e:
+        logger.error("Failed to save article to database: %s", e)
+        return False
+    finally:
+        conn.close()
+
+
+def _db_load_article(filename: str) -> Optional[str]:
+    """Load an article from the database."""
+    conn = _get_db_connection()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT content FROM podcast_articles WHERE filename = %s", (filename,))
+            row = cur.fetchone()
+            if row:
+                return row[0]
+        return None
+    except Exception as e:
+        logger.error("Failed to load article from database: %s", e)
+        return None
+    finally:
+        conn.close()
+
+
+def _db_list_articles(article_type: str = "article", limit: int = 50) -> List[str]:
+    """List article filenames from the database."""
+    conn = _get_db_connection()
+    if not conn:
+        return []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT filename FROM podcast_articles
+                WHERE article_type = %s
+                ORDER BY created_at DESC
+                LIMIT %s
+            """, (article_type, limit))
+            rows = cur.fetchall()
+            return [row[0] for row in rows]
+    except Exception as e:
+        logger.error("Failed to list articles from database: %s", e)
+        return []
+    finally:
+        conn.close()
+
+
+def _db_save_oauth_cache(cache_key: str, content: str) -> bool:
+    """Save OAuth state to the database."""
+    conn = _get_db_connection()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO oauth_state_cache (cache_key, content, expires_at)
+                VALUES (%s, %s, CURRENT_TIMESTAMP + INTERVAL '1 hour')
+                ON CONFLICT (cache_key) DO UPDATE SET content = EXCLUDED.content, expires_at = CURRENT_TIMESTAMP + INTERVAL '1 hour'
+            """, (cache_key, content))
+            conn.commit()
+        return True
+    except Exception as e:
+        logger.error("Failed to save OAuth cache to database: %s", e)
+        return False
+    finally:
+        conn.close()
+
+
+def _db_load_oauth_cache(cache_key: str) -> Optional[str]:
+    """Load OAuth state from the database."""
+    conn = _get_db_connection()
+    if not conn:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT content FROM oauth_state_cache
+                WHERE cache_key = %s AND expires_at > CURRENT_TIMESTAMP
+            """, (cache_key,))
+            row = cur.fetchone()
+            if row:
+                return row[0]
+        return None
+    except Exception as e:
+        logger.error("Failed to load OAuth cache from database: %s", e)
+        return None
+    finally:
+        conn.close()
+
+
+def _db_delete_oauth_cache(cache_key: str) -> bool:
+    """Delete OAuth state from the database."""
+    conn = _get_db_connection()
+    if not conn:
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM oauth_state_cache WHERE cache_key = %s", (cache_key,))
+            conn.commit()
+        return True
+    except Exception as e:
+        logger.error("Failed to delete OAuth cache from database: %s", e)
+        return False
+    finally:
+        conn.close()
+
+
+# Initialize database tables on cloud
+if IS_STREAMLIT_CLOUD:
+    _init_db_tables()
 
 # ─── Page Config ─────────────────────────────────────────────────
 st.set_page_config(
@@ -343,12 +525,19 @@ def upload_and_transcribe(filepath: str) -> str:
         transcript = data.get("text", "")
 
     # Auto-save transcript
-    os.makedirs(SCRAPED_DIR, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_path = os.path.join(SCRAPED_DIR, f"podcast_transcript_{ts}.txt")
-    with open(save_path, "w") as f:
-        f.write(transcript)
-    st.caption(f"Transcript saved to {save_path}")
+    filename = f"podcast_transcript_{ts}.txt"
+    if IS_STREAMLIT_CLOUD:
+        if _db_save_article(filename, transcript, article_type="transcript"):
+            st.caption(f"Transcript saved to database: {filename}")
+        else:
+            st.warning("Failed to save transcript to database")
+    else:
+        os.makedirs(SCRAPED_DIR, exist_ok=True)
+        save_path = os.path.join(SCRAPED_DIR, filename)
+        with open(save_path, "w") as f:
+            f.write(transcript)
+        st.caption(f"Transcript saved to {save_path}")
 
     return transcript
 
@@ -692,28 +881,50 @@ def _handle_linkedin_oauth():
                 if member_urn:
                     st.session_state.author_id = member_urn
                 # Restore article saved before OAuth redirect
-                if os.path.exists(_SESSION_ARTICLE_CACHE):
-                    with open(_SESSION_ARTICLE_CACHE) as f:
-                        cached = f.read()
-                    if cached.strip():
+                if IS_STREAMLIT_CLOUD:
+                    cached = _db_load_oauth_cache("pending_article")
+                    if cached and cached.strip():
                         st.session_state.article = cached
                         st.session_state.article_editor = cached
-                    os.remove(_SESSION_ARTICLE_CACHE)
-                if os.path.exists(_SESSION_SOURCE_CACHE):
-                    try:
-                        import json
-                        with open(_SESSION_SOURCE_CACHE) as f:
-                            source_data = json.load(f) or {}
-                        if source_data.get("episode"):
-                            st.session_state.episode = source_data["episode"]
-                        if source_data.get("direct_audio_url"):
-                            st.session_state.direct_audio_url = source_data["direct_audio_url"]
-                        if source_data.get("source_mode"):
-                            st.session_state.source_mode = source_data["source_mode"]
-                    except Exception as exc:
-                        logger.warning("Failed to restore source data: %s", exc)
-                    finally:
-                        os.remove(_SESSION_SOURCE_CACHE)
+                    _db_delete_oauth_cache("pending_article")
+
+                    source_json = _db_load_oauth_cache("pending_source")
+                    if source_json:
+                        try:
+                            import json
+                            source_data = json.loads(source_json) or {}
+                            if source_data.get("episode"):
+                                st.session_state.episode = source_data["episode"]
+                            if source_data.get("direct_audio_url"):
+                                st.session_state.direct_audio_url = source_data["direct_audio_url"]
+                            if source_data.get("source_mode"):
+                                st.session_state.source_mode = source_data["source_mode"]
+                        except Exception as exc:
+                            logger.warning("Failed to restore source data: %s", exc)
+                    _db_delete_oauth_cache("pending_source")
+                else:
+                    if os.path.exists(_SESSION_ARTICLE_CACHE):
+                        with open(_SESSION_ARTICLE_CACHE) as f:
+                            cached = f.read()
+                        if cached.strip():
+                            st.session_state.article = cached
+                            st.session_state.article_editor = cached
+                        os.remove(_SESSION_ARTICLE_CACHE)
+                    if os.path.exists(_SESSION_SOURCE_CACHE):
+                        try:
+                            import json
+                            with open(_SESSION_SOURCE_CACHE) as f:
+                                source_data = json.load(f) or {}
+                            if source_data.get("episode"):
+                                st.session_state.episode = source_data["episode"]
+                            if source_data.get("direct_audio_url"):
+                                st.session_state.direct_audio_url = source_data["direct_audio_url"]
+                            if source_data.get("source_mode"):
+                                st.session_state.source_mode = source_data["source_mode"]
+                        except Exception as exc:
+                            logger.warning("Failed to restore source data: %s", exc)
+                        finally:
+                            os.remove(_SESSION_SOURCE_CACHE)
                 try:
                     st.query_params.clear()
                 except AttributeError:
@@ -795,22 +1006,29 @@ def main():
             config = get_linkedin_config()
             if config:
                 if st.button("Connect LinkedIn Account"):
-                    # Save article to disk so it survives the OAuth redirect
+                    # Save article so it survives the OAuth redirect
                     article = st.session_state.get("article", "").strip()
                     if article:
-                        os.makedirs(SCRAPED_DIR, exist_ok=True)
-                        with open(_SESSION_ARTICLE_CACHE, "w") as f:
-                            f.write(article)
+                        if IS_STREAMLIT_CLOUD:
+                            _db_save_oauth_cache("pending_article", article)
+                        else:
+                            os.makedirs(SCRAPED_DIR, exist_ok=True)
+                            with open(_SESSION_ARTICLE_CACHE, "w") as f:
+                                f.write(article)
                     source_payload = {
                         "episode": st.session_state.get("episode"),
                         "direct_audio_url": st.session_state.get("direct_audio_url", ""),
                         "source_mode": st.session_state.get("source_mode", ""),
                     }
                     try:
-                        os.makedirs(SCRAPED_DIR, exist_ok=True)
-                        with open(_SESSION_SOURCE_CACHE, "w") as f:
-                            import json
-                            json.dump(source_payload, f)
+                        import json
+                        source_json = json.dumps(source_payload)
+                        if IS_STREAMLIT_CLOUD:
+                            _db_save_oauth_cache("pending_source", source_json)
+                        else:
+                            os.makedirs(SCRAPED_DIR, exist_ok=True)
+                            with open(_SESSION_SOURCE_CACHE, "w") as f:
+                                f.write(source_json)
                     except Exception as exc:
                         logger.warning("Failed to cache source data: %s", exc)
                     auth_url = generate_auth_url(config)
@@ -949,11 +1167,15 @@ def main():
                     st.session_state.article = article
                     st.session_state.article_editor = article
 
-                    os.makedirs(SCRAPED_DIR, exist_ok=True)
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    save_path = os.path.join(SCRAPED_DIR, f"podcast_article_{ts}.txt")
-                    with open(save_path, "w") as f:
-                        f.write(article)
+                    filename = f"podcast_article_{ts}.txt"
+                    if IS_STREAMLIT_CLOUD:
+                        _db_save_article(filename, article, article_type="article")
+                    else:
+                        os.makedirs(SCRAPED_DIR, exist_ok=True)
+                        save_path = os.path.join(SCRAPED_DIR, filename)
+                        with open(save_path, "w") as f:
+                            f.write(article)
 
                     image_payload = None
                     if include_image_all and OPENAI_API_KEY:
@@ -1009,18 +1231,29 @@ def main():
         can_transcribe = bool(audio_url)
     
         # Load a previously saved transcript
-        saved_transcripts = sorted(
-            [f for f in os.listdir(SCRAPED_DIR) if f.startswith("podcast_transcript_") and f.endswith(".txt")]
-            if os.path.isdir(SCRAPED_DIR) else [],
-            reverse=True,
-        )
+        if IS_STREAMLIT_CLOUD:
+            saved_transcripts = _db_list_articles(article_type="transcript", limit=20)
+        else:
+            saved_transcripts = sorted(
+                [f for f in os.listdir(SCRAPED_DIR) if f.startswith("podcast_transcript_") and f.endswith(".txt")]
+                if os.path.isdir(SCRAPED_DIR) else [],
+                reverse=True,
+            )
         if saved_transcripts:
             selected_transcript = st.selectbox("Load saved transcript", ["(none)"] + saved_transcripts, key="transcript_selector")
             if selected_transcript != "(none)":
                 if st.button("Load Transcript"):
-                    with open(os.path.join(SCRAPED_DIR, selected_transcript)) as f:
-                        st.session_state.transcript = f.read()
-                    st.success(f"Loaded {selected_transcript}")
+                    if IS_STREAMLIT_CLOUD:
+                        content = _db_load_article(selected_transcript)
+                        if content:
+                            st.session_state.transcript = content
+                            st.success(f"Loaded {selected_transcript} from database")
+                        else:
+                            st.error("Failed to load transcript from database")
+                    else:
+                        with open(os.path.join(SCRAPED_DIR, selected_transcript)) as f:
+                            st.session_state.transcript = f.read()
+                        st.success(f"Loaded {selected_transcript}")
                     st.rerun()
     
         col1, col2 = st.columns(2)
@@ -1074,20 +1307,32 @@ def main():
         has_transcript = "transcript" in st.session_state
     
         # Load a previously saved article
-        saved_articles = sorted(
-            [f for f in os.listdir(SCRAPED_DIR) if f.startswith("podcast_article_") and f.endswith(".txt")]
-            if os.path.isdir(SCRAPED_DIR) else [],
-            reverse=True,
-        )
+        if IS_STREAMLIT_CLOUD:
+            saved_articles = _db_list_articles(article_type="article", limit=20)
+        else:
+            saved_articles = sorted(
+                [f for f in os.listdir(SCRAPED_DIR) if f.startswith("podcast_article_") and f.endswith(".txt")]
+                if os.path.isdir(SCRAPED_DIR) else [],
+                reverse=True,
+            )
         if saved_articles:
             selected_file = st.selectbox("Load saved article", ["(none)"] + saved_articles)
             if selected_file != "(none)":
                 if st.button("Load"):
-                    with open(os.path.join(SCRAPED_DIR, selected_file)) as f:
-                        content = f.read()
-                    st.session_state.article = content
-                    st.session_state.article_editor = content
-                    st.success(f"Loaded {selected_file}")
+                    if IS_STREAMLIT_CLOUD:
+                        content = _db_load_article(selected_file)
+                        if content:
+                            st.session_state.article = content
+                            st.session_state.article_editor = content
+                            st.success(f"Loaded {selected_file} from database")
+                        else:
+                            st.error("Failed to load article from database")
+                    else:
+                        with open(os.path.join(SCRAPED_DIR, selected_file)) as f:
+                            content = f.read()
+                        st.session_state.article = content
+                        st.session_state.article_editor = content
+                        st.success(f"Loaded {selected_file}")
                     st.rerun()
     
         if st.button("Generate Article", disabled=not has_transcript):
@@ -1098,12 +1343,20 @@ def main():
                 st.session_state.article = article
                 st.session_state.article_editor = article
                 # Auto-save article
-                os.makedirs(SCRAPED_DIR, exist_ok=True)
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                save_path = os.path.join(SCRAPED_DIR, f"podcast_article_{ts}.txt")
-                with open(save_path, "w") as f:
-                    f.write(article)
-                st.success(f"Article generated! Saved to {save_path}")
+                filename = f"podcast_article_{ts}.txt"
+                if IS_STREAMLIT_CLOUD:
+                    if _db_save_article(filename, article, article_type="article"):
+                        st.success(f"Article generated! Saved to database: {filename}")
+                    else:
+                        st.success("Article generated!")
+                        st.warning("Failed to save to database")
+                else:
+                    os.makedirs(SCRAPED_DIR, exist_ok=True)
+                    save_path = os.path.join(SCRAPED_DIR, filename)
+                    with open(save_path, "w") as f:
+                        f.write(article)
+                    st.success(f"Article generated! Saved to {save_path}")
             except Exception as e:
                 st.error(f"Generation failed: {e}")
     

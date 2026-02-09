@@ -676,13 +676,24 @@ def get_linkedin_config():
         return None
 
 
+def _get_session_id() -> str:
+    """Get or create a unique session identifier for OAuth state."""
+    if "oauth_session_id" not in st.session_state:
+        import uuid
+        st.session_state.oauth_session_id = uuid.uuid4().hex[:16]
+    return st.session_state.oauth_session_id
+
+
 def generate_auth_url(config):
+    # Use session-specific state to prevent cross-user cache conflicts
+    session_id = _get_session_id()
+    state_value = f"ai_podcast_app_{session_id}"
     params = {
         "response_type": "code",
         "client_id": config["client_id"],
         "redirect_uri": config["redirect_uri"],
         "scope": "w_member_social openid email profile",
-        "state": "ai_podcast_app",
+        "state": state_value,
     }
     return f"{LINKEDIN_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
@@ -871,7 +882,19 @@ def _handle_linkedin_oauth():
         and time.time() < st.session_state.get("token_expires", 0)
     )
 
-    if code_param and state_param == "ai_podcast_app" and not token_active:
+    # Validate state parameter - must start with "ai_podcast_app_"
+    # Extract session_id from state for cache key lookup
+    valid_state = False
+    session_id_from_state = ""
+    if state_param and state_param.startswith("ai_podcast_app_"):
+        valid_state = True
+        session_id_from_state = state_param.replace("ai_podcast_app_", "")
+    elif state_param == "ai_podcast_app":
+        # Legacy support for old state format
+        valid_state = True
+        session_id_from_state = st.session_state.get("oauth_session_id", "legacy")
+
+    if code_param and valid_state and not token_active:
         with st.spinner("Exchanging authorization code..."):
             token_data = exchange_code_for_token(code_param, config)
             if token_data and "access_token" in token_data:
@@ -880,15 +903,17 @@ def _handle_linkedin_oauth():
                 member_urn = fetch_authenticated_member_urn(st.session_state.linkedin_token)
                 if member_urn:
                     st.session_state.author_id = member_urn
-                # Restore article saved before OAuth redirect
+                # Restore article saved before OAuth redirect (use session-specific cache keys)
+                article_cache_key = f"pending_article_{session_id_from_state}"
+                source_cache_key = f"pending_source_{session_id_from_state}"
                 if IS_STREAMLIT_CLOUD:
-                    cached = _db_load_oauth_cache("pending_article")
+                    cached = _db_load_oauth_cache(article_cache_key)
                     if cached and cached.strip():
                         st.session_state.article = cached
                         st.session_state.article_editor = cached
-                    _db_delete_oauth_cache("pending_article")
+                    _db_delete_oauth_cache(article_cache_key)
 
-                    source_json = _db_load_oauth_cache("pending_source")
+                    source_json = _db_load_oauth_cache(source_cache_key)
                     if source_json:
                         try:
                             import json
@@ -901,7 +926,7 @@ def _handle_linkedin_oauth():
                                 st.session_state.source_mode = source_data["source_mode"]
                         except Exception as exc:
                             logger.warning("Failed to restore source data: %s", exc)
-                    _db_delete_oauth_cache("pending_source")
+                    _db_delete_oauth_cache(source_cache_key)
                 else:
                     if os.path.exists(_SESSION_ARTICLE_CACHE):
                         with open(_SESSION_ARTICLE_CACHE) as f:
@@ -1007,10 +1032,15 @@ def main():
             if config:
                 if st.button("Connect LinkedIn Account"):
                     # Save article so it survives the OAuth redirect
+                    # Use session-specific cache keys to prevent cross-user conflicts
+                    session_id = _get_session_id()
+                    article_cache_key = f"pending_article_{session_id}"
+                    source_cache_key = f"pending_source_{session_id}"
+
                     article = st.session_state.get("article", "").strip()
                     if article:
                         if IS_STREAMLIT_CLOUD:
-                            _db_save_oauth_cache("pending_article", article)
+                            _db_save_oauth_cache(article_cache_key, article)
                         else:
                             os.makedirs(SCRAPED_DIR, exist_ok=True)
                             with open(_SESSION_ARTICLE_CACHE, "w") as f:
@@ -1024,15 +1054,27 @@ def main():
                         import json
                         source_json = json.dumps(source_payload)
                         if IS_STREAMLIT_CLOUD:
-                            _db_save_oauth_cache("pending_source", source_json)
+                            _db_save_oauth_cache(source_cache_key, source_json)
                         else:
                             os.makedirs(SCRAPED_DIR, exist_ok=True)
                             with open(_SESSION_SOURCE_CACHE, "w") as f:
                                 f.write(source_json)
                     except Exception as exc:
                         logger.warning("Failed to cache source data: %s", exc)
+
+                    # Generate auth URL and auto-redirect using JavaScript
                     auth_url = generate_auth_url(config)
-                    st.markdown(f"[Click here to authorize]({auth_url})")
+                    st.success("Redirecting to LinkedIn...")
+                    import streamlit.components.v1 as components
+                    components.html(
+                        f"""
+                        <script>
+                            window.top.location.href = "{auth_url}";
+                        </script>
+                        <p>If not redirected automatically, <a href="{auth_url}" target="_top">click here</a>.</p>
+                        """,
+                        height=50,
+                    )
         else:
             st.success("LinkedIn connected!")
             if st.button("Disconnect LinkedIn"):

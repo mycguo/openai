@@ -1268,7 +1268,10 @@ def main():
     with row2_left:
         # ── Step 2: Transcribe ──
         st.subheader("Transcribe Audio")
+        # Check both episode audio_url and direct_audio_url input
         audio_url = st.session_state.get("episode", {}).get("audio_url", "")
+        if not audio_url:
+            audio_url = st.session_state.get("direct_audio_url", "")
         can_transcribe = bool(audio_url)
     
         # Load a previously saved transcript

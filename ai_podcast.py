@@ -216,7 +216,11 @@ UPLOAD_ENDPOINT = "https://api.assemblyai.com/v2/upload"
 TRANSCRIPT_ENDPOINT = "https://api.assemblyai.com/v2/transcript"
 CHUNK_SIZE = 5_242_880  # 5 MB
 
-PODCHASER_URL = "https://www.podchaser.com/podcasts/the-ai-daily-brief-artificial-5260567/episodes/recent"
+PODCAST_SOURCES = {
+    "The AI Daily Brief": "https://www.podchaser.com/podcasts/the-ai-daily-brief-artificial-5260567/episodes/recent",
+    "Y Combinator Startup Podcast": "https://www.podchaser.com/podcasts/y-combinator-startup-podcast-526094/episodes/recent",
+    "AI Fire Daily": "https://www.podchaser.com/podcasts/ai-fire-daily-6108838/episodes/recent",
+}
 
 SCRAPED_DIR = "scraped_results"
 _SESSION_ARTICLE_CACHE = os.path.join(SCRAPED_DIR, ".pending_article.txt")
@@ -257,7 +261,7 @@ def _ensure_playwright_browsers() -> None:
 
 # ─── Step 1: Scrape latest episode ──────────────────────────────
 
-async def _scrape_latest_episode_async():
+async def _scrape_latest_episode_async(podcast_url: str):
     """Use Playwright to get the latest episode info + audio URL from Podchaser."""
     from playwright.async_api import async_playwright
 
@@ -288,7 +292,7 @@ async def _scrape_latest_episode_async():
         page = await context.new_page()
 
         # Go to episodes list
-        await page.goto(PODCHASER_URL, wait_until="domcontentloaded", timeout=60000)
+        await page.goto(podcast_url, wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_timeout(5000)
 
         # Extract latest episode info from the table
@@ -411,10 +415,10 @@ async def _scrape_latest_episode_async():
         }
 
 
-def scrape_latest_episode():
+def scrape_latest_episode(podcast_url: str):
     """Sync wrapper for scraping the latest podcast episode."""
     _ensure_playwright_browsers()
-    return asyncio.run(_scrape_latest_episode_async())
+    return asyncio.run(_scrape_latest_episode_async(podcast_url))
 
 
 # ─── Step 2: Download audio ─────────────────────────────────────
@@ -624,27 +628,67 @@ Shorten it while keeping the key insights and engaging tone. Output ONLY the sho
     return article
 
 
-def _build_article_image_prompt(article_text: str, episode_title: str = "") -> str:
-    clean_text = re.sub(r"#\w+", "", article_text or "").strip()
-    snippet = clean_text.replace("\n", " ")
-    snippet = re.sub(r"\s+", " ", snippet)[:500]
-    title = episode_title.strip() if episode_title else "AI podcast highlights"
+def _extract_key_themes(article_text: str) -> str:
+    """Extract key themes from article using Claude for better results."""
+    if not article_text or not article_text.strip():
+        return ""
+
+    # Try to use Claude for intelligent extraction
+    try:
+        prompt = f"""Extract 3-5 key themes or topics from this LinkedIn post as a comma-separated list.
+Output ONLY the themes, nothing else. Keep each theme to 2-4 words max.
+
+Example output: AI automation, workplace productivity, machine learning trends, tech leadership
+
+Post:
+{article_text[:2000]}"""
+        themes = generate_with_claude(prompt, temperature=0.3, max_tokens=100)
+        # Clean up the response
+        themes = themes.strip().strip('"').strip("'")
+        if themes and len(themes) < 200:
+            return themes
+    except Exception as e:
+        logger.warning("Failed to extract themes with Claude: %s", e)
+
+    # Fallback: simple extraction from first few sentences
+    clean_text = re.sub(r"#\w+", "", article_text).strip()
+    clean_text = clean_text.replace("\n", " ")
+    clean_text = re.sub(r"\s+", " ", clean_text)
+    # Take first 300 chars, try to end at a sentence
+    snippet = clean_text[:300]
+    last_period = snippet.rfind(".")
+    if last_period > 100:
+        snippet = snippet[:last_period + 1]
+    return snippet
+
+
+def _build_article_image_prompt(article_text: str) -> str:
+    themes = _extract_key_themes(article_text)
+
+    if not themes:
+        # Fallback prompt without themes
+        return (
+            "Create a clean, modern, professional LinkedIn image for an AI technology article. "
+            "Visual style: bold typography, abstract tech shapes like neural networks and data flows, "
+            "polished gradient background in blue and purple tones. "
+            "No logos, no trademarks, no faces, no text overlays."
+        )
+
     return (
         "Create a clean, modern, professional LinkedIn image that summarizes an article. "
-        f"Episode title: {title}. "
-        f"Key themes: {snippet}. "
+        f"Key themes: {themes}. "
         "Use bold typography, abstract tech shapes, and a polished gradient background. "
         "No logos, no trademarks, no faces."
     )
 
 
-def generate_article_image(article_text: str, episode_title: str = "", prompt_override: str = ""):
+def generate_article_image(article_text: str, prompt_override: str = ""):
     """Generate an image for the LinkedIn article using OpenAI's DALL-E 3 model."""
     try:
         if not article_text or not article_text.strip():
             return False, None, None, "No article content available to build an image."
 
-        prompt_for_image = prompt_override.strip() if prompt_override else _build_article_image_prompt(article_text, episode_title)
+        prompt_for_image = prompt_override.strip() if prompt_override else _build_article_image_prompt(article_text)
         client = _create_openai_client()
         response = client.images.generate(
             model=DALLE_MODEL,
@@ -661,7 +705,7 @@ def generate_article_image(article_text: str, episode_title: str = "", prompt_ov
                 payload = {
                     "bytes": image_response.content,
                     "mime_type": "image/png",
-                    "alt_text": f"Illustration for {episode_title or 'AI podcast highlights'}",
+                    "alt_text": "AI article illustration",
                 }
                 return True, payload, prompt_for_image, None
             error_msg = f"Failed to download image from URL: {image_url}"
@@ -1093,10 +1137,22 @@ def main():
 
     with row1_right:
         st.subheader("Set Source")
-        if st.button("Latest", type="primary"):
-            with st.spinner("Scraping Podchaser for latest episode..."):
+        # Podcast selector
+        podcast_names = list(PODCAST_SOURCES.keys())
+        selected_podcast = st.selectbox(
+            "Select Podcast",
+            podcast_names,
+            index=0,
+            key="selected_podcast",
+        )
+        selected_podcast_url = PODCAST_SOURCES[selected_podcast]
+        st.session_state.selected_podcast_url = selected_podcast_url
+
+        if st.button("Fetch Latest Episode", type="primary"):
+            with st.spinner(f"Scraping {selected_podcast}..."):
                 try:
-                    episode = scrape_latest_episode()
+                    episode = scrape_latest_episode(selected_podcast_url)
+                    episode["podcast_name"] = selected_podcast
                     st.session_state.episode = episode
                     st.session_state.source_mode = "latest"
                     st.success(f"Found: **{episode['title']}**")
@@ -1109,6 +1165,8 @@ def main():
 
         if "episode" in st.session_state:
             ep = st.session_state.episode
+            if ep.get("podcast_name"):
+                st.markdown(f"**Podcast:** {ep['podcast_name']}")
             st.markdown(f"**Title:** {ep['title']}")
             if ep.get("date"):
                 st.markdown(f"**Date:** {ep['date']}")
@@ -1179,8 +1237,11 @@ def main():
                         st.stop()
 
                     if not audio_url:
-                        with st.spinner("Fetching latest episode..."):
-                            episode = scrape_latest_episode()
+                        podcast_url = st.session_state.get("selected_podcast_url", list(PODCAST_SOURCES.values())[0])
+                        podcast_name = st.session_state.get("selected_podcast", list(PODCAST_SOURCES.keys())[0])
+                        with st.spinner(f"Fetching latest episode from {podcast_name}..."):
+                            episode = scrape_latest_episode(podcast_url)
+                        episode["podcast_name"] = podcast_name
                         st.session_state.episode = episode
                         st.session_state.source_mode = "latest"
                         audio_url = episode.get("audio_url", "")
@@ -1233,7 +1294,6 @@ def main():
                         with st.spinner("Generating image..."):
                             success, img_payload, prompt_used, error = generate_article_image(
                                 article,
-                                ep_title,
                                 prompt_override=st.session_state.get("article_image_prompt", ""),
                             )
                         if success and img_payload:
@@ -1437,10 +1497,8 @@ def main():
             has_article = bool(st.session_state.get("article", "").strip())
             if "article_image_prompt" not in st.session_state:
                 st.session_state.article_image_prompt = ""
-            ep_title = st.session_state.get("episode", {}).get("title", "")
             default_prompt = _build_article_image_prompt(
                 st.session_state.get("article", ""),
-                ep_title,
             )
             prompt_value = st.text_area(
                 "Image prompt",
@@ -1455,7 +1513,6 @@ def main():
                 with st.spinner("Generating image from article..."):
                     success, image_payload, prompt_used, error = generate_article_image(
                         st.session_state.article,
-                        ep_title,
                         prompt_override=st.session_state.article_image_prompt,
                     )
                 if success and image_payload:
@@ -1468,7 +1525,7 @@ def main():
             if st.session_state.get("article_image"):
                 st.image(
                     st.session_state.article_image["bytes"],
-                    caption="Generated image",
+                    caption="Current image",
                     use_container_width=True,
                 )
                 st.download_button(
@@ -1477,24 +1534,40 @@ def main():
                     file_name="linkedin_article_image.png",
                     mime=st.session_state.article_image.get("mime_type", "image/png"),
                 )
-                img_col1, img_col2 = st.columns(2)
+                img_col1, img_col2, img_col3 = st.columns(3)
                 with img_col1:
-                    if st.button("🔄 Replace Image"):
+                    if st.button("🔄 Generate Again"):
                         with st.spinner("Regenerating image..."):
                             success, image_payload, prompt_used, error = generate_article_image(
                                 st.session_state.article,
-                                ep_title,
                                 prompt_override=st.session_state.get("article_image_prompt", ""),
                             )
                         if success and image_payload:
                             st.session_state.article_image = image_payload
                             st.session_state.article_image_prompt = prompt_used
-                            st.success("Image replaced!")
+                            st.success("Image regenerated!")
                             st.rerun()
                         else:
                             st.error(error or "Failed to regenerate image.")
                 with img_col2:
-                    if st.button("🗑️ Clear Image"):
+                    uploaded_file = st.file_uploader(
+                        "Upload image",
+                        type=["png", "jpg", "jpeg", "webp"],
+                        key="replace_image_uploader",
+                        label_visibility="collapsed",
+                    )
+                    if uploaded_file is not None:
+                        image_bytes = uploaded_file.read()
+                        mime_type = uploaded_file.type or "image/png"
+                        st.session_state.article_image = {
+                            "bytes": image_bytes,
+                            "mime_type": mime_type,
+                            "alt_text": "Custom uploaded image",
+                        }
+                        st.success("Image uploaded!")
+                        st.rerun()
+                with img_col3:
+                    if st.button("🗑️ Clear"):
                         st.session_state.pop("article_image", None)
                         st.session_state.pop("article_image_prompt", None)
                         st.rerun()

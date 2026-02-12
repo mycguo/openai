@@ -421,7 +421,17 @@ def scrape_latest_episode():
 
 def download_audio(url: str, dest_dir: str) -> str:
     """Download audio file from URL to dest_dir, return file path."""
-    resp = requests.get(url, stream=True, timeout=120)
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/125.0.0.0 Safari/537.36"
+        ),
+        "Accept": "audio/mpeg, audio/*, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": urllib.parse.urljoin(url, "/"),
+    }
+    resp = requests.get(url, stream=True, timeout=120, headers=headers)
     resp.raise_for_status()
 
     # Determine filename from URL or content-disposition

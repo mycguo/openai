@@ -592,7 +592,7 @@ def generate_with_claude(prompt: str, temperature: float = 1.0, max_tokens: int 
 def generate_linkedin_article(transcript: str, episode_title: str = "", max_attempts: int = 3) -> str:
     prompt = f"""You are a professional LinkedIn content writer specializing in AI and technology.
 
-Analyze the following podcast transcript from "The AI Daily Brief" and create a compelling LinkedIn post.
+Analyze the following podcast transcript and create a compelling LinkedIn post.
 
 Episode title: {episode_title}
 
@@ -600,6 +600,18 @@ STRICT REQUIREMENTS:
 - Your ENTIRE output must be UNDER 2800 characters (hard limit). Count carefully.
 - Do NOT include any preamble, explanation, or notes outside the post itself.
 - Output ONLY the LinkedIn post text, nothing else.
+- Do NOT use any markdown formatting (no **bold**, no *italics*, no headers, no bullet points with - or *)
+- LinkedIn does not render markdown, so use PLAIN TEXT only
+
+FORMATTING STYLE:
+- Use emojis + ALL CAPS for section headings, like:
+  🚀 THE BIG NEWS
+  🔹 KEY TAKEAWAY
+  💡 WHAT THIS MEANS
+  ⚡ WHY IT MATTERS
+- Add a blank line before and after each heading for visual separation
+- Use emojis at the start of key points (🔹, ▸, →)
+- Keep paragraphs short (2-3 sentences max)
 
 Instructions:
 1. Identify the top 3-4 most important AI news stories discussed
@@ -620,6 +632,7 @@ Transcript:
         # If over limit, ask Claude to shorten
         shorten_prompt = f"""The following LinkedIn post is {len(article)} characters but MUST be under 2800 characters.
 Shorten it while keeping the key insights and engaging tone. Output ONLY the shortened post, nothing else.
+IMPORTANT: Use plain text only, NO markdown (no **bold**, no *italics*, no headers). LinkedIn does not render markdown.
 
 {article}"""
         article = generate_with_claude(shorten_prompt, temperature=0.5)

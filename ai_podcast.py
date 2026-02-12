@@ -1467,10 +1467,27 @@ def main():
                     file_name="linkedin_article_image.png",
                     mime=st.session_state.article_image.get("mime_type", "image/png"),
                 )
-                if st.button("Clear image"):
-                    st.session_state.pop("article_image", None)
-                    st.session_state.pop("article_image_prompt", None)
-                    st.rerun()
+                img_col1, img_col2 = st.columns(2)
+                with img_col1:
+                    if st.button("🔄 Replace Image"):
+                        with st.spinner("Regenerating image..."):
+                            success, image_payload, prompt_used, error = generate_article_image(
+                                st.session_state.article,
+                                ep_title,
+                                prompt_override=st.session_state.get("article_image_prompt", ""),
+                            )
+                        if success and image_payload:
+                            st.session_state.article_image = image_payload
+                            st.session_state.article_image_prompt = prompt_used
+                            st.success("Image replaced!")
+                            st.rerun()
+                        else:
+                            st.error(error or "Failed to regenerate image.")
+                with img_col2:
+                    if st.button("🗑️ Clear Image"):
+                        st.session_state.pop("article_image", None)
+                        st.session_state.pop("article_image_prompt", None)
+                        st.rerun()
     
         # ── Step 4: Publish to LinkedIn ──
         st.subheader("Publish to LinkedIn")

@@ -244,19 +244,129 @@ if OPENAI_API_KEY:
 
 # ─── Playwright helpers ──────────────────────────────────────────
 
-def _ensure_playwright_browsers() -> None:
-    """Install Playwright Chromium if not already present."""
+def _ensure_playwright_browsers() -> bool:
+    """Best-effort install for Playwright Chromium. Returns True when usable."""
     import subprocess
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
             path = p.chromium.executable_path
             if os.path.exists(path):
-                return
+                return True
     except Exception:
-        pass
+        logger.warning("Playwright is unavailable in this environment.")
+        return False
+
     logger.info("Installing Playwright Chromium browser...")
-    subprocess.run(["playwright", "install", "chromium"], check=True)
+    try:
+        subprocess.run(["playwright", "install", "chromium"], check=True)
+        return True
+    except Exception as exc:
+        logger.warning("Playwright browser install failed: %s", exc)
+        return False
+
+
+def _resolve_episode_audio(ep_href: str, description: str = "") -> tuple[str, str]:
+    """Resolve audio URL primarily via Podchaser episode API, with RSS fallback."""
+    ep_id = ""
+    ep_id_match = re.search(r"-(\d{6,})$", ep_href)
+    if ep_id_match:
+        ep_id = ep_id_match.group(1)
+
+    audio_url = ""
+    if ep_id:
+        try:
+            api_resp = requests.get(
+                f"https://api.podchaser.com/episodes/{ep_id}",
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                  "Chrome/125.0.0.0 Safari/537.36",
+                    "Accept": "application/json",
+                },
+                timeout=15,
+            )
+            if api_resp.status_code == 200:
+                data = api_resp.json()
+                audio_url = data.get("audio_url", "") or data.get("enclosure_url", "") or ""
+                if not description:
+                    description = data.get("description", "") or ""
+        except Exception as exc:
+            logger.warning("Podchaser API call failed: %s", exc)
+
+    if not audio_url:
+        try:
+            rss_resp = requests.get(
+                "https://anchor.fm/s/f7cac464/podcast/rss",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=15,
+            )
+            if rss_resp.status_code == 200:
+                from xml.etree import ElementTree
+
+                root = ElementTree.fromstring(rss_resp.content)
+                item = root.find(".//item")
+                if item is not None:
+                    enclosure = item.find("enclosure")
+                    if enclosure is not None:
+                        audio_url = enclosure.get("url", "")
+                    if not description:
+                        desc_el = item.find("description")
+                        if desc_el is not None and desc_el.text:
+                            description = desc_el.text[:500]
+        except Exception as exc:
+            logger.warning("RSS feed fallback failed: %s", exc)
+
+    return audio_url, description
+
+
+def _scrape_latest_episode_http(podcast_url: str) -> dict:
+    """Lightweight scrape that avoids browser dependencies when possible."""
+    from bs4 import BeautifulSoup
+
+    response = requests.get(
+        podcast_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/125.0.0.0 Safari/537.36"
+        },
+        timeout=25,
+    )
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    episode_link = soup.select_one("tr a[href*='/episodes/']") or soup.select_one("a[href*='/episodes/']")
+    if not episode_link:
+        raise RuntimeError("No episode links found in podcast page HTML.")
+
+    href = (episode_link.get("href") or "").strip()
+    if not href:
+        raise RuntimeError("Episode link found but URL is missing.")
+
+    title = episode_link.get_text(strip=True) or "Unknown Episode"
+    description = ""
+
+    row = episode_link.find_parent("tr")
+    if row:
+        cells = row.find_all("td")
+        if len(cells) >= 2:
+            description = cells[1].get_text(" ", strip=True)
+
+    if href.startswith("/"):
+        ep_href = f"https://www.podchaser.com{href}"
+    else:
+        ep_href = urllib.parse.urljoin(podcast_url, href)
+
+    audio_url, description = _resolve_episode_audio(ep_href, description)
+
+    return {
+        "title": title,
+        "date": "",
+        "url": ep_href,
+        "audio_url": audio_url or "",
+        "description": description or "",
+    }
 
 
 # ─── Step 1: Scrape latest episode ──────────────────────────────
@@ -352,59 +462,7 @@ async def _scrape_latest_episode_async(podcast_url: str):
 
         await browser.close()
 
-        # Extract episode ID from the URL (last numeric segment)
-        # e.g. /episodes/100000-ai-agents-joined-their-281403571 -> 281403571
-        ep_id = ""
-        ep_id_match = re.search(r"-(\d{6,})$", ep_href)
-        if ep_id_match:
-            ep_id = ep_id_match.group(1)
-
-        # Fetch audio URL via Podchaser API (avoids Cloudflare on episode pages)
-        audio_url = ""
-        description = episode.get("description", "")
-        if ep_id:
-            try:
-                api_resp = requests.get(
-                    f"https://api.podchaser.com/episodes/{ep_id}",
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                      "Chrome/125.0.0.0 Safari/537.36",
-                        "Accept": "application/json",
-                    },
-                    timeout=15,
-                )
-                if api_resp.status_code == 200:
-                    data = api_resp.json()
-                    audio_url = data.get("audio_url", "") or data.get("enclosure_url", "") or ""
-                    if not description:
-                        description = data.get("description", "") or ""
-            except Exception as exc:
-                logger.warning("Podchaser API call failed: %s", exc)
-
-        # Fallback: try to get audio URL from the podcast RSS feed
-        if not audio_url:
-            try:
-                rss_resp = requests.get(
-                    "https://anchor.fm/s/f7cac464/podcast/rss",
-                    headers={"User-Agent": "Mozilla/5.0"},
-                    timeout=15,
-                )
-                if rss_resp.status_code == 200:
-                    from xml.etree import ElementTree
-                    root = ElementTree.fromstring(rss_resp.content)
-                    # Get the first <item> (latest episode)
-                    item = root.find(".//item")
-                    if item is not None:
-                        enclosure = item.find("enclosure")
-                        if enclosure is not None:
-                            audio_url = enclosure.get("url", "")
-                        if not description:
-                            desc_el = item.find("description")
-                            if desc_el is not None and desc_el.text:
-                                description = desc_el.text[:500]
-            except Exception as exc:
-                logger.warning("RSS feed fallback failed: %s", exc)
+        audio_url, description = _resolve_episode_audio(ep_href, episode.get("description", ""))
 
         return {
             "title": episode.get("title", "Unknown Episode"),
@@ -417,7 +475,17 @@ async def _scrape_latest_episode_async(podcast_url: str):
 
 def scrape_latest_episode(podcast_url: str):
     """Sync wrapper for scraping the latest podcast episode."""
-    _ensure_playwright_browsers()
+    try:
+        return _scrape_latest_episode_http(podcast_url)
+    except Exception as exc:
+        logger.warning("HTTP scrape fallback failed, trying Playwright: %s", exc)
+
+    if not _ensure_playwright_browsers():
+        raise RuntimeError(
+            "Unable to scrape latest episode in this environment without a browser. "
+            "Use manual audio URL input as fallback."
+        )
+
     return asyncio.run(_scrape_latest_episode_async(podcast_url))
 
 
@@ -1150,6 +1218,10 @@ def main():
 
     with row1_right:
         st.subheader("Set Source")
+        source_controls_enabled = token_active
+        if not source_controls_enabled:
+            st.info("Connect LinkedIn Account first to enable source setup.")
+
         # Podcast selector
         podcast_names = list(PODCAST_SOURCES.keys())
         selected_podcast = st.selectbox(
@@ -1157,11 +1229,12 @@ def main():
             podcast_names,
             index=0,
             key="selected_podcast",
+            disabled=not source_controls_enabled,
         )
         selected_podcast_url = PODCAST_SOURCES[selected_podcast]
         st.session_state.selected_podcast_url = selected_podcast_url
 
-        if st.button("Fetch Latest Episode", type="primary"):
+        if st.button("Fetch Latest Episode", type="primary", disabled=not source_controls_enabled):
             with st.spinner(f"Scraping {selected_podcast}..."):
                 try:
                     episode = scrape_latest_episode(selected_podcast_url)
@@ -1176,7 +1249,7 @@ def main():
                 except Exception as e:
                     st.error(f"Failed to scrape episode: {e}")
 
-        if "episode" in st.session_state:
+        if source_controls_enabled and "episode" in st.session_state:
             ep = st.session_state.episode
             if ep.get("podcast_name"):
                 st.markdown(f"**Podcast:** {ep['podcast_name']}")
@@ -1190,16 +1263,26 @@ def main():
                 st.markdown(f"**Audio URL:** `{ep['audio_url'][:100]}...`")
             else:
                 st.warning("No audio URL found automatically. You can paste one below.")
-                manual_url = st.text_input("Paste audio URL (mp3/m4a):", key="manual_audio_url")
+                manual_url = st.text_input(
+                    "Paste audio URL (mp3/m4a):",
+                    key="manual_audio_url",
+                    disabled=not source_controls_enabled,
+                )
                 if manual_url:
                     st.session_state.episode["audio_url"] = manual_url
                     st.session_state.source_mode = "url"
 
         col_url, col_btn = st.columns([3, 1])
         with col_url:
-            direct_url = st.text_input("Audio URL (mp3/m4a):", key="direct_audio_url", label_visibility="collapsed", placeholder="Paste audio URL here...")
+            direct_url = st.text_input(
+                "Audio URL (mp3/m4a):",
+                key="direct_audio_url",
+                label_visibility="collapsed",
+                placeholder="Paste audio URL here...",
+                disabled=not source_controls_enabled,
+            )
         with col_btn:
-            if st.button("Set URL", disabled=not direct_url):
+            if st.button("Set URL", disabled=(not source_controls_enabled or not direct_url)):
                 st.session_state.episode = {
                     "title": "Manual Audio",
                     "date": "",

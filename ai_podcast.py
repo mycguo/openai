@@ -1381,6 +1381,7 @@ def main():
                     with st.spinner("Transcribing audio..."):
                         transcript = upload_and_transcribe(filepath)
                     st.session_state.transcript = transcript
+                    st.session_state.transcript_editor = transcript
 
                     ep_title = episode.get("title", "")
                     with st.spinner("Generating LinkedIn article..."):
@@ -1470,12 +1471,15 @@ def main():
                         content = _db_load_article(selected_transcript)
                         if content:
                             st.session_state.transcript = content
+                            st.session_state.transcript_editor = content
                             st.success(f"Loaded {selected_transcript} from database")
                         else:
                             st.error("Failed to load transcript from database")
                     else:
                         with open(os.path.join(SCRAPED_DIR, selected_transcript)) as f:
-                            st.session_state.transcript = f.read()
+                            content = f.read()
+                        st.session_state.transcript = content
+                        st.session_state.transcript_editor = content
                         st.success(f"Loaded {selected_transcript}")
                     st.rerun()
     
@@ -1512,6 +1516,7 @@ def main():
     
                         transcript = upload_and_transcribe(filepath)
                         st.session_state.transcript = transcript
+                        st.session_state.transcript_editor = transcript
                         st.success("Transcription complete!")
     
                         # Clean up temp dir if not saving
@@ -1522,12 +1527,20 @@ def main():
                         st.error(f"Transcription failed: {e}")
     
         if "transcript" in st.session_state:
+            if "transcript_editor" not in st.session_state:
+                st.session_state.transcript_editor = st.session_state.transcript
             with st.expander("View Transcript", expanded=False):
-                st.text_area("Transcript", st.session_state.transcript, height=300, disabled=True)
+                edited_transcript = st.text_area(
+                    "Transcript (Editable)",
+                    height=300,
+                    key="transcript_editor",
+                )
+                st.session_state.transcript = edited_transcript
+                st.caption(f"{len(edited_transcript):,} characters")
     
         # ── Step 3: Generate Article ──
         st.subheader("Generate LinkedIn Article")
-        has_transcript = "transcript" in st.session_state
+        has_transcript = bool(st.session_state.get("transcript", "").strip())
     
         # Load a previously saved article
         if IS_STREAMLIT_CLOUD:

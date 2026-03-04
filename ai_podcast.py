@@ -266,8 +266,12 @@ def _ensure_playwright_browsers() -> bool:
         return False
 
 
-def _resolve_episode_audio(ep_href: str, description: str = "") -> tuple[str, str]:
-    """Resolve audio URL primarily via Podchaser episode API, with RSS fallback."""
+def _resolve_episode_audio(
+    ep_href: str,
+    description: str = "",
+    rss_url: str = "",
+) -> tuple[str, str]:
+    """Resolve audio URL via Podchaser episode API, with optional podcast RSS fallback."""
     ep_id = ""
     ep_id_match = re.search(r"-(\d{6,})$", ep_href)
     if ep_id_match:
@@ -294,10 +298,10 @@ def _resolve_episode_audio(ep_href: str, description: str = "") -> tuple[str, st
         except Exception as exc:
             logger.warning("Podchaser API call failed: %s", exc)
 
-    if not audio_url:
+    if not audio_url and rss_url:
         try:
             rss_resp = requests.get(
-                "https://anchor.fm/s/f7cac464/podcast/rss",
+                rss_url,
                 headers={"User-Agent": "Mozilla/5.0"},
                 timeout=15,
             )
@@ -358,7 +362,16 @@ def _scrape_latest_episode_http(podcast_url: str) -> dict:
     else:
         ep_href = urllib.parse.urljoin(podcast_url, href)
 
-    audio_url, description = _resolve_episode_audio(ep_href, description)
+    rss_url = ""
+    rss_link = soup.select_one('link[type="application/rss+xml"]')
+    if rss_link and rss_link.get("href"):
+        rss_url = urllib.parse.urljoin(podcast_url, rss_link.get("href", "").strip())
+    else:
+        rss_anchor = soup.select_one('a[href*="rss"]')
+        if rss_anchor and rss_anchor.get("href"):
+            rss_url = urllib.parse.urljoin(podcast_url, rss_anchor.get("href", "").strip())
+
+    audio_url, description = _resolve_episode_audio(ep_href, description, rss_url=rss_url)
 
     return {
         "title": title,
@@ -1316,6 +1329,8 @@ def main():
                     audio_url = episode.get("audio_url", "")
                     direct_url = st.session_state.get("direct_audio_url", "").strip()
                     source_mode = st.session_state.get("source_mode", "")
+                    podcast_name = st.session_state.get("selected_podcast", list(PODCAST_SOURCES.keys())[0])
+                    podcast_url = PODCAST_SOURCES.get(podcast_name, list(PODCAST_SOURCES.values())[0])
 
                     if source_mode == "url" and direct_url:
                         audio_url = direct_url
@@ -1332,9 +1347,7 @@ def main():
                         st.error("Audio URL not set. Use Set URL first.")
                         st.stop()
 
-                    if not audio_url:
-                        podcast_url = st.session_state.get("selected_podcast_url", list(PODCAST_SOURCES.values())[0])
-                        podcast_name = st.session_state.get("selected_podcast", list(PODCAST_SOURCES.keys())[0])
+                    if source_mode != "url":
                         with st.spinner(f"Fetching latest episode from {podcast_name}..."):
                             episode = scrape_latest_episode(podcast_url)
                         episode["podcast_name"] = podcast_name

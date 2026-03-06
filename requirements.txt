@@ -2,6 +2,7 @@ openai
 streamlit
 google-api-python-client
 google-auth
+google-genai
 browser-use
 playwright>=1.48.0
 playwright-stealth

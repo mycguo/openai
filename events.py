@@ -3,7 +3,10 @@ import os
 import re
 import json
 import asyncio
+import hashlib
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Dict, List, Optional
@@ -13,12 +16,17 @@ import streamlit as st
 import streamlit.components.v1 as st_components
 from openai import OpenAI
 from anthropic import Anthropic
+from google import genai
+from google.genai import types
 import requests
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
 _browser_use_file_patch_applied = False
+_luma_detail_rate_limited_until = 0.0
+_luma_detail_rate_limit_lock = threading.Lock()
+_luma_detail_rate_limit_log_until = 0.0
 
 
 def render_copy_button(content: str, key_suffix: str, label: str = "📋 Copy") -> None:
@@ -156,6 +164,10 @@ ANTHROPIC_SONNET_MODEL = (
     or os.getenv("ANTHROPIC_SONNET_MODEL")
     or "claude-sonnet-4-5"
 )
+GOOGLE_API_KEY = (
+    st.secrets.get("GOOGLE_API_KEY")
+    or os.getenv("GOOGLE_API_KEY")
+)
 DEFAULT_GPT_MODELS: List[str] = [
     CONFIGURED_GPT_MODEL,
     "gpt-5.4",
@@ -164,7 +176,7 @@ DEFAULT_GPT_MODELS: List[str] = [
     "gpt-4o",
     "gpt-4-turbo",
 ]
-DALLE_MODEL = "dall-e-3"
+NANO_BANANA_MODEL = "gemini-3.1-flash-image-preview"
 LUMA_BASE_URL = "https://lu.ma"
 LUMA_REQUEST_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
@@ -834,30 +846,116 @@ def _extract_details_fallback(html: str) -> Dict[str, str]:
 
 @lru_cache(maxsize=256)
 def _fetch_luma_event_details(url: str) -> Dict[str, str]:
-    try:
-        response = requests.get(url, headers=LUMA_REQUEST_HEADERS, timeout=20)
-        response.raise_for_status()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to fetch event details from %s: %s", url, exc)
+    global _luma_detail_rate_limited_until
+    global _luma_detail_rate_limit_log_until
+
+    parsed_url = urlparse(_normalize_luma_url(url))
+    fetch_url = urlunparse((
+        parsed_url.scheme.lower(),
+        parsed_url.netloc.lower(),
+        parsed_url.path.rstrip("/") or "/",
+        "",
+        "",
+        "",
+    ))
+
+    now = time.monotonic()
+    with _luma_detail_rate_limit_lock:
+        cooldown_remaining = _luma_detail_rate_limited_until - now
+        should_log_cooldown = cooldown_remaining > 0 and now >= _luma_detail_rate_limit_log_until
+        if should_log_cooldown:
+            _luma_detail_rate_limit_log_until = now + 5.0
+
+    if cooldown_remaining > 0:
+        if should_log_cooldown:
+            logger.info(
+                "Skipping remaining Luma detail enrichment requests for %.1fs due to rate limiting",
+                cooldown_remaining,
+            )
         return {}
 
-    html = response.text
-    time.sleep(0.3)
-    details = _extract_details_from_jsonld(html)
-    if details:
-        return details
-    return _extract_details_fallback(html)
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = requests.get(fetch_url, headers=LUMA_REQUEST_HEADERS, timeout=20)
+            if response.status_code == 429:
+                retry_after_header = response.headers.get("Retry-After", "").strip()
+                wait_seconds = 10.0
+                if retry_after_header:
+                    try:
+                        wait_seconds = max(1.0, min(float(retry_after_header), 30.0))
+                    except ValueError:
+                        pass
+                with _luma_detail_rate_limit_lock:
+                    _luma_detail_rate_limited_until = max(
+                        _luma_detail_rate_limited_until,
+                        time.monotonic() + wait_seconds,
+                    )
+                    _luma_detail_rate_limit_log_until = time.monotonic() + 5.0
+                logger.warning(
+                    "Rate limited fetching Luma event details; backing off for %.1fs after %s",
+                    wait_seconds,
+                    fetch_url,
+                )
+                return {}
+
+            response.raise_for_status()
+            html = response.text
+            details = _extract_details_from_jsonld(html)
+            if details:
+                return details
+            return _extract_details_fallback(html)
+        except Exception as exc:  # noqa: BLE001
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code in {500, 502, 503, 504} and attempt < max_attempts:
+                wait_seconds = 0.5 * attempt
+                logger.info(
+                    "Transient error fetching %s (status %s); retrying in %.1fs (attempt %s/%s)",
+                    fetch_url,
+                    status_code,
+                    wait_seconds,
+                    attempt,
+                    max_attempts,
+                )
+                time.sleep(wait_seconds)
+                continue
+            logger.warning("Failed to fetch event details from %s: %s", fetch_url, exc)
+            return {}
+
+    return {}
 
 
 def _enrich_events_with_details(events: List[Dict]) -> List[Dict]:
-    enriched: List[Dict] = []
+    detail_urls: List[str] = []
+    normalized_urls: List[str] = []
     for event in events:
         url = event.get('url', '')
-        normalized_url = url
-        extra: Dict[str, str] = {}
-        if _is_luma_url(url):
-            normalized_url = _normalize_luma_url(url)
-            extra = _fetch_luma_event_details(normalized_url)
+        normalized_url = _normalize_luma_url(url) if _is_luma_url(url) else url
+        normalized_urls.append(normalized_url)
+        if _is_luma_url(url) and normalized_url:
+            detail_urls.append(normalized_url)
+
+    details_by_url: Dict[str, Dict[str, str]] = {}
+    unique_urls = sorted(set(detail_urls))
+    if unique_urls:
+        max_workers = min(2, len(unique_urls))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_url = {
+                executor.submit(_fetch_luma_event_details, url): url
+                for url in unique_urls
+            }
+            for future in as_completed(future_to_url):
+                url = future_to_url[future]
+                try:
+                    details_by_url[url] = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Failed to enrich event details for %s: %s", url, exc)
+                    details_by_url[url] = {}
+
+    enriched: List[Dict] = []
+    for event, normalized_url in zip(events, normalized_urls):
+        url = event.get('url', '')
+        extra = details_by_url.get(normalized_url, {}) if _is_luma_url(url) else {}
         merged = event.copy()
         if normalized_url != url:
             merged['url'] = normalized_url
@@ -1090,10 +1188,13 @@ def generate_essay(combined_events_content=None):
 
 
 def generate_event_image(combined_events_content=None):
-    """Generate an image based on the events using OpenAI's DALL-E 3 model."""
+    """Generate an image based on the events using Google's Nano Banana 2 model."""
     try:
         if not combined_events_content:
             return False, None, "No events data available. Please scrape events first."
+
+        if not GOOGLE_API_KEY:
+            return False, None, "Google API key is not configured. Set GOOGLE_API_KEY in secrets or env."
 
         prompt_for_image = (
             "Create a simple, clean image representing AI and tech events in San Francisco. "
@@ -1117,28 +1218,22 @@ def generate_event_image(combined_events_content=None):
                 "Use bold typography, futuristic gradients, and tech-themed icons."
             )
 
-        client = _create_openai_client()
-        response = client.images.generate(
-            model=DALLE_MODEL,
-            prompt=prompt_for_image,
-            size="1024x1024",
-            quality="standard",
-            n=1,
+        client = genai.Client(api_key=GOOGLE_API_KEY)
+        response = client.models.generate_content(
+            model=NANO_BANANA_MODEL,
+            contents=prompt_for_image,
+            config=types.GenerateContentConfig(
+                response_modalities=["TEXT", "IMAGE"],
+            ),
         )
 
-        if response.data and len(response.data) > 0:
-            image_url = response.data[0].url
-            # Download the image
-            import requests
-            image_response = requests.get(image_url)
-            if image_response.status_code == 200:
-                return True, {"bytes": image_response.content, "mime_type": "image/png"}, None
-            else:
-                error_msg = f"Failed to download image from URL: {image_url}"
-                print(f"❌ {error_msg}")
-                return False, None, error_msg
+        for part in response.parts:
+            if part.inline_data is not None:
+                image_data = part.inline_data.data
+                mime_type = part.inline_data.mime_type or "image/png"
+                return True, {"bytes": image_data, "mime_type": mime_type}, None
 
-        error_msg = "DALL-E 3 returned no image data"
+        error_msg = "Nano Banana 2 returned no image data"
         print(f"❌ {error_msg}")
         return False, None, error_msg
 
@@ -1876,12 +1971,23 @@ def _build_organized_events_fallback(events: List[Dict[str, str]]) -> str:
     return "\n".join(lines).strip()
 
 
-def generate_organized_events(combined_events_content=None):
-    """Organize combined event text into a grouped daily agenda using GPT-5.4."""
+def _organized_events_cache_key(combined_events_content: str, use_gpt_polish: bool) -> str:
+    payload = f"{int(use_gpt_polish)}::{combined_events_content}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def generate_organized_events(combined_events_content=None, use_gpt_polish: bool = False):
+    """Organize combined event text into a grouped daily agenda."""
     try:
         if not combined_events_content:
             st.warning("No events data available. Please scrape events first.")
             return False, None
+
+        cache_key = _organized_events_cache_key(combined_events_content, use_gpt_polish)
+        cache = st.session_state.setdefault("organized_events_cache", {})
+        cached_output = cache.get(cache_key)
+        if cached_output:
+            return True, cached_output
 
         events = _extract_organize_candidate_events(combined_events_content)
         if not events:
@@ -1889,6 +1995,10 @@ def generate_organized_events(combined_events_content=None):
             return False, None
 
         fallback_output = _build_organized_events_fallback(events)
+        if not use_gpt_polish:
+            cache[cache_key] = fallback_output
+            return True, fallback_output
+
         prompt = (
             "You are organizing upcoming AI events into a concise daily agenda.\n"
             "Use ONLY the supplied JSON records. Do not invent any events or details.\n"
@@ -1917,15 +2027,21 @@ def generate_organized_events(combined_events_content=None):
 
         if not organized_output or "RSVP:" not in organized_output:
             logger.warning("Organized events output invalid or empty; using fallback formatter.")
+            cache[cache_key] = fallback_output
             return True, fallback_output
 
+        cache[cache_key] = organized_output
         return True, organized_output
     except Exception as exc:
         logger.error("Organize events failed: %s", exc)
         fallback_events = _extract_organize_candidate_events(combined_events_content or "")
         if fallback_events:
-            st.warning("LLM organize step failed, showing deterministic fallback instead.")
-            return True, _build_organized_events_fallback(fallback_events)
+            fallback_output = _build_organized_events_fallback(fallback_events)
+            if use_gpt_polish:
+                st.warning("LLM organize step failed, showing deterministic fallback instead.")
+            cache = st.session_state.setdefault("organized_events_cache", {})
+            cache[_organized_events_cache_key(combined_events_content or "", use_gpt_polish)] = fallback_output
+            return True, fallback_output
         st.error(f"Error organizing events: {exc}")
         return False, None
 
@@ -2307,14 +2423,27 @@ def main():
     with st.expander("🗂 Organize Events", expanded=False):
         st.write("Group scraped events by day and region with RSVP links and short descriptions.")
         organized_text = st.session_state.get("organized_events")
+        use_gpt_polish = st.checkbox(
+            "Use GPT-5.4 polish (slower)",
+            value=False,
+            key="organize_events_use_gpt",
+            help="Fast mode uses the deterministic formatter. Enable this only if you want GPT to rewrite the presentation.",
+        )
 
         if 'combined_events' in st.session_state:
             if st.button("Organize Events", key="organize_events_button", type="primary"):
-                with st.spinner("Organizing events with GPT-5.4..."):
-                    success, result = generate_organized_events(st.session_state.combined_events)
+                spinner_text = "Organizing events with GPT-5.4..." if use_gpt_polish else "Organizing events..."
+                with st.spinner(spinner_text):
+                    success, result = generate_organized_events(
+                        st.session_state.combined_events,
+                        use_gpt_polish=use_gpt_polish,
+                    )
                     if success and result:
                         organized_text = result
                         st.session_state.organized_events = result
+                        st.session_state.organized_events_mode = (
+                            "GPT-5.4 polish" if use_gpt_polish else "Fast deterministic"
+                        )
                         st.success("✅ Events organized successfully!")
                         saved = _auto_save_results(result, "organized_events")
                         if saved:
@@ -2329,6 +2458,9 @@ def main():
             col_header1, col_header2 = st.columns([3, 1])
             with col_header1:
                 st.markdown("**Organized Events**")
+                mode_label = st.session_state.get("organized_events_mode")
+                if mode_label:
+                    st.caption(mode_label)
             with col_header2:
                 render_copy_button(organized_text, "organized-events")
 
@@ -2381,7 +2513,7 @@ def main():
             )
 
     with st.expander("🎨 Image Generation", expanded=False):
-        st.write("Generate a promotional image based on the scraped events using OpenAI's DALL-E 3 API")
+        st.write("Generate a promotional image based on the scraped events using Google's Nano Banana 2 model")
 
         if 'combined_events' in st.session_state:
             col_img1, col_img2 = st.columns([1, 1])
@@ -2419,12 +2551,12 @@ def main():
                             st.code(error_msg, language="text")
                             st.markdown("""
                             **Troubleshooting:**
-                            - Make sure your OpenAI API key has DALL-E access
+                            - Make sure your Google API key is configured (GOOGLE_API_KEY)
                             - Check if you have sufficient API quota/credits
-                            - Verify that DALL-E 3 is available for your account
-                            - Check OpenAI API status for outages
+                            - Verify that Nano Banana 2 (Gemini image) is available for your account
+                            - Check Google AI API status for outages
                         """)
-                        st.info("💡 Tip: Ensure your OpenAI API key has access to DALL-E 3 image generation.")
+                        st.info("💡 Tip: Ensure your Google API key has access to Nano Banana 2 image generation.")
         else:
             st.info("📋 Please scrape events first using 'Scrape All Sources' to generate an image.")
             st.button("Generate Event Image", key="image_button", disabled=True)

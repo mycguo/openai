@@ -4,10 +4,10 @@ import re
 import json
 import asyncio
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Dict, List, Optional
-from urllib.parse import urljoin
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import streamlit as st
 import streamlit.components.v1 as st_components
@@ -158,6 +158,7 @@ ANTHROPIC_SONNET_MODEL = (
 )
 DEFAULT_GPT_MODELS: List[str] = [
     CONFIGURED_GPT_MODEL,
+    "gpt-5.4",
     "gpt-5",
     "gpt-5-turbo",
     "gpt-4o",
@@ -1064,7 +1065,7 @@ def generate_essay(combined_events_content=None):
                 prompt,
                 temperature=1.0,
                 max_tokens=3000,
-                model_override="gpt-4.1",
+                model_override="gpt-5.4",
             )
         cleaned_result = raw_result.strip()
         logger.info("Essay generated with %d characters", len(cleaned_result))
@@ -1596,6 +1597,339 @@ def parse_and_format_combined_events(all_events):
     return f"{header}\n{header_line}\nGenerated: {timestamp}\n\n{body}"
 
 
+def _canonicalize_event_url(url: str) -> str:
+    if not url:
+        return ""
+
+    parsed = urlparse(url.strip())
+    if not parsed.scheme or not parsed.netloc:
+        return url.strip()
+
+    filtered_query = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if not key.lower().startswith("utm_") and key.lower() not in {"_bhlid", "tab"}
+    ]
+    path = parsed.path.rstrip("/") or "/"
+    return urlunparse((
+        parsed.scheme.lower(),
+        parsed.netloc.lower(),
+        path,
+        "",
+        urlencode(filtered_query),
+        "",
+    ))
+
+
+def _parse_event_datetime_text(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+
+    cleaned = " ".join(value.strip().split())
+    match = re.match(
+        r"^(?P<date>[A-Za-z]+ \d{2}, \d{4}) (?P<time>\d{1,2}:\d{2} [AP]M)(?: (?P<tz>.+))?$",
+        cleaned,
+    )
+    if not match:
+        return None
+
+    dt_value = datetime.strptime(
+        f"{match.group('date')} {match.group('time')}",
+        "%B %d, %Y %I:%M %p",
+    )
+    tz_text = (match.group("tz") or "").strip().upper()
+    if not tz_text:
+        return dt_value
+
+    if tz_text in {"UTC", "GMT"}:
+        return dt_value.replace(tzinfo=timezone.utc)
+
+    if tz_text in {"PT", "PST"}:
+        return dt_value.replace(tzinfo=timezone(timedelta(hours=-8)))
+    if tz_text == "PDT":
+        return dt_value.replace(tzinfo=timezone(timedelta(hours=-7)))
+    if tz_text in {"ET", "EST"}:
+        return dt_value.replace(tzinfo=timezone(timedelta(hours=-5)))
+    if tz_text == "EDT":
+        return dt_value.replace(tzinfo=timezone(timedelta(hours=-4)))
+
+    offset_match = re.match(r"^(?:UTC|GMT)(?P<sign>[+-])(?P<hours>\d{2}):(?P<minutes>\d{2})$", tz_text)
+    if offset_match:
+        sign = 1 if offset_match.group("sign") == "+" else -1
+        hours = int(offset_match.group("hours"))
+        minutes = int(offset_match.group("minutes"))
+        offset = timedelta(hours=hours, minutes=minutes) * sign
+        return dt_value.replace(tzinfo=timezone(offset))
+
+    return dt_value
+
+
+def _format_organized_day_heading(dt_value: datetime) -> str:
+    return dt_value.strftime("%A, %B %d").replace(" 0", " ")
+
+
+def _format_organized_time(dt_value: datetime, raw_date_time: str) -> str:
+    time_text = dt_value.strftime("%I:%M %p").lstrip("0")
+    offset = dt_value.utcoffset()
+    if offset is not None:
+        offset_minutes = int(offset.total_seconds() // 60)
+        if offset_minutes in {-480, -420}:
+            return f"{time_text} PT"
+        if offset_minutes in {-300, -240}:
+            return f"{time_text} ET"
+        if offset_minutes == 0:
+            return f"{time_text} UTC"
+
+    raw_parts = raw_date_time.strip().split()
+    if raw_parts:
+        last_token = raw_parts[-1].upper()
+        if last_token not in {"AM", "PM"}:
+            return f"{time_text} {last_token}"
+    return time_text
+
+
+def _clean_location_for_display(location: str) -> str:
+    cleaned = " ".join(_ensure_text(location).split()).strip()
+    if not cleaned:
+        return "Location TBD"
+
+    if cleaned.lower() in {"online", "online event", "virtual", "virtual event"}:
+        return "Online"
+
+    cleaned = cleaned.replace("Register to See Address", "Register for address")
+    parts = [part.strip() for part in cleaned.split(",") if part.strip()]
+    deduped_parts: List[str] = []
+    seen = set()
+    for part in parts:
+        key = part.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped_parts.append(part)
+    return ", ".join(deduped_parts) if deduped_parts else cleaned
+
+
+def _classify_event_region(location: str) -> str:
+    lowered = location.lower()
+    if any(keyword in lowered for keyword in ["online", "virtual", "zoom", "google meet"]):
+        return "Online"
+    if any(keyword in lowered for keyword in ["seattle", "washington", "portland", "oregon", "bellevue"]):
+        return "Pacific Northwest"
+    if any(keyword in lowered for keyword in ["new york", "nyc", "brooklyn", "manhattan", "queens", "bronx"]):
+        return "New York"
+    if any(keyword in lowered for keyword in ["boston", "cambridge", "somerville"]):
+        return "Boston / Cambridge"
+    if any(
+        keyword in lowered
+        for keyword in [
+            "san francisco",
+            "south san francisco",
+            "berkeley",
+            "oakland",
+            "palo alto",
+            "mountain view",
+            "san jose",
+            "menlo park",
+            "fremont",
+            "los gatos",
+            "san carlos",
+            "stanford",
+            "sunnyvale",
+            "santa clara",
+            "alameda",
+        ]
+    ):
+        return "Bay Area"
+    return "Other"
+
+
+def _shorten_event_description(text: str, max_length: int = 140) -> str:
+    cleaned = re.sub(r"\s+", " ", _ensure_text(text)).strip()
+    if not cleaned:
+        return "Details available on the RSVP page."
+    if len(cleaned) <= max_length:
+        return cleaned
+
+    sentence = re.split(r"(?<=[.!?])\s+", cleaned, maxsplit=1)[0].strip()
+    if sentence and len(sentence) <= max_length:
+        return sentence
+    return cleaned[: max_length - 3].rstrip(" ,;:") + "..."
+
+
+def _extract_organize_candidate_events(combined_events_content: str) -> List[Dict[str, str]]:
+    if not combined_events_content:
+        return []
+
+    event_pattern = re.compile(r"^\s*-\s+\*\*\[(?P<title>.+?)\]\((?P<url>https?://[^)]+)\)\*\*\s*$")
+    ignored_titles = {"submit event", "pricing", "create event"}
+    ignored_paths = {"/signin", "/pricing", "/create", "/sf", "/genai-sf"}
+
+    parsed_events: List[Dict[str, str]] = []
+    current_event: Optional[Dict[str, str]] = None
+
+    for raw_line in combined_events_content.splitlines():
+        line = raw_line.rstrip()
+        match = event_pattern.match(line)
+        if match:
+            if current_event:
+                parsed_events.append(current_event)
+            current_event = {
+                "title": match.group("title").strip(),
+                "rsvp_link": match.group("url").strip(),
+                "date_time_raw": "",
+                "location": "",
+                "description": "",
+            }
+            continue
+
+        if not current_event:
+            continue
+
+        stripped = line.strip()
+        if stripped.startswith("Date and Time:"):
+            current_event["date_time_raw"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("Location/Venue:"):
+            current_event["location"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("Brief Description:"):
+            current_event["description"] = stripped.split(":", 1)[1].strip()
+
+    if current_event:
+        parsed_events.append(current_event)
+
+    organized_events: List[Dict[str, str]] = []
+    seen_urls = set()
+    for event in parsed_events:
+        title = event["title"].strip()
+        rsvp_link = event["rsvp_link"].strip()
+        if not title or not rsvp_link:
+            continue
+
+        canonical_url = _canonicalize_event_url(rsvp_link)
+        parsed_url = urlparse(canonical_url)
+        if title.lower() in ignored_titles or parsed_url.path.rstrip("/") in ignored_paths:
+            continue
+
+        parsed_dt = _parse_event_datetime_text(event["date_time_raw"])
+        if not parsed_dt:
+            continue
+
+        dedupe_key = canonical_url or rsvp_link
+        if dedupe_key in seen_urls:
+            continue
+        seen_urls.add(dedupe_key)
+
+        location = _clean_location_for_display(event["location"])
+        organized_events.append({
+            "title": title,
+            "rsvp_link": rsvp_link,
+            "date_heading": _format_organized_day_heading(parsed_dt),
+            "time_display": _format_organized_time(parsed_dt, event["date_time_raw"]),
+            "location": location,
+            "suggested_region": _classify_event_region(location),
+            "description": _shorten_event_description(event["description"]),
+            "sort_key": parsed_dt.isoformat(),
+        })
+
+    organized_events.sort(key=lambda item: item["sort_key"])
+    return organized_events
+
+
+def _build_organized_events_fallback(events: List[Dict[str, str]]) -> str:
+    if not events:
+        return "No events with date, time, and RSVP link were available to organize."
+
+    region_order = [
+        "Online",
+        "Bay Area",
+        "Pacific Northwest",
+        "New York",
+        "Boston / Cambridge",
+        "Other",
+    ]
+    grouped: Dict[str, Dict[str, List[Dict[str, str]]]] = {}
+    for event in events:
+        day_heading = event["date_heading"]
+        region = event["suggested_region"]
+        grouped.setdefault(day_heading, {}).setdefault(region, []).append(event)
+
+    lines: List[str] = []
+    day_order = sorted(grouped.keys(), key=lambda heading: min(item["sort_key"] for regions in [grouped[heading]] for items in regions.values() for item in items))
+    for day_heading in day_order:
+        if lines:
+            lines.append("")
+        lines.append(day_heading)
+        lines.append("")
+
+        regions = grouped[day_heading]
+        ordered_regions = [name for name in region_order if name in regions]
+        ordered_regions.extend(sorted(name for name in regions if name not in region_order))
+
+        for region in ordered_regions:
+            lines.append(region)
+            lines.append("")
+            for event in regions[region]:
+                lines.append(f"{event['time_display']} — {event['title']} · {event['location']}")
+                lines.append(f"RSVP: {event['rsvp_link']}")
+                lines.append(f"About: {event['description']}")
+                lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def generate_organized_events(combined_events_content=None):
+    """Organize combined event text into a grouped daily agenda using GPT-5.4."""
+    try:
+        if not combined_events_content:
+            st.warning("No events data available. Please scrape events first.")
+            return False, None
+
+        events = _extract_organize_candidate_events(combined_events_content)
+        if not events:
+            st.warning("No events with RSVP links and parseable date/time were found.")
+            return False, None
+
+        fallback_output = _build_organized_events_fallback(events)
+        prompt = (
+            "You are organizing upcoming AI events into a concise daily agenda.\n"
+            "Use ONLY the supplied JSON records. Do not invent any events or details.\n"
+            "Requirements:\n"
+            "- Skip any item without an RSVP link.\n"
+            "- Keep events sorted chronologically.\n"
+            "- Group by day using the provided `date_heading` value.\n"
+            "- Within each day, group by `suggested_region`.\n"
+            "- For each event, output exactly these 3 lines:\n"
+            "  1. `TIME — TITLE · LOCATION`\n"
+            "  2. `RSVP: URL`\n"
+            "  3. `About: short description`\n"
+            "- Keep the short description to one sentence.\n"
+            "- Preserve the RSVP link exactly.\n"
+            "- Do not add bullets, numbering, commentary, or code fences.\n"
+            "- Separate day sections, region headings, and events with blank lines.\n\n"
+            f"Event JSON:\n{json.dumps(events, ensure_ascii=False, indent=2)}"
+        )
+
+        organized_output = generate_with_gpt(
+            prompt,
+            temperature=0.1,
+            max_tokens=5000,
+            model_override="gpt-5.4",
+        ).strip()
+
+        if not organized_output or "RSVP:" not in organized_output:
+            logger.warning("Organized events output invalid or empty; using fallback formatter.")
+            return True, fallback_output
+
+        return True, organized_output
+    except Exception as exc:
+        logger.error("Organize events failed: %s", exc)
+        fallback_events = _extract_organize_candidate_events(combined_events_content or "")
+        if fallback_events:
+            st.warning("LLM organize step failed, showing deterministic fallback instead.")
+            return True, _build_organized_events_fallback(fallback_events)
+        st.error(f"Error organizing events: {exc}")
+        return False, None
+
+
 def fix_example_com_urls(line, base_url=LUMA_BASE_URL):
     """Replace example.com URLs and relative URLs with proper base URLs"""
     import re
@@ -1969,6 +2303,45 @@ def main():
                     st.warning("Uploaded file is empty.")
             except Exception as exc:
                 st.error(f"Unable to read uploaded file: {exc}")
+
+    with st.expander("🗂 Organize Events", expanded=False):
+        st.write("Group scraped events by day and region with RSVP links and short descriptions.")
+        organized_text = st.session_state.get("organized_events")
+
+        if 'combined_events' in st.session_state:
+            if st.button("Organize Events", key="organize_events_button", type="primary"):
+                with st.spinner("Organizing events with GPT-5.4..."):
+                    success, result = generate_organized_events(st.session_state.combined_events)
+                    if success and result:
+                        organized_text = result
+                        st.session_state.organized_events = result
+                        st.success("✅ Events organized successfully!")
+                        saved = _auto_save_results(result, "organized_events")
+                        if saved:
+                            st.info(f"💾 Results auto-saved to `{os.path.basename(saved)}`")
+                    else:
+                        st.error("❌ Failed to organize events")
+        else:
+            st.info("📋 Please scrape or load events first.")
+            st.button("Organize Events", key="organize_events_button", disabled=True)
+
+        if organized_text:
+            col_header1, col_header2 = st.columns([3, 1])
+            with col_header1:
+                st.markdown("**Organized Events**")
+            with col_header2:
+                render_copy_button(organized_text, "organized-events")
+
+            with st.expander("📋 View Organized Events", expanded=False):
+                st.code(organized_text, language="text")
+
+            st.text_area(
+                "Organized events text",
+                value=organized_text,
+                height=420,
+                key="organized_events_text",
+                label_visibility="visible",
+            )
 
     with st.expander("📝 Essay Generation", expanded=False):
         st.write("Generate an essay based on the scraped events")

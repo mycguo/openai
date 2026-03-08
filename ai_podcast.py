@@ -6,6 +6,7 @@ import tempfile
 import time
 import urllib.parse
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from typing import Optional, List, Dict, Any
 
 import requests
@@ -217,10 +218,20 @@ TRANSCRIPT_ENDPOINT = "https://api.assemblyai.com/v2/transcript"
 CHUNK_SIZE = 5_242_880  # 5 MB
 
 PODCAST_SOURCES = {
-    "The AI Daily Brief": "https://www.podchaser.com/podcasts/the-ai-daily-brief-artificial-5260567/episodes/recent",
-    "Y Combinator Startup Podcast": "https://www.podchaser.com/podcasts/y-combinator-startup-podcast-526094/episodes/recent",
-    "AI Fire Daily": "https://www.podchaser.com/podcasts/ai-fire-daily-6108838/episodes/recent",
+    "The AI Daily Brief": {
+        "episodes_url": "https://www.podchaser.com/podcasts/the-ai-daily-brief-artificial-5260567/episodes/recent",
+        "rss_url": "https://anchor.fm/s/f7cac464/podcast/rss",
+    },
+    "Y Combinator Startup Podcast": {
+        "episodes_url": "https://www.podchaser.com/podcasts/y-combinator-startup-podcast-526094/episodes/recent",
+        "rss_url": "https://anchor.fm/s/8c1524bc/podcast/rss",
+    },
+    "AI Fire Daily": {
+        "episodes_url": "https://www.podchaser.com/podcasts/ai-fire-daily-6108838/episodes/recent",
+        "rss_url": "https://media.rss.com/ai-fire-daily/feed.xml",
+    },
 }
+ENABLE_BROWSER_SCRAPE = os.getenv("ENABLE_PLAYWRIGHT_SCRAPE", "").lower() in {"1", "true", "yes"}
 
 SCRAPED_DIR = "scraped_results"
 _SESSION_ARTICLE_CACHE = os.path.join(SCRAPED_DIR, ".pending_article.txt")
@@ -322,6 +333,65 @@ def _resolve_episode_audio(
             logger.warning("RSS feed fallback failed: %s", exc)
 
     return audio_url, description
+
+
+def _clean_html_text(value: str) -> str:
+    if not value:
+        return ""
+    from bs4 import BeautifulSoup
+
+    return BeautifulSoup(value, "html.parser").get_text(" ", strip=True)
+
+
+def _format_pub_date(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        return parsedate_to_datetime(value).strftime("%Y-%m-%d")
+    except Exception:
+        return value
+
+
+def _scrape_latest_episode_rss(source_name: str, source_config: Dict[str, str]) -> dict:
+    """Fetch latest episode info from RSS to avoid Podchaser HTML blocking."""
+    from xml.etree import ElementTree
+
+    rss_url = source_config.get("rss_url", "").strip()
+    if not rss_url:
+        raise RuntimeError(f"RSS URL is not configured for {source_name}.")
+
+    response = requests.get(
+        rss_url,
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=25,
+    )
+    response.raise_for_status()
+
+    root = ElementTree.fromstring(response.content)
+    item = root.find(".//channel/item")
+    if item is None:
+        raise RuntimeError(f"No episodes found in RSS feed for {source_name}.")
+
+    title = (item.findtext("title") or "Unknown Episode").strip()
+    description = _clean_html_text(item.findtext("description") or "")
+    episode_url = (item.findtext("link") or "").strip()
+    pub_date = _format_pub_date((item.findtext("pubDate") or "").strip())
+
+    audio_url = ""
+    enclosure = item.find("enclosure")
+    if enclosure is not None:
+        audio_url = (enclosure.get("url") or "").strip()
+
+    if not audio_url and episode_url:
+        audio_url, description = _resolve_episode_audio(episode_url, description, rss_url=rss_url)
+
+    return {
+        "title": title,
+        "date": pub_date,
+        "url": episode_url or rss_url,
+        "audio_url": audio_url,
+        "description": description,
+    }
 
 
 def _scrape_latest_episode_http(podcast_url: str) -> dict:
@@ -486,8 +556,25 @@ async def _scrape_latest_episode_async(podcast_url: str):
         }
 
 
-def scrape_latest_episode(podcast_url: str):
-    """Sync wrapper for scraping the latest podcast episode."""
+def scrape_latest_episode(source_name: str):
+    """Fetch latest episode for a configured podcast source."""
+    source_config = PODCAST_SOURCES[source_name]
+
+    try:
+        return _scrape_latest_episode_rss(source_name, source_config)
+    except Exception as exc:
+        logger.warning("RSS scrape failed for %s: %s", source_name, exc)
+
+    if not ENABLE_BROWSER_SCRAPE:
+        raise RuntimeError(
+            "Unable to fetch the latest episode from RSS in this environment. "
+            "Paste an audio URL manually, or set ENABLE_PLAYWRIGHT_SCRAPE=1 to allow browser fallback."
+        )
+
+    podcast_url = source_config.get("episodes_url", "").strip()
+    if not podcast_url:
+        raise RuntimeError(f"No browser fallback URL configured for {source_name}.")
+
     try:
         return _scrape_latest_episode_http(podcast_url)
     except Exception as exc:
@@ -928,14 +1015,33 @@ def initialize_linkedin_image_upload(access_token: str, owner_urn: str):
 
 
 def upload_linkedin_image(upload_url: str, image_bytes: bytes, mime_type: str):
-    headers = {"Content-Type": mime_type or "image/png"}
-    response = requests.put(upload_url, data=image_bytes, headers=headers, timeout=60)
-    if response.status_code >= 400:
-        return False, f"{response.status_code}: {response.text}"
-    return True, None
+    headers = {
+        "Content-Type": mime_type or "image/png",
+        "Content-Length": str(len(image_bytes)),
+        "Connection": "close",
+    }
+    last_error = None
+
+    for attempt in range(1, 4):
+        try:
+            # Use a fresh session per attempt so TLS retries do not reuse a bad socket.
+            with requests.Session() as session:
+                response = session.put(upload_url, data=image_bytes, headers=headers, timeout=(10, 120))
+            if response.status_code >= 400:
+                return False, f"{response.status_code}: {response.text}"
+            return True, None
+        except (requests.exceptions.SSLError, requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            last_error = str(exc)
+            logger.warning("LinkedIn image upload attempt %s/3 failed: %s", attempt, exc)
+            if attempt < 3:
+                time.sleep(attempt)
+        except requests.RequestException as exc:
+            return False, str(exc)
+
+    return False, last_error or "LinkedIn image upload failed after retries."
 
 
-def post_to_linkedin(content, access_token, author_id, image_payload=None):
+def post_to_linkedin(content, access_token, author_id, image_payload=None, allow_image_fallback: bool = True):
     if not author_id:
         return False, "Missing LinkedIn author ID. Please reconnect your account."
 
@@ -962,6 +1068,7 @@ def post_to_linkedin(content, access_token, author_id, image_payload=None):
         "lifecycleState": "PUBLISHED",
         "isReshareDisabledByAuthor": False,
     }
+    upload_warning = None
     if image_payload:
         if not image_payload.get("bytes"):
             return False, "Image payload is empty."
@@ -970,16 +1077,26 @@ def post_to_linkedin(content, access_token, author_id, image_payload=None):
             author_urn,
         )
         if not init_ok:
-            return False, f"Image upload init failed: {init_error}"
-        upload_ok, upload_error = upload_linkedin_image(
-            upload_url,
-            image_payload.get("bytes", b""),
-            image_payload.get("mime_type", "image/png"),
-        )
-        if not upload_ok:
-            return False, f"Image upload failed: {upload_error}"
-        alt_text = image_payload.get("alt_text") or "AI podcast illustration"
-        payload["content"] = {"media": {"id": image_urn, "altText": alt_text}}
+            if allow_image_fallback:
+                upload_warning = f"Image upload init failed; published without image. Details: {init_error}"
+                logger.warning(upload_warning)
+            else:
+                return False, f"Image upload init failed: {init_error}"
+        else:
+            upload_ok, upload_error = upload_linkedin_image(
+                upload_url,
+                image_payload.get("bytes", b""),
+                image_payload.get("mime_type", "image/png"),
+            )
+            if not upload_ok:
+                if allow_image_fallback:
+                    upload_warning = f"Image upload failed; published without image. Details: {upload_error}"
+                    logger.warning(upload_warning)
+                else:
+                    return False, f"Image upload failed: {upload_error}"
+            else:
+                alt_text = image_payload.get("alt_text") or "AI podcast illustration"
+                payload["content"] = {"media": {"id": image_urn, "altText": alt_text}}
     try:
         response = requests.post(LINKEDIN_API_URL, json=payload, headers=headers)
         if response.status_code >= 400:
@@ -988,11 +1105,20 @@ def post_to_linkedin(content, access_token, author_id, image_payload=None):
         if response.status_code == 201:
             post_id = response.headers.get("x-restli-id") or response.headers.get("X-Restli-Id")
             if post_id:
-                return True, {"id": post_id}
+                result = {"id": post_id}
+                if upload_warning:
+                    result["warning"] = upload_warning
+                return True, result
         response.raise_for_status()
         if response.content:
-            return True, response.json()
-        return True, {}
+            result = response.json()
+            if isinstance(result, dict) and upload_warning:
+                result["warning"] = upload_warning
+            return True, result
+        result = {}
+        if upload_warning:
+            result["warning"] = upload_warning
+        return True, result
     except requests.RequestException as e:
         return False, str(e)
 
@@ -1244,13 +1370,13 @@ def main():
             key="selected_podcast",
             disabled=not source_controls_enabled,
         )
-        selected_podcast_url = PODCAST_SOURCES[selected_podcast]
-        st.session_state.selected_podcast_url = selected_podcast_url
+        selected_source = PODCAST_SOURCES[selected_podcast]
+        st.session_state.selected_podcast_url = selected_source.get("episodes_url", "")
 
         if st.button("Fetch Latest Episode", type="primary", disabled=not source_controls_enabled):
             with st.spinner(f"Scraping {selected_podcast}..."):
                 try:
-                    episode = scrape_latest_episode(selected_podcast_url)
+                    episode = scrape_latest_episode(selected_podcast)
                     episode["podcast_name"] = selected_podcast
                     st.session_state.episode = episode
                     st.session_state.source_mode = "latest"
@@ -1330,7 +1456,6 @@ def main():
                     direct_url = st.session_state.get("direct_audio_url", "").strip()
                     source_mode = st.session_state.get("source_mode", "")
                     podcast_name = st.session_state.get("selected_podcast", list(PODCAST_SOURCES.keys())[0])
-                    podcast_url = PODCAST_SOURCES.get(podcast_name, list(PODCAST_SOURCES.values())[0])
 
                     if source_mode == "url" and direct_url:
                         audio_url = direct_url
@@ -1349,7 +1474,7 @@ def main():
 
                     if source_mode != "url":
                         with st.spinner(f"Fetching latest episode from {podcast_name}..."):
-                            episode = scrape_latest_episode(podcast_url)
+                            episode = scrape_latest_episode(podcast_name)
                         episode["podcast_name"] = podcast_name
                         st.session_state.episode = episode
                         st.session_state.source_mode = "latest"
@@ -1427,6 +1552,9 @@ def main():
                             st.success("Published to LinkedIn!")
                             post_id = ""
                             if isinstance(result, dict):
+                                warning = result.get("warning")
+                                if warning:
+                                    st.warning(warning)
                                 post_id = result.get("id") or result.get("post_id") or ""
                             if post_id:
                                 st.session_state.last_linkedin_post_urn = post_id
@@ -1724,6 +1852,9 @@ def main():
                         st.success("Published to LinkedIn!")
                         post_id = ""
                         if isinstance(result, dict):
+                            warning = result.get("warning")
+                            if warning:
+                                st.warning(warning)
                             post_id = result.get("id") or result.get("post_id") or ""
                         if post_id:
                             st.session_state.last_linkedin_post_urn = post_id

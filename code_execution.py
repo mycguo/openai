@@ -483,7 +483,7 @@ def _render_event(event: dict[str, Any], index: int) -> None:
         if image_url.startswith("data:image/png;base64,"):
             payload = image_url.split(",", 1)[1]
             try:
-                st.image(base64.b64decode(payload), use_container_width=True)
+                st.image(base64.b64decode(payload), width="stretch")
                 return
             except Exception:
                 pass

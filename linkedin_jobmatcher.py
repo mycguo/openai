@@ -709,7 +709,7 @@ def main():
     with log_expander:
         col_log_left, col_log_right = st.columns([3, 1])
         with col_log_right:
-            if st.button("Clear logs", key="clear_agent_logs", use_container_width=True):
+            if st.button("Clear logs", key="clear_agent_logs", width="stretch"):
                 st.session_state[LOG_STATE_KEY] = []
         log_placeholder = col_log_left.empty()
 
@@ -874,7 +874,7 @@ def main():
                 data=json.dumps(st.session_state.scraped_jobs, indent=2),
                 file_name="linkedin_jobs.json",
                 mime="application/json",
-                use_container_width=True
+                width="stretch"
             )
 
             if st.button("  Rank Jobs by Resume Match"):
@@ -911,7 +911,7 @@ def main():
                     with col2:
                         st.metric("Match Score", f"{score}%")
                         if job.get('link'):
-                            st.link_button("View Job", job.get('link'), use_container_width=True)
+                            st.link_button("View Job", job.get('link'), width="stretch")
 
         with tabs[1]:
             jobs_data = []
@@ -924,7 +924,7 @@ def main():
                     'Posted': job.get('posted', 'N/A')
                 })
 
-            st.dataframe(jobs_data, use_container_width=True, height=600)
+            st.dataframe(jobs_data, width="stretch", height=600)
 
         with tabs[2]:
             import pandas as pd

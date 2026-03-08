@@ -1888,7 +1888,7 @@ def main():
                 st.image(
                     st.session_state.article_image["bytes"],
                     caption="Current image",
-                    use_container_width=True,
+                    width="stretch",
                 )
                 st.download_button(
                     label="Download image",

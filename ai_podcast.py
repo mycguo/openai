@@ -12,7 +12,8 @@ from typing import Optional, List, Dict, Any
 import requests
 import streamlit as st
 from anthropic import Anthropic
-from openai import OpenAI
+from google import genai
+from google.genai import types
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +213,7 @@ ANTHROPIC_SONNET_MODEL = (
     or "claude-sonnet-4-5"
 )
 ASSEMBLYAI_API_KEY = st.secrets.get("ASSEMBLYAI_API_KEY")
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+GOOGLE_API_KEY = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
 UPLOAD_ENDPOINT = "https://api.assemblyai.com/v2/upload"
 TRANSCRIPT_ENDPOINT = "https://api.assemblyai.com/v2/transcript"
 CHUNK_SIZE = 5_242_880  # 5 MB
@@ -241,7 +242,11 @@ _SESSION_SOURCE_CACHE = os.path.join(SCRAPED_DIR, ".pending_source.json")
 LINKEDIN_API_URL = "https://api.linkedin.com/rest/posts"
 LINKEDIN_API_VERSION = os.getenv("LINKEDIN_API_VERSION", "202509")
 LINKEDIN_IMAGE_INIT_URL = "https://api.linkedin.com/rest/images?action=initializeUpload"
-DALLE_MODEL = "dall-e-3"
+NANO_BANANA_MODEL = (
+    st.secrets.get("GOOGLE_IMAGE_MODEL")
+    or os.getenv("GOOGLE_IMAGE_MODEL")
+    or "gemini-3.1-flash-image-preview"
+)
 LINKEDIN_AUTH_URL = "https://www.linkedin.com/oauth/v2/authorization"
 LINKEDIN_TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
 LINKEDIN_USERINFO_URL = "https://api.linkedin.com/v2/userinfo"
@@ -249,8 +254,8 @@ LINKEDIN_ME_URL = "https://api.linkedin.com/v2/me"
 
 if ANTHROPIC_API_KEY:
     os.environ["ANTHROPIC_API_KEY"] = ANTHROPIC_API_KEY
-if OPENAI_API_KEY:
-    os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+if GOOGLE_API_KEY:
+    os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
 
 
 # ─── Playwright helpers ──────────────────────────────────────────
@@ -733,10 +738,10 @@ def _create_anthropic_client() -> Anthropic:
 
 
 @st.cache_resource
-def _create_openai_client() -> OpenAI:
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OpenAI API key is not configured. Set OPENAI_API_KEY in secrets or env.")
-    return OpenAI(api_key=OPENAI_API_KEY)
+def _create_google_client() -> genai.Client:
+    if not GOOGLE_API_KEY:
+        raise RuntimeError("Google API key is not configured. Set GOOGLE_API_KEY in secrets or env.")
+    return genai.Client(api_key=GOOGLE_API_KEY)
 
 
 def generate_with_claude(prompt: str, temperature: float = 1.0, max_tokens: int = 4000) -> str:
@@ -809,6 +814,20 @@ IMPORTANT: Use plain text only, NO markdown (no **bold**, no *italics*, no heade
     return article
 
 
+def _set_current_article(article_text: str, reset_image_prompt: bool = True) -> None:
+    """Sync article-related session state after load/generate events."""
+    article_value = article_text or ""
+    st.session_state.article = article_value
+    st.session_state.article_editor = article_value
+
+    if reset_image_prompt:
+        if article_value.strip():
+            st.session_state.article_image_prompt = _build_article_image_prompt(article_value)
+        else:
+            st.session_state.article_image_prompt = ""
+        st.session_state.pop("article_image", None)
+
+
 def _extract_key_themes(article_text: str) -> str:
     """Extract key themes from article using Claude for better results."""
     if not article_text or not article_text.strip():
@@ -845,54 +864,55 @@ Post:
 
 def _build_article_image_prompt(article_text: str) -> str:
     themes = _extract_key_themes(article_text)
+    clean_article = re.sub(r"\s+", " ", (article_text or "").strip())
 
     if not themes:
-        # Fallback prompt without themes
         return (
-            "Create a clean, modern, professional LinkedIn image for an AI technology article. "
-            "Visual style: bold typography, abstract tech shapes like neural networks and data flows, "
-            "polished gradient background in blue and purple tones. "
-            "No logos, no trademarks, no faces, no text overlays."
+            "Create a clean, modern, professional LinkedIn image grounded in the article content below. "
+            "Use the article itself as the primary source of truth for the scene, mood, and concepts. "
+            "Show the core idea visually with polished editorial art direction, abstract tech forms, "
+            "smart composition, and a high-end business/technology feel. "
+            "Do not add logos, brand names, screenshots, UI mockups, faces, or text overlays. "
+            f"Article content: {clean_article}"
         )
 
     return (
-        "Create a clean, modern, professional LinkedIn image that summarizes an article. "
-        f"Key themes: {themes}. "
-        "Use bold typography, abstract tech shapes, and a polished gradient background. "
-        "No logos, no trademarks, no faces."
+        "Create a clean, modern, professional LinkedIn image grounded in the article content below. "
+        "The visual should reflect the article's actual message, not a generic AI illustration. "
+        f"Key themes from the article: {themes}. "
+        "Translate the article into a single strong editorial-style image with abstract technology cues, "
+        "confident composition, and a polished business-forward aesthetic. "
+        "Do not add logos, brand names, screenshots, UI mockups, faces, or text overlays. "
+        f"Article content: {clean_article}"
     )
 
 
 def generate_article_image(article_text: str, prompt_override: str = ""):
-    """Generate an image for the LinkedIn article using OpenAI's DALL-E 3 model."""
+    """Generate an image for the LinkedIn article using Google's Nano Banana model."""
     try:
         if not article_text or not article_text.strip():
             return False, None, None, "No article content available to build an image."
 
         prompt_for_image = prompt_override.strip() if prompt_override else _build_article_image_prompt(article_text)
-        client = _create_openai_client()
-        response = client.images.generate(
-            model=DALLE_MODEL,
-            prompt=prompt_for_image,
-            size="1024x1024",
-            quality="standard",
-            n=1,
+        client = _create_google_client()
+        response = client.models.generate_content(
+            model=NANO_BANANA_MODEL,
+            contents=prompt_for_image,
+            config=types.GenerateContentConfig(
+                response_modalities=["TEXT", "IMAGE"],
+            ),
         )
 
-        if response.data and len(response.data) > 0:
-            image_url = response.data[0].url
-            image_response = requests.get(image_url, timeout=30)
-            if image_response.status_code == 200:
+        for part in response.parts:
+            if part.inline_data is not None:
                 payload = {
-                    "bytes": image_response.content,
-                    "mime_type": "image/png",
+                    "bytes": part.inline_data.data,
+                    "mime_type": part.inline_data.mime_type or "image/png",
                     "alt_text": "AI article illustration",
                 }
                 return True, payload, prompt_for_image, None
-            error_msg = f"Failed to download image from URL: {image_url}"
-            return False, None, prompt_for_image, error_msg
 
-        return False, None, prompt_for_image, "DALL-E 3 returned no image data"
+        return False, None, prompt_for_image, "Nano Banana returned no image data"
     except Exception as e:
         return False, None, None, f"Error generating image: {str(e)}"
 
@@ -1102,25 +1122,119 @@ def post_to_linkedin(content, access_token, author_id, image_payload=None, allow
         if response.status_code >= 400:
             logger.error("LinkedIn API error: %s %s", response.status_code, response.text)
             return False, f"{response.status_code}: {response.text}"
-        if response.status_code == 201:
-            post_id = response.headers.get("x-restli-id") or response.headers.get("X-Restli-Id")
-            if post_id:
-                result = {"id": post_id}
-                if upload_warning:
-                    result["warning"] = upload_warning
-                return True, result
         response.raise_for_status()
-        if response.content:
-            result = response.json()
-            if isinstance(result, dict) and upload_warning:
-                result["warning"] = upload_warning
-            return True, result
         result = {}
+        if response.content:
+            try:
+                parsed_result = response.json()
+                if isinstance(parsed_result, dict):
+                    result = parsed_result
+            except ValueError:
+                logger.warning("LinkedIn post create response was not valid JSON.")
+        post_id = (
+            response.headers.get("x-restli-id")
+            or response.headers.get("X-Restli-Id")
+            or result.get("id")
+            or result.get("post_id")
+        )
+        if post_id:
+            result["id"] = post_id
+            result["debug"] = fetch_linkedin_post_debug(
+                access_token=access_token,
+                post_urn=post_id,
+                sent_commentary=content,
+                has_image=bool(image_payload and payload.get("content")),
+            )
         if upload_warning:
             result["warning"] = upload_warning
         return True, result
     except requests.RequestException as e:
         return False, str(e)
+
+
+def fetch_linkedin_post_debug(access_token: str, post_urn: str, sent_commentary: str, has_image: bool) -> dict:
+    """Fetch the created post back from LinkedIn to compare stored vs sent commentary."""
+    debug_info = {
+        "post_urn": post_urn,
+        "has_image": has_image,
+        "sent_commentary_length": len(sent_commentary or ""),
+        "sent_commentary": sent_commentary or "",
+    }
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "X-Restli-Protocol-Version": "2.0.0",
+        "Linkedin-Version": LINKEDIN_API_VERSION,
+    }
+    encoded_urn = urllib.parse.quote(post_urn, safe="")
+
+    try:
+        response = requests.get(
+            f"{LINKEDIN_API_URL}/{encoded_urn}",
+            headers=headers,
+            params={"viewContext": "AUTHOR"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json() if response.content else {}
+        stored_commentary = data.get("commentary") or ""
+        debug_info.update(
+            {
+                "stored_commentary_length": len(stored_commentary),
+                "stored_commentary": stored_commentary,
+                "commentary_matches_exactly": stored_commentary == (sent_commentary or ""),
+                "stored_post_id": data.get("id") or post_urn,
+                "stored_lifecycle_state": data.get("lifecycleState") or "",
+            }
+        )
+    except requests.HTTPError as exc:
+        response = getattr(exc, "response", None)
+        if response is not None and response.status_code == 403:
+            debug_info["retrieval_error"] = (
+                "LinkedIn denied post retrieval. This app can create member posts with "
+                "`w_member_social`, but reading member posts back typically requires "
+                "`r_member_social`, which is currently a closed permission."
+            )
+        else:
+            debug_info["retrieval_error"] = str(exc)
+    except (requests.RequestException, ValueError) as exc:
+        debug_info["retrieval_error"] = str(exc)
+
+    return debug_info
+
+
+def render_linkedin_post_debug(debug_info: dict, key_prefix: str) -> None:
+    """Render LinkedIn post debug details in the Streamlit UI."""
+    if not debug_info:
+        return
+
+    with st.expander("LinkedIn Post Debug", expanded=False):
+        st.caption(f"Post URN: {debug_info.get('post_urn', '')}")
+        st.caption(f"Image attached in payload: {debug_info.get('has_image', False)}")
+        st.caption(f"Sent commentary length: {debug_info.get('sent_commentary_length', 0)}")
+
+        retrieval_error = debug_info.get("retrieval_error")
+        if retrieval_error:
+            st.warning(f"LinkedIn post fetch failed: {retrieval_error}")
+        else:
+            st.caption(f"Stored commentary length: {debug_info.get('stored_commentary_length', 0)}")
+            st.caption(f"Exact commentary match: {debug_info.get('commentary_matches_exactly', False)}")
+            if debug_info.get("stored_lifecycle_state"):
+                st.caption(f"Stored lifecycle state: {debug_info.get('stored_lifecycle_state')}")
+
+        st.text_area(
+            "Sent Commentary Snapshot",
+            value=debug_info.get("sent_commentary", ""),
+            height=220,
+            disabled=True,
+            key=f"{key_prefix}_sent_commentary_debug",
+        )
+        st.text_area(
+            "Stored Commentary Snapshot",
+            value=debug_info.get("stored_commentary", ""),
+            height=220,
+            disabled=True,
+            key=f"{key_prefix}_stored_commentary_debug",
+        )
 
 
 def build_linkedin_post_url(post_urn: str) -> str:
@@ -1183,8 +1297,7 @@ def _handle_linkedin_oauth():
                 if IS_STREAMLIT_CLOUD:
                     cached = _db_load_oauth_cache(article_cache_key)
                     if cached and cached.strip():
-                        st.session_state.article = cached
-                        st.session_state.article_editor = cached
+                        _set_current_article(cached)
                     _db_delete_oauth_cache(article_cache_key)
 
                     source_json = _db_load_oauth_cache(source_cache_key)
@@ -1206,8 +1319,7 @@ def _handle_linkedin_oauth():
                         with open(_SESSION_ARTICLE_CACHE) as f:
                             cached = f.read()
                         if cached.strip():
-                            st.session_state.article = cached
-                            st.session_state.article_editor = cached
+                            _set_current_article(cached)
                         os.remove(_SESSION_ARTICLE_CACHE)
                     if os.path.exists(_SESSION_SOURCE_CACHE):
                         try:
@@ -1439,10 +1551,10 @@ def main():
         st.subheader("Do All (Fetch → Transcribe → Generate → Publish)")
         save_audio_all = st.checkbox("Save audio to disk", value=True, key="doall_save_audio")
         include_image_all = False
-        if OPENAI_API_KEY:
+        if GOOGLE_API_KEY:
             include_image_all = st.checkbox("Generate and include image", value=True, key="doall_include_image")
         else:
-            st.caption("Set OPENAI_API_KEY to enable image generation.")
+            st.caption("Set GOOGLE_API_KEY to enable image generation.")
         run_do_all = st.button("Do All", type="primary")
 
         if run_do_all:
@@ -1511,8 +1623,7 @@ def main():
                     ep_title = episode.get("title", "")
                     with st.spinner("Generating LinkedIn article..."):
                         article = generate_linkedin_article(transcript, ep_title)
-                    st.session_state.article = article
-                    st.session_state.article_editor = article
+                    _set_current_article(article)
 
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                     filename = f"podcast_article_{ts}.txt"
@@ -1525,7 +1636,7 @@ def main():
                             f.write(article)
 
                     image_payload = None
-                    if include_image_all and OPENAI_API_KEY:
+                    if include_image_all and GOOGLE_API_KEY:
                         with st.spinner("Generating image..."):
                             success, img_payload, prompt_used, error = generate_article_image(
                                 article,
@@ -1555,6 +1666,10 @@ def main():
                                 warning = result.get("warning")
                                 if warning:
                                     st.warning(warning)
+                                debug_info = result.get("debug")
+                                if debug_info:
+                                    st.session_state.last_linkedin_post_debug = debug_info
+                                    render_linkedin_post_debug(debug_info, key_prefix="do_all_publish")
                                 post_id = result.get("id") or result.get("post_id") or ""
                             if post_id:
                                 st.session_state.last_linkedin_post_urn = post_id
@@ -1686,16 +1801,14 @@ def main():
                     if IS_STREAMLIT_CLOUD:
                         content = _db_load_article(selected_file)
                         if content:
-                            st.session_state.article = content
-                            st.session_state.article_editor = content
+                            _set_current_article(content)
                             st.success(f"Loaded {selected_file} from database")
                         else:
                             st.error("Failed to load article from database")
                     else:
                         with open(os.path.join(SCRAPED_DIR, selected_file)) as f:
                             content = f.read()
-                        st.session_state.article = content
-                        st.session_state.article_editor = content
+                        _set_current_article(content)
                         st.success(f"Loaded {selected_file}")
                     st.rerun()
     
@@ -1704,8 +1817,7 @@ def main():
                 ep_title = st.session_state.get("episode", {}).get("title", "")
                 with st.spinner("Generating article with Claude..."):
                     article = generate_linkedin_article(st.session_state.transcript, ep_title)
-                st.session_state.article = article
-                st.session_state.article_editor = article
+                _set_current_article(article)
                 # Auto-save article
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"podcast_article_{ts}.txt"
@@ -1741,8 +1853,8 @@ def main():
             st.session_state.article = edited
     
         st.markdown("**Optional: Generate a LinkedIn image from the article**")
-        if not OPENAI_API_KEY:
-            st.info("Set OPENAI_API_KEY to enable image generation.")
+        if not GOOGLE_API_KEY:
+            st.info("Set GOOGLE_API_KEY to enable image generation.")
         else:
             has_article = bool(st.session_state.get("article", "").strip())
             if "article_image_prompt" not in st.session_state:
@@ -1855,6 +1967,10 @@ def main():
                             warning = result.get("warning")
                             if warning:
                                 st.warning(warning)
+                            debug_info = result.get("debug")
+                            if debug_info:
+                                st.session_state.last_linkedin_post_debug = debug_info
+                                render_linkedin_post_debug(debug_info, key_prefix="manual_publish")
                             post_id = result.get("id") or result.get("post_id") or ""
                         if post_id:
                             st.session_state.last_linkedin_post_urn = post_id

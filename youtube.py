@@ -647,7 +647,7 @@ def main() -> None:
                 data=st.session_state["yt_transcript_text"],
                 file_name="transcript.txt",
                 mime="text/plain",
-                use_container_width=True,
+                width="stretch",
             )
 
         with dl_col2:
@@ -656,11 +656,11 @@ def main() -> None:
                 data=st.session_state["yt_transcript_srt"],
                 file_name="transcript.srt",
                 mime="text/plain",
-                use_container_width=True,
+                width="stretch",
             )
 
         with dl_col3:
-            if st.button("📤 Upload to Transcript Section", use_container_width=True):
+            if st.button("📤 Upload to Transcript Section", width="stretch"):
                 try:
                     saved_path = save_transcript_to_section(
                         st.session_state["yt_transcript_text"],

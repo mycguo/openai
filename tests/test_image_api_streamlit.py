@@ -38,7 +38,7 @@ if st.button("🧪 Run Image Generation Test", type="primary"):
                 if hasattr(response, 'data') and len(response.data) > 0:
                     image_url = response.data[0].url
                     st.success("✅ SUCCESS! gpt-image-1 is available")
-                    st.image(image_url, caption="Generated with gpt-image-1", use_container_width=True)
+                    st.image(image_url, caption="Generated with gpt-image-1", width="stretch")
                     st.info(f"Image URL: {image_url}")
                     st.balloons()
                 else:
@@ -72,7 +72,7 @@ if st.button("🧪 Run Image Generation Test", type="primary"):
                         if hasattr(response, 'data') and len(response.data) > 0:
                             image_url = response.data[0].url
                             st.success("✅ SUCCESS! DALL-E 3 is available")
-                            st.image(image_url, caption="Generated with DALL-E 3", use_container_width=True)
+                            st.image(image_url, caption="Generated with DALL-E 3", width="stretch")
                             st.info(f"Image URL: {image_url}")
                             st.balloons()
                         else:

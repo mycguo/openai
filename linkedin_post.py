@@ -266,7 +266,7 @@ def main():
 
         col1, col2, _ = st.columns([1, 2, 1])
         with col2:
-            if st.button("🔗 Connect LinkedIn Account", type="primary", use_container_width=True):
+            if st.button("🔗 Connect LinkedIn Account", type="primary", width="stretch"):
                 auth_url = generate_auth_url(config)
                 st.markdown(f"[Click here to authorize the app]({auth_url})")
                 st.info("You'll be redirected to LinkedIn to authorize the app, then redirected back here.")
@@ -341,7 +341,7 @@ def main():
         if st.button(
             "📤 Post to LinkedIn",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             disabled=not post_content or char_remaining < 0
         ):
             if not post_content.strip():

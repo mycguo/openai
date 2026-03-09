@@ -862,29 +862,39 @@ Post:
     return snippet
 
 
-def _build_article_image_prompt(article_text: str) -> str:
-    themes = _extract_key_themes(article_text)
-    clean_article = re.sub(r"\s+", " ", (article_text or "").strip())
-
-    if not themes:
-        return (
-            "Create a clean, modern, professional LinkedIn image grounded in the article content below. "
-            "Use the article itself as the primary source of truth for the scene, mood, and concepts. "
-            "Show the core idea visually with polished editorial art direction, abstract tech forms, "
-            "smart composition, and a high-end business/technology feel. "
-            "Do not add logos, brand names, screenshots, UI mockups, faces, or text overlays. "
-            f"Article content: {clean_article}"
-        )
-
+def _build_article_image_prompt(article_text: str = "") -> str:
     return (
-        "Create a clean, modern, professional LinkedIn image grounded in the article content below. "
-        "The visual should reflect the article's actual message, not a generic AI illustration. "
-        f"Key themes from the article: {themes}. "
-        "Translate the article into a single strong editorial-style image with abstract technology cues, "
-        "confident composition, and a polished business-forward aesthetic. "
-        "Do not add logos, brand names, screenshots, UI mockups, faces, or text overlays. "
-        f"Article content: {clean_article}"
+        "Create a clean, modern, professional LinkedIn image grounded in the article content. "
+        "Use the article itself as the primary source of truth for the scene, mood, and concepts. "
+        "Show the core idea visually with polished editorial art direction, abstract tech forms, "
+        "smart composition, and a high-end business/technology feel. "
+        "Do not add logos, brand names, screenshots, UI mockups, faces. "
+        "Use small amount of text overlay."
     )
+
+
+def _normalize_article_image_prompt(prompt_text: str) -> str:
+    prompt = (prompt_text or "").strip()
+    if not prompt:
+        return ""
+
+    legacy_prefix = "Create a clean, modern, professional LinkedIn image grounded in the article content below."
+    if prompt.startswith(legacy_prefix):
+        return _build_article_image_prompt()
+
+    prompt = re.sub(r"\s*Article content:\s*.*$", "", prompt, flags=re.DOTALL).strip()
+    return prompt
+
+
+def _compose_article_image_generation_prompt(article_text: str, prompt_text: str) -> str:
+    clean_article = re.sub(r"\s+", " ", (article_text or "").strip())
+    themes = _extract_key_themes(article_text)
+    prompt = _normalize_article_image_prompt(prompt_text) or _build_article_image_prompt()
+
+    if themes:
+        prompt = f"{prompt} Key themes from the article: {themes}."
+
+    return f"{prompt} Article content for reference: {clean_article}"
 
 
 def generate_article_image(article_text: str, prompt_override: str = ""):
@@ -893,11 +903,14 @@ def generate_article_image(article_text: str, prompt_override: str = ""):
         if not article_text or not article_text.strip():
             return False, None, None, "No article content available to build an image."
 
-        prompt_for_image = prompt_override.strip() if prompt_override else _build_article_image_prompt(article_text)
+        prompt_for_image = (
+            _normalize_article_image_prompt(prompt_override) if prompt_override else ""
+        ) or _build_article_image_prompt(article_text)
+        generation_prompt = _compose_article_image_generation_prompt(article_text, prompt_for_image)
         client = _create_google_client()
         response = client.models.generate_content(
             model=NANO_BANANA_MODEL,
-            contents=prompt_for_image,
+            contents=generation_prompt,
             config=types.GenerateContentConfig(
                 response_modalities=["TEXT", "IMAGE"],
             ),
@@ -1862,9 +1875,12 @@ def main():
             default_prompt = _build_article_image_prompt(
                 st.session_state.get("article", ""),
             )
+            normalized_prompt = _normalize_article_image_prompt(st.session_state.article_image_prompt)
+            if normalized_prompt != st.session_state.article_image_prompt:
+                st.session_state.article_image_prompt = normalized_prompt
             prompt_value = st.text_area(
                 "Image prompt",
-                value=st.session_state.article_image_prompt or default_prompt,
+                value=normalized_prompt or default_prompt,
                 height=140,
             )
             if st.button("Reset prompt"):

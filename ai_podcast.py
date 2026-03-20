@@ -941,16 +941,29 @@ def generate_article_image(article_text: str, prompt_override: str = ""):
 
 # ─── Step 5: LinkedIn OAuth & Publish ────────────────────────────
 
+def _get_secret_or_env(secret_key: str, env_key: Optional[str] = None) -> str:
+    """Read a config value from Streamlit secrets first, then environment."""
+    env_name = env_key or secret_key
+    value = st.secrets.get(secret_key) or os.getenv(env_name) or ""
+    return str(value).strip()
+
+
 def get_linkedin_config():
-    try:
-        return {
-            "client_id": st.secrets["LINKEDIN_CLIENT_ID"],
-            "client_secret": st.secrets["LINKEDIN_CLIENT_SECRET"],
-            "redirect_uri": st.secrets["LINKEDIN_REDIRECT_URI"],
-        }
-    except KeyError as e:
-        st.error(f"Missing LinkedIn configuration: {e}")
+    config = {
+        "client_id": _get_secret_or_env("LINKEDIN_CLIENT_ID"),
+        "client_secret": _get_secret_or_env("LINKEDIN_CLIENT_SECRET"),
+        "redirect_uri": _get_secret_or_env("LINKEDIN_REDIRECT_URI"),
+    }
+    missing_fields = [key for key, value in config.items() if not value]
+    if missing_fields:
+        missing_labels = ", ".join(missing_fields)
+        st.error(f"Missing LinkedIn configuration: {missing_labels}")
+        st.info(
+            "Set LINKEDIN_CLIENT_ID, LINKEDIN_CLIENT_SECRET, and "
+            "LINKEDIN_REDIRECT_URI in Streamlit secrets or environment variables."
+        )
         return None
+    return config
 
 
 def _get_session_id() -> str:
@@ -975,15 +988,27 @@ def generate_auth_url(config):
     return f"{LINKEDIN_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
 
-def render_same_tab_auth_form(url: str) -> None:
-    """Render a same-tab OAuth submit button without using Streamlit's new-tab link button."""
-    if not url:
+def render_same_tab_auth_form(config: Dict[str, str]) -> None:
+    """Render a same-tab OAuth submit button with hidden inputs for LinkedIn params."""
+    if not config:
         return
-
-    escaped_url = html.escape(url, quote=True)
+    session_id = _get_session_id()
+    params = {
+        "response_type": "code",
+        "client_id": config["client_id"],
+        "redirect_uri": config["redirect_uri"],
+        "scope": "w_member_social openid email profile",
+        "state": f"ai_podcast_app_{session_id}",
+    }
+    hidden_inputs = "\n".join(
+        f'<input type="hidden" name="{html.escape(key, quote=True)}" '
+        f'value="{html.escape(value, quote=True)}" />'
+        for key, value in params.items()
+    )
     st.html(
         f"""
-        <form action="{escaped_url}" method="get" style="margin: 0;">
+        <form action="{LINKEDIN_AUTH_URL}" method="get" style="margin: 0;">
+            {hidden_inputs}
             <button
                 type="submit"
                 style="
@@ -1470,9 +1495,8 @@ def main():
             config = get_linkedin_config()
             if config:
                 if st.session_state.get("_oauth_ready"):
-                    auth_url = generate_auth_url(config)
                     st.info("Click below to authorize with LinkedIn:")
-                    render_same_tab_auth_form(auth_url)
+                    render_same_tab_auth_form(config)
                     if st.button("Cancel", key="cancel_oauth"):
                         st.session_state.pop("_oauth_ready", None)
                         st.rerun()

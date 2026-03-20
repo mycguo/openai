@@ -975,22 +975,33 @@ def generate_auth_url(config):
     return f"{LINKEDIN_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
 
-def redirect_in_current_tab(url: str) -> None:
-    """Force navigation in the current top-level tab instead of opening a new one."""
+def render_same_tab_auth_form(url: str) -> None:
+    """Render a same-tab OAuth submit button without using Streamlit's new-tab link button."""
     if not url:
         return
 
     escaped_url = html.escape(url, quote=True)
-    st.markdown(
-        f'<meta http-equiv="refresh" content="0; url={escaped_url}">',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        (
-            f'If you are not redirected automatically, '
-            f'<a href="{escaped_url}">continue to LinkedIn</a>.'
-        ),
-        unsafe_allow_html=True,
+    st.html(
+        f"""
+        <form action="{escaped_url}" method="get" style="margin: 0;">
+            <button
+                type="submit"
+                style="
+                    background: #9ad1ff;
+                    border: 1px solid #7fbef2;
+                    color: #0b2e4b;
+                    border-radius: 0.5rem;
+                    padding: 0.5rem 0.9rem;
+                    font-size: 1rem;
+                    font-weight: 600;
+                    cursor: pointer;
+                "
+            >
+                🔗 Authorize on LinkedIn
+            </button>
+        </form>
+        """,
+        width="content",
     )
 
 
@@ -1329,6 +1340,7 @@ def _handle_linkedin_oauth():
             if token_data and "access_token" in token_data:
                 st.session_state.linkedin_token = token_data["access_token"]
                 st.session_state.token_expires = time.time() + token_data.get("expires_in", 5184000)
+                st.session_state.pop("_oauth_ready", None)
                 member_urn = fetch_authenticated_member_urn(st.session_state.linkedin_token)
                 if member_urn:
                     st.session_state.author_id = member_urn
@@ -1457,46 +1469,54 @@ def main():
         if not token_active:
             config = get_linkedin_config()
             if config:
-                if st.button("Connect LinkedIn Account", type="primary"):
-                    # Save article so it survives the OAuth redirect
-                    # Use session-specific cache keys to prevent cross-user conflicts
-                    session_id = _get_session_id()
-                    article_cache_key = f"pending_article_{session_id}"
-                    source_cache_key = f"pending_source_{session_id}"
-
-                    article = st.session_state.get("article", "").strip()
-                    if article:
-                        if IS_STREAMLIT_CLOUD:
-                            _db_save_oauth_cache(article_cache_key, article)
-                        else:
-                            os.makedirs(SCRAPED_DIR, exist_ok=True)
-                            with open(_SESSION_ARTICLE_CACHE, "w") as f:
-                                f.write(article)
-                    source_payload = {
-                        "episode": st.session_state.get("episode"),
-                        "direct_audio_url": st.session_state.get("direct_audio_url", ""),
-                        "source_mode": st.session_state.get("source_mode", ""),
-                    }
-                    try:
-                        import json
-                        source_json = json.dumps(source_payload)
-                        if IS_STREAMLIT_CLOUD:
-                            _db_save_oauth_cache(source_cache_key, source_json)
-                        else:
-                            os.makedirs(SCRAPED_DIR, exist_ok=True)
-                            with open(_SESSION_SOURCE_CACHE, "w") as f:
-                                f.write(source_json)
-                    except Exception as exc:
-                        logger.warning("Failed to cache source data: %s", exc)
-
+                if st.session_state.get("_oauth_ready"):
                     auth_url = generate_auth_url(config)
-                    redirect_in_current_tab(auth_url)
-                    st.stop()
+                    st.info("Click below to authorize with LinkedIn:")
+                    render_same_tab_auth_form(auth_url)
+                    if st.button("Cancel", key="cancel_oauth"):
+                        st.session_state.pop("_oauth_ready", None)
+                        st.rerun()
+                else:
+                    if st.button("Connect LinkedIn Account", type="primary"):
+                        # Save article so it survives the OAuth redirect
+                        # Use session-specific cache keys to prevent cross-user conflicts
+                        session_id = _get_session_id()
+                        article_cache_key = f"pending_article_{session_id}"
+                        source_cache_key = f"pending_source_{session_id}"
+
+                        article = st.session_state.get("article", "").strip()
+                        if article:
+                            if IS_STREAMLIT_CLOUD:
+                                _db_save_oauth_cache(article_cache_key, article)
+                            else:
+                                os.makedirs(SCRAPED_DIR, exist_ok=True)
+                                with open(_SESSION_ARTICLE_CACHE, "w") as f:
+                                    f.write(article)
+                        source_payload = {
+                            "episode": st.session_state.get("episode"),
+                            "direct_audio_url": st.session_state.get("direct_audio_url", ""),
+                            "source_mode": st.session_state.get("source_mode", ""),
+                        }
+                        try:
+                            import json
+                            source_json = json.dumps(source_payload)
+                            if IS_STREAMLIT_CLOUD:
+                                _db_save_oauth_cache(source_cache_key, source_json)
+                            else:
+                                os.makedirs(SCRAPED_DIR, exist_ok=True)
+                                with open(_SESSION_SOURCE_CACHE, "w") as f:
+                                    f.write(source_json)
+                        except Exception as exc:
+                            logger.warning("Failed to cache source data: %s", exc)
+
+                        st.session_state._oauth_ready = True
+                        st.rerun()
         else:
             st.success("LinkedIn connected!")
             if st.button("Disconnect LinkedIn"):
                 for key in ["linkedin_token", "token_expires", "author_id"]:
                     st.session_state.pop(key, None)
+                st.session_state.pop("_oauth_ready", None)
                 st.rerun()
 
     with row1_right:

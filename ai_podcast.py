@@ -240,6 +240,14 @@ PODCAST_SOURCES = {
         "episodes_url": "https://www.podchaser.com/podcasts/lennys-podcast-product-career-4750705/episodes/recent",
         "rss_url": "https://api.substack.com/feed/podcast/10845.rss",
     },
+    "No Priors": {
+        "episodes_url": "https://www.podchaser.com/podcasts/no-priors-artificial-intellige-5096296/episodes/recent",
+        "rss_url": "https://feeds.megaphone.fm/nopriors",
+    },
+    "The Tennis Podcast": {
+        "episodes_url": "https://www.podchaser.com/podcasts/the-tennis-podcast-31788/episodes/recent",
+        "rss_url": "https://feeds.acast.com/public/shows/thetennispodcast",
+    },
 }
 ENABLE_BROWSER_SCRAPE = os.getenv("ENABLE_PLAYWRIGHT_SCRAPE", "").lower() in {"1", "true", "yes"}
 

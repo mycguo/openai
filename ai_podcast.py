@@ -780,7 +780,7 @@ def generate_with_claude(prompt: str, temperature: float = 1.0, max_tokens: int 
 
 
 def generate_linkedin_article(transcript: str, episode_title: str = "", max_attempts: int = 3) -> str:
-    prompt = f"""You are a professional LinkedIn content writer specializing in AI and technology.
+    prompt = f"""You are a professional LinkedIn content writer specializing in the topic of podcasting.
 
 Analyze the following podcast transcript and create a compelling LinkedIn post.
 
@@ -804,7 +804,7 @@ FORMATTING STYLE:
 - Keep paragraphs short (2-3 sentences max)
 
 Instructions:
-1. Identify the top 3-4 most important AI news stories discussed
+1. Identify the top 3-4 most important topics discussed in the podcast
 2. For each story, write 1-2 sentences max
 3. Write in a professional but engaging tone suitable for LinkedIn
 4. Start with a compelling one-line hook
@@ -956,11 +956,79 @@ def _get_secret_or_env(secret_key: str, env_key: Optional[str] = None) -> str:
     return str(value).strip()
 
 
+def _is_local_redirect_host(hostname: str) -> bool:
+    host = (hostname or "").strip().lower()
+    return host in {"localhost", "127.0.0.1", "0.0.0.0"}
+
+
+def _strip_redirect_uri_extras(raw_uri: str) -> str:
+    """Drop query/fragment while preserving the original scheme/host/path shape."""
+    parsed = urllib.parse.urlsplit(str(raw_uri or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return urllib.parse.urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            "",
+            "",
+        )
+    )
+
+
+def _normalize_redirect_uri(raw_uri: str) -> str:
+    """Normalize redirect URIs and prefer the live app URL when config looks unsafe."""
+    configured = str(raw_uri or "").strip()
+    parsed_configured_raw = urllib.parse.urlsplit(configured) if configured else urllib.parse.SplitResult("", "", "", "", "")
+
+    runtime_url = ""
+    try:
+        runtime_url = str(getattr(st.context, "url", "") or "").strip()
+    except Exception:
+        runtime_url = ""
+
+    normalized_runtime = _strip_redirect_uri_extras(runtime_url)
+    parsed_runtime = urllib.parse.urlsplit(normalized_runtime) if normalized_runtime else urllib.parse.SplitResult("", "", "", "", "")
+
+    if not configured:
+        return normalized_runtime
+
+    normalized_configured = _strip_redirect_uri_extras(configured)
+    parsed_configured = urllib.parse.urlsplit(normalized_configured) if normalized_configured else urllib.parse.SplitResult("", "", "", "", "")
+
+    if not normalized_runtime:
+        return normalized_configured
+
+    configured_has_extra_parts = bool(parsed_configured_raw.query or parsed_configured_raw.fragment)
+    configured_mismatch = (
+        parsed_configured.scheme != parsed_runtime.scheme
+        or parsed_configured.netloc != parsed_runtime.netloc
+        or (parsed_configured.path or "/") != (parsed_runtime.path or "/")
+    )
+    configured_is_local = _is_local_redirect_host(parsed_configured.hostname or "")
+    runtime_is_local = _is_local_redirect_host(parsed_runtime.hostname or "")
+    prefer_runtime = (
+        configured_has_extra_parts
+        or (configured_is_local and not runtime_is_local)
+        or (not runtime_is_local and configured_mismatch)
+    )
+    if prefer_runtime:
+        logger.warning(
+            "Using runtime URL for LinkedIn redirect URI. configured=%s runtime=%s",
+            normalized_configured,
+            normalized_runtime,
+        )
+        return normalized_runtime
+
+    return normalized_configured
+
+
 def get_linkedin_config():
     config = {
         "client_id": _get_secret_or_env("LINKEDIN_CLIENT_ID"),
         "client_secret": _get_secret_or_env("LINKEDIN_CLIENT_SECRET"),
-        "redirect_uri": _get_secret_or_env("LINKEDIN_REDIRECT_URI"),
+        "redirect_uri": _normalize_redirect_uri(_get_secret_or_env("LINKEDIN_REDIRECT_URI")),
     }
     missing_fields = [key for key, value in config.items() if not value]
     if missing_fields:
@@ -1367,6 +1435,13 @@ def _handle_linkedin_oauth():
         valid_state = True
         session_id_from_state = st.session_state.get("oauth_session_id", "legacy")
 
+    if code_param and valid_state and token_active:
+        try:
+            st.query_params.clear()
+        except AttributeError:
+            st.experimental_set_query_params()
+        return
+
     if code_param and valid_state and not token_active:
         with st.spinner("Exchanging authorization code..."):
             token_data = exchange_code_for_token(code_param, config)
@@ -1427,7 +1502,7 @@ def _handle_linkedin_oauth():
                 except AttributeError:
                     st.experimental_set_query_params()
                 st.success("Connected to LinkedIn!")
-                st.rerun()
+                return
 
 
 # ─── Main App ────────────────────────────────────────────────────

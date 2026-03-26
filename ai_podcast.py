@@ -248,6 +248,10 @@ PODCAST_SOURCES = {
         "episodes_url": "https://www.podchaser.com/podcasts/the-tennis-podcast-31788/episodes/recent",
         "rss_url": "https://feeds.acast.com/public/shows/thetennispodcast",
     },
+    "AI News Today": {
+        "episodes_url": "https://podcasts.apple.com/us/podcast/ai-news-today-julian-goldie-podcast/id1851256047",
+        "rss_url": "https://anchor.fm/s/10b0edd94/podcast/rss",
+    },
 }
 ENABLE_BROWSER_SCRAPE = os.getenv("ENABLE_PLAYWRIGHT_SCRAPE", "").lower() in {"1", "true", "yes"}
 
@@ -799,6 +803,7 @@ FORMATTING STYLE:
   🔹 KEY TAKEAWAY
   💡 WHAT THIS MEANS
   ⚡ WHY IT MATTERS
+- try to use creative and engaging headlines and subheadlines.
 - Add a blank line before and after each heading for visual separation
 - Use emojis at the start of key points (🔹, ▸, →)
 - Keep paragraphs short (2-3 sentences max)

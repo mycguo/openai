@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Dict, List, Optional
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 import streamlit.components.v1 as st_components
@@ -184,6 +185,14 @@ LUMA_REQUEST_HEADERS = {
                   'Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
+}
+CV_EVENTS_API_URL = "https://api.cerebralvalley.ai/v1/public/event/pull"
+CV_REQUEST_HEADERS = {
+    "User-Agent": LUMA_REQUEST_HEADERS["User-Agent"],
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://cerebralvalley.ai",
+    "Referer": "https://cerebralvalley.ai/",
 }
 
 if OPENAI_API_KEY:
@@ -664,6 +673,92 @@ def _format_datetime_parts(dt_value: Optional[datetime]) -> Dict[str, str]:
     }
 
 
+def _cerebral_valley_start_datetime_utc() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _infer_cerebral_valley_timezone(location: str, venue: str = "") -> timezone | ZoneInfo:
+    combined = f"{location} {venue}".lower()
+    if any(token in combined for token in ["new york", "nyc", "brooklyn", "manhattan", "queens", "bronx"]):
+        return ZoneInfo("America/New_York")
+    if any(token in combined for token in ["boston", "cambridge"]):
+        return ZoneInfo("America/New_York")
+    if any(token in combined for token in [
+        "san francisco", "sf", "stanford", "palo alto", "mountain view",
+        "san jose", "oakland", "berkeley", "fremont", "seattle", "bay area",
+        "los gatos", "soma",
+    ]):
+        return ZoneInfo("America/Los_Angeles")
+    if "london" in combined:
+        return ZoneInfo("Europe/London")
+    if "paris" in combined:
+        return ZoneInfo("Europe/Paris")
+    return timezone.utc
+
+
+def _parse_cerebral_valley_api_datetime(
+    value: Optional[str],
+    location: str = "",
+    venue: str = "",
+) -> Optional[datetime]:
+    if not value:
+        return None
+
+    normalized = value.strip().replace(" ", "T")
+    if not normalized:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    return parsed.astimezone(_infer_cerebral_valley_timezone(location, venue))
+
+
+def _format_cerebral_valley_location(location: str, venue: str) -> str:
+    location_text = _ensure_text(location).strip()
+    venue_text = _ensure_text(venue).strip()
+    if venue_text and location_text and venue_text.lower() != location_text.lower():
+        return f"{venue_text}, {location_text}"
+    return venue_text or location_text
+
+
+def _map_cerebral_valley_api_event(raw_event: Dict) -> Dict:
+    title = _ensure_text(raw_event.get("name"), "Untitled Event").strip() or "Untitled Event"
+    url = _ensure_text(raw_event.get("url")).strip()
+    location = _ensure_text(raw_event.get("location")).strip()
+    venue = _ensure_text(raw_event.get("venue")).strip()
+    start_dt = _parse_cerebral_valley_api_datetime(raw_event.get("startDateTime"), location, venue)
+    datetime_parts = _format_datetime_parts(start_dt)
+    description = _ensure_text(
+        raw_event.get("descriptionSummary") or raw_event.get("description")
+    ).strip()
+
+    mapped = {
+        "title": title,
+        "url": url,
+        "host": "Cerebral Valley" if raw_event.get("CVEvent") else "",
+        "location": _format_cerebral_valley_location(location, venue),
+        "description": description,
+        "date_text": datetime_parts["date_text"],
+        "time_text": datetime_parts["time_text"],
+        "start_iso": start_dt.isoformat() if start_dt else "",
+    }
+
+    if raw_event.get("id"):
+        mapped["id"] = _ensure_text(raw_event["id"]).strip()
+
+    return mapped
+
+
 def _ensure_text(value, fallback: str = "") -> str:
     if isinstance(value, str):
         return value
@@ -966,6 +1061,88 @@ def _enrich_events_with_details(events: List[Dict]) -> List[Dict]:
     return enriched
 
 
+def _fetch_cerebral_valley_api_payload(params: Dict[str, object]) -> Dict:
+    response = requests.get(
+        CV_EVENTS_API_URL,
+        params=params,
+        headers=CV_REQUEST_HEADERS,
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Unexpected Cerebral Valley API response shape")
+    return payload
+
+
+def _scrape_cerebral_valley_via_api(days: int = 8) -> List[Dict]:
+    start_datetime = _cerebral_valley_start_datetime_utc()
+    logger.info(
+        "Fetching Cerebral Valley events from public API starting at %s",
+        start_datetime,
+    )
+
+    collected_events: List[Dict] = []
+    seen_keys = set()
+
+    def _add_events(raw_events: List[Dict]) -> None:
+        for raw_event in raw_events:
+            mapped = _map_cerebral_valley_api_event(raw_event)
+            dedupe_key = (
+                mapped.get("id")
+                or mapped.get("url")
+                or f"{mapped.get('title')}|{mapped.get('start_iso')}"
+            )
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
+            collected_events.append(mapped)
+
+    featured_payload = _fetch_cerebral_valley_api_payload(
+        {
+            "featured": "true",
+            "approved": "true",
+            "startDateTime": start_datetime,
+        }
+    )
+    _add_events(featured_payload.get("events") or [])
+
+    limit = 100
+    offset = 0
+    total_count: Optional[int] = None
+    pages_fetched = 0
+    max_pages = 10
+
+    while pages_fetched < max_pages:
+        approved_payload = _fetch_cerebral_valley_api_payload(
+            {
+                "approved": "true",
+                "startDateTime": start_datetime,
+                "limit": limit,
+                "offset": offset,
+            }
+        )
+        raw_events = approved_payload.get("events") or []
+        _add_events(raw_events)
+        pages_fetched += 1
+
+        if total_count is None:
+            total_count = approved_payload.get("totalCount")
+
+        if not raw_events:
+            break
+
+        offset += limit
+        if isinstance(total_count, int) and offset >= total_count:
+            break
+
+    logger.info(
+        "Extracted %d Cerebral Valley events from public API",
+        len(collected_events),
+    )
+    return collected_events
+
+
 def _ensure_playwright_browsers() -> None:
     """Install Playwright Chromium if not already present."""
     import subprocess
@@ -1030,7 +1207,15 @@ async def _scrape_cerebral_valley_async(days=8):
 
 
 def scrape_cerebral_valley_events(days=8):
-    """Scrape Cerebral Valley events, installing Playwright browsers if needed."""
+    """Scrape Cerebral Valley events via public API, with Playwright as fallback."""
+    try:
+        api_events = _scrape_cerebral_valley_via_api(days)
+        if api_events:
+            return api_events
+        logger.warning("Cerebral Valley API returned no events; falling back to Playwright")
+    except Exception as exc:
+        logger.warning("Cerebral Valley API scrape failed: %s", exc)
+
     try:
         _ensure_playwright_browsers()
         return asyncio.run(_scrape_cerebral_valley_async(days))

@@ -186,6 +186,29 @@ LUMA_REQUEST_HEADERS = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
 }
+LUMA_REGION_SOURCES = {
+    "Bay Area": {
+        "source_name": "Lu.ma Bay Area",
+        "urls": [
+            f"{LUMA_BASE_URL}/genai-sf?k=c",
+            f"{LUMA_BASE_URL}/sf",
+        ],
+        "caption": "Sources: genai-sf + sf",
+    },
+    "New York": {
+        "source_name": "Lu.ma New York",
+        "urls": [
+            f"{LUMA_BASE_URL}/nyc",
+        ],
+        "caption": "Source: nyc",
+    },
+}
+LUMA_DISCOVERY_PATHS = {"/sf", "/genai-sf", "/nyc"}
+FOCUS_REGION_ORDER = ["Bay Area", "New York"]
+CV_REGION_PAGE_URLS = {
+    "Bay Area": "https://cerebralvalley.ai/events?locations=BAY_AREA",
+    "New York": "https://cerebralvalley.ai/events?locations=NYC",
+}
 CV_EVENTS_API_URL = "https://api.cerebralvalley.ai/v1/public/event/pull"
 CV_REQUEST_HEADERS = {
     "User-Agent": LUMA_REQUEST_HEADERS["User-Agent"],
@@ -543,8 +566,13 @@ def scrape_luma_events(url="https://lu.ma/genai-sf?k=c", days=8):
         if not href:
             continue
 
+        parsed_href = urlparse(href if href.startswith('http') else urljoin(LUMA_BASE_URL, href))
+        href_path = parsed_href.path.rstrip('/') or '/'
+
         # Filter out non-event links (navigation, etc.)
-        if href in ['/', '/discover', '/signin'] or href.startswith('/genai-sf'):
+        if href_path in {'/', '/discover', '/signin'}:
+            continue
+        if href_path in LUMA_DISCOVERY_PATHS:
             continue
 
         # Build full URL
@@ -636,6 +664,47 @@ def _normalize_luma_url(url: str) -> str:
         return f"{LUMA_BASE_URL}{trimmed}"
 
     return trimmed
+
+
+def _dedupe_events_by_url(events: List[Dict]) -> List[Dict]:
+    seen_urls = set()
+    unique_events: List[Dict] = []
+    for event in events:
+        event_url = _ensure_text(event.get('url', '')).strip()
+        dedupe_key = _canonicalize_event_url(event_url) or event_url
+        if not dedupe_key or dedupe_key in seen_urls:
+            continue
+        seen_urls.add(dedupe_key)
+        unique_events.append(event)
+    return unique_events
+
+
+def _get_luma_source_urls(url: str) -> Optional[List[str]]:
+    if url == "LUMA_COMBINED":
+        combined_urls: List[str] = []
+        for config in LUMA_REGION_SOURCES.values():
+            combined_urls.extend(config["urls"])
+        return combined_urls
+    if url == "LUMA_BAY_AREA":
+        return list(LUMA_REGION_SOURCES["Bay Area"]["urls"])
+    if url == "LUMA_NEW_YORK":
+        return list(LUMA_REGION_SOURCES["New York"]["urls"])
+    return None
+
+
+def _collect_luma_events(urls: List[str], days: int) -> List[Dict]:
+    events_list: List[Dict] = []
+    for source_url in urls:
+        scraped_events = scrape_luma_events(source_url, days)
+        if not scraped_events:
+            logger.info("No events found for Luma source %s", source_url)
+            continue
+        events_list.extend(scraped_events)
+        logger.info("Added %d events from %s", len(scraped_events), source_url)
+
+    unique_events = _dedupe_events_by_url(events_list)
+    logger.info("Combined total: %d unique Luma events", len(unique_events))
+    return unique_events
 
 
 def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
@@ -1437,34 +1506,11 @@ def generate_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI S
                 st.error("Failed to extract Cerebral Valley events")
                 return False, None
             formatted_events = format_cerebral_valley_list(events_list, source_name, days)
-        elif url == "LUMA_COMBINED" or _is_luma_url(url):
+        elif url in {"LUMA_COMBINED", "LUMA_BAY_AREA", "LUMA_NEW_YORK"} or _is_luma_url(url):
             # Use direct HTTP scraping for Luma events
-            # If this is the combined Luma scrape, fetch from both URLs
-            if url == "LUMA_COMBINED":
-                events_list = []
-
-                # Scrape genai-sf
-                genai_events = scrape_luma_events(f"{LUMA_BASE_URL}/genai-sf?k=c", days)
-                if genai_events:
-                    events_list.extend(genai_events)
-                    logger.info("Added %d events from genai-sf", len(genai_events))
-
-                # Scrape sf
-                sf_events = scrape_luma_events(f"{LUMA_BASE_URL}/sf", days)
-                if sf_events:
-                    events_list.extend(sf_events)
-                    logger.info("Added %d events from sf", len(sf_events))
-
-                # Remove duplicates by URL
-                seen_urls = set()
-                unique_events = []
-                for event in events_list:
-                    if event['url'] not in seen_urls:
-                        seen_urls.add(event['url'])
-                        unique_events.append(event)
-
-                events_list = unique_events
-                logger.info("Combined total: %d unique events", len(events_list))
+            source_urls = _get_luma_source_urls(url)
+            if source_urls is not None:
+                events_list = _collect_luma_events(source_urls, days)
             else:
                 target_url = _normalize_luma_url(url)
                 events_list = scrape_luma_events(target_url, days)
@@ -1727,7 +1773,7 @@ def _format_event_entry_lines(event: Dict) -> List[str]:
     return lines
 
 
-def format_cerebral_valley_list(events, source_name="Cerebral Valley", days=8):
+def _filter_events_for_date_range(events: List[Dict], days: int) -> List[Dict]:
     today = datetime.now()
     end_date = today + timedelta(days=days)
     today_floor = today.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1740,65 +1786,454 @@ def format_cerebral_valley_list(events, source_name="Cerebral Valley", days=8):
             return value.replace(tzinfo=None)
         return value.astimezone(local_tz).replace(tzinfo=None)
 
-    header = [
+    filtered_events: List[Dict] = []
+    for event in events:
+        event_dt: Optional[datetime] = None
+        start_iso = event.get('start_iso')
+        if isinstance(start_iso, str) and start_iso:
+            event_dt = _parse_iso_datetime(start_iso)
+        if not event_dt:
+            date_text = _ensure_text(event.get('date_text', '')).strip()
+            if date_text:
+                for fmt in ('%B %d, %Y', '%b %d, %Y'):
+                    try:
+                        event_dt = datetime.strptime(date_text, fmt)
+                        break
+                    except ValueError:
+                        continue
+
+        event_dt = _normalize_event_dt(event_dt)
+
+        if event_dt and event_dt > end_date:
+            logger.info(
+                "Skipping event %s (date %s beyond %s days)",
+                event.get('title'),
+                event_dt,
+                days,
+            )
+            continue
+        if event_dt and event_dt < today_floor:
+            logger.info(
+                "Skipping outdated event %s (date %s before today)",
+                event.get('title'),
+                event_dt,
+            )
+            continue
+
+        filtered_events.append(event)
+
+    return filtered_events
+
+
+def _format_event_collection(
+    events: List[Dict],
+    source_name: str,
+    days: int,
+    empty_message: str,
+) -> str:
+    today = datetime.now()
+    end_date = today + timedelta(days=days)
+    lines = [
         f"{source_name} Events - {today.strftime('%B %d, %Y')} to {end_date.strftime('%B %d, %Y')}",
         "=" * 50,
         "",
     ]
 
     if not events:
-        header.append("No events found on cerebralvalley.ai/events")
+        lines.append(empty_message)
+        return '\n'.join(lines)
+
+    filtered_events = _filter_events_for_date_range(events, days)
+    if not filtered_events:
+        lines.append("No events within the requested date range")
+        return '\n'.join(lines)
+
+    for idx, event in enumerate(filtered_events):
+        lines.extend(_format_event_entry_lines(event))
+        if idx < len(filtered_events) - 1:
+            lines.append("")
+
+    return '\n'.join(lines)
+
+
+def format_cerebral_valley_list(events, source_name="Cerebral Valley", days=8):
+    formatted = _format_event_collection(
+        _enrich_events_with_details(events) if events else [],
+        source_name,
+        days,
+        "No events found on cerebralvalley.ai/events",
+    )
+    return '\n'.join(
+        [
+            formatted,
+            "",
+            "=" * 50,
+            f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        ]
+    )
+
+
+def _split_focus_region_events(events: List[Dict]) -> Dict[str, List[Dict]]:
+    grouped: Dict[str, List[Dict]] = {region: [] for region in FOCUS_REGION_ORDER}
+    for event in events:
+        location = _clean_location_for_display(_ensure_text(event.get('location', '')))
+        region = _classify_event_region(location)
+        if region in grouped:
+            grouped[region].append(event)
+    return grouped
+
+
+def generate_luma_region_events(days: int = 8):
+    raw_events = _collect_luma_events(_get_luma_source_urls("LUMA_COMBINED") or [], days)
+    detailed_events = _enrich_events_with_details(raw_events) if raw_events else []
+    split_events = _split_focus_region_events(detailed_events)
+
+    region_results: Dict[str, Dict[str, object]] = {}
+    for region_name in FOCUS_REGION_ORDER:
+        config = LUMA_REGION_SOURCES[region_name]
+        region_events = split_events.get(region_name, [])
+        region_results[region_name] = {
+            "formatted": _format_event_collection(
+                region_events,
+                config["source_name"],
+                days,
+                f"No {region_name} events found on Lu.ma.",
+            ),
+            "has_events": bool(region_events),
+            "caption": config["caption"],
+        }
+
+    combined_formatted = _format_event_collection(
+        detailed_events,
+        "Lu.ma Events",
+        days,
+        "No events found on Lu.ma",
+    )
+    return bool(detailed_events), combined_formatted, region_results
+
+
+def generate_cerebral_valley_region_events(days: int = 8):
+    raw_events = scrape_cerebral_valley_events(days)
+    detailed_events = _enrich_events_with_details(raw_events) if raw_events else []
+    split_events = _split_focus_region_events(detailed_events)
+
+    region_results: Dict[str, Dict[str, object]] = {}
+    for region_name in FOCUS_REGION_ORDER:
+        region_events = split_events.get(region_name, [])
+        region_results[region_name] = {
+            "formatted": _format_event_collection(
+                region_events,
+                f"Cerebral Valley {region_name}",
+                days,
+                f"No {region_name} events found in Cerebral Valley.",
+            ),
+            "has_events": bool(region_events),
+            "caption": CV_REGION_PAGE_URLS[region_name],
+        }
+
+    combined_formatted = '\n'.join(
+        [
+            _format_event_collection(
+                detailed_events,
+                "Cerebral Valley",
+                days,
+                "No events found on cerebralvalley.ai/events",
+            ),
+            "",
+            "=" * 50,
+            f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        ]
+    )
+    return bool(raw_events), combined_formatted, region_results
+
+
+def _render_focus_region_tabs(region_results: Dict[str, Dict[str, object]], key_prefix: str) -> None:
+    tabs = st.tabs(FOCUS_REGION_ORDER)
+    for index, region_name in enumerate(FOCUS_REGION_ORDER):
+        result = region_results.get(region_name, {})
+        formatted = _ensure_text(result.get("formatted", ""))
+        caption = _ensure_text(result.get("caption", ""))
+        has_events = bool(result.get("has_events"))
+
+        with tabs[index]:
+            st.markdown(f"**{region_name}**")
+            if caption:
+                st.caption(caption)
+            if has_events:
+                render_copy_button(formatted, f"{key_prefix}-{region_name.lower().replace(' ', '-')}")
+            with st.expander(f"View {region_name} events", expanded=True):
+                st.markdown(formatted)
+
+
+def _build_region_combined_events(source_region_results: Dict[str, Dict[str, Dict[str, object]]]) -> Dict[str, str]:
+    combined_by_region: Dict[str, str] = {}
+    for region_name in FOCUS_REGION_ORDER:
+        valid_events = []
+        for source_label, region_results in source_region_results.items():
+            result = (region_results or {}).get(region_name) or {}
+            if not result.get("has_events"):
+                continue
+            formatted = _ensure_text(result.get("formatted", "")).strip()
+            if formatted:
+                valid_events.append((source_label, formatted))
+        if valid_events:
+            combined_by_region[region_name] = parse_and_format_combined_events(valid_events)
+    return combined_by_region
+
+
+def _refresh_region_combined_state() -> None:
+    source_region_results: Dict[str, Dict[str, Dict[str, object]]] = {}
+    if st.session_state.get("luma_region_results"):
+        source_region_results["Lu.ma Events"] = st.session_state.luma_region_results
+    if st.session_state.get("cv_region_results"):
+        source_region_results["Cerebral Valley Events"] = st.session_state.cv_region_results
+
+    combined_by_region = _build_region_combined_events(source_region_results)
+    if not combined_by_region:
+        st.session_state.pop("region_combined_events", None)
+        return
+
+    st.session_state.region_combined_events = combined_by_region
+    current_region = st.session_state.get("selected_event_region")
+    if current_region not in combined_by_region:
+        current_region = next((region for region in FOCUS_REGION_ORDER if region in combined_by_region), None)
+        if current_region:
+            st.session_state.selected_event_region = current_region
+    if current_region:
+        st.session_state.combined_events = combined_by_region[current_region]
+
+
+def _get_selected_events_content(selectbox_key: str, label: str = "Region") -> Optional[str]:
+    combined_by_region = st.session_state.get("region_combined_events") or {}
+    valid_regions = [region for region in FOCUS_REGION_ORDER if region in combined_by_region]
+    if valid_regions:
+        current_region = st.session_state.get("selected_event_region")
+        if current_region not in valid_regions:
+            current_region = valid_regions[0]
+        selected_region = st.selectbox(
+            label,
+            options=valid_regions,
+            index=valid_regions.index(current_region),
+            key=selectbox_key,
+        )
+        st.session_state.selected_event_region = selected_region
+        st.session_state.combined_events = combined_by_region[selected_region]
+        return combined_by_region[selected_region]
+    return st.session_state.get("combined_events")
+
+
+def _render_region_summary_tabs(
+    luma_region_results: Optional[Dict[str, Dict[str, object]]],
+    cv_region_results: Optional[Dict[str, Dict[str, object]]],
+    key_prefix: str,
+) -> None:
+    combined_by_region = _build_region_combined_events(
+        {
+            "Lu.ma Events": luma_region_results or {},
+            "Cerebral Valley Events": cv_region_results or {},
+        }
+    )
+    tabs = st.tabs(FOCUS_REGION_ORDER)
+    for index, region_name in enumerate(FOCUS_REGION_ORDER):
+        with tabs[index]:
+            st.markdown(f"**{region_name}**")
+
+            luma_result = (luma_region_results or {}).get(region_name)
+            if luma_result:
+                st.markdown("Lu.ma")
+                if luma_result.get("has_events"):
+                    render_copy_button(
+                        _ensure_text(luma_result.get("formatted", "")),
+                        f"{key_prefix}-luma-{region_name.lower().replace(' ', '-')}",
+                    )
+                st.markdown(_ensure_text(luma_result.get("formatted", "")))
+
+            cv_result = (cv_region_results or {}).get(region_name)
+            if cv_result:
+                st.markdown("Cerebral Valley")
+                if cv_result.get("has_events"):
+                    render_copy_button(
+                        _ensure_text(cv_result.get("formatted", "")),
+                        f"{key_prefix}-cv-{region_name.lower().replace(' ', '-')}",
+                    )
+                st.markdown(_ensure_text(cv_result.get("formatted", "")))
+
+            combined_text = combined_by_region.get(region_name)
+            if combined_text:
+                col_header1, col_header2 = st.columns([3, 1])
+                with col_header1:
+                    st.markdown(f"**Combined {region_name} (All Sources)**")
+                with col_header2:
+                    render_copy_button(
+                        combined_text,
+                        f"{key_prefix}-combined-{region_name.lower().replace(' ', '-')}",
+                    )
+                with st.expander(f"View combined {region_name} events", expanded=False):
+                    st.markdown(combined_text)
+            else:
+                st.info(f"No {region_name} events available across current sources.")
+
+
+def _scrape_luma_region_to_state(region_name: str, days: int) -> bool:
+    config = LUMA_REGION_SOURCES[region_name]
+    raw_events = _collect_luma_events(config["urls"], days)
+    detailed_events = _enrich_events_with_details(raw_events) if raw_events else []
+    region_results = dict(st.session_state.get("luma_region_results") or {})
+    region_results[region_name] = {
+        "formatted": _format_event_collection(
+            detailed_events,
+            config["source_name"],
+            days,
+            f"No {region_name} events found on Lu.ma.",
+        ),
+        "has_events": bool(detailed_events),
+        "caption": config["caption"],
+    }
+    st.session_state.luma_region_results = region_results
+    st.session_state.selected_event_region = region_name
+    _refresh_region_combined_state()
+    return bool(detailed_events)
+
+
+def _scrape_cerebral_valley_region_to_state(region_name: str, days: int) -> bool:
+    raw_events = scrape_cerebral_valley_events(days)
+    detailed_events = _enrich_events_with_details(raw_events) if raw_events else []
+    split_events = _split_focus_region_events(detailed_events)
+    region_events = split_events.get(region_name, [])
+    region_results = dict(st.session_state.get("cv_region_results") or {})
+    region_results[region_name] = {
+        "formatted": _format_event_collection(
+            region_events,
+            f"Cerebral Valley {region_name}",
+            days,
+            f"No {region_name} events found in Cerebral Valley.",
+        ),
+        "has_events": bool(region_events),
+        "caption": CV_REGION_PAGE_URLS[region_name],
+    }
+    st.session_state.cv_region_results = region_results
+    st.session_state.selected_event_region = region_name
+    _refresh_region_combined_state()
+    return bool(region_events)
+
+
+def _render_region_source_section(
+    source_label: str,
+    result: Optional[Dict[str, object]],
+    key_prefix: str,
+    empty_message: str,
+) -> None:
+    st.markdown(f"**{source_label}**")
+    if not result:
+        st.info(empty_message)
+        return
+
+    caption = _ensure_text(result.get("caption", ""))
+    formatted = _ensure_text(result.get("formatted", ""))
+    has_events = bool(result.get("has_events"))
+
+    if caption:
+        st.caption(caption)
+    if has_events:
+        render_copy_button(formatted, key_prefix)
+    with st.expander(f"View {source_label}", expanded=False):
+        st.markdown(formatted)
+
+
+def _render_region_tab_content(region_name: str, days_to_scrape: int) -> None:
+    luma_region_results = st.session_state.get("luma_region_results") or {}
+    cv_region_results = st.session_state.get("cv_region_results") or {}
+
+    action_col1, action_col2, action_col3 = st.columns([1, 1, 1])
+    with action_col1:
+        if st.button(f"Scrape Lu.ma {region_name}", key=f"luma_button_{region_name}", width="stretch"):
+            with st.spinner(f"Scraping Lu.ma {region_name} events..."):
+                success = _scrape_luma_region_to_state(region_name, days_to_scrape)
+                result = (st.session_state.get("luma_region_results") or {}).get(region_name)
+                if success and result:
+                    saved = _auto_save_results(
+                        _ensure_text(result.get("formatted", "")),
+                        f"luma_{region_name.lower().replace(' ', '_')}_events",
+                    )
+                    if saved:
+                        st.success(f"✅ Lu.ma {region_name} events saved to `{os.path.basename(saved)}`")
+                    else:
+                        st.success(f"✅ Lu.ma {region_name} events scraped successfully!")
+                else:
+                    st.error(f"❌ Failed to scrape Lu.ma {region_name} events")
+
+    with action_col2:
+        if st.button(
+            f"Scrape Cerebral Valley {region_name}",
+            key=f"cv_button_{region_name}",
+            width="stretch",
+        ):
+            with st.spinner(f"Scraping Cerebral Valley {region_name} events..."):
+                success = _scrape_cerebral_valley_region_to_state(region_name, days_to_scrape)
+                result = (st.session_state.get("cv_region_results") or {}).get(region_name)
+                if success and result:
+                    saved = _auto_save_results(
+                        _ensure_text(result.get("formatted", "")),
+                        f"cerebral_valley_{region_name.lower().replace(' ', '_')}_events",
+                    )
+                    if saved:
+                        st.success(
+                            f"✅ Cerebral Valley {region_name} events saved to `{os.path.basename(saved)}`"
+                        )
+                    else:
+                        st.success(f"✅ Cerebral Valley {region_name} events scraped successfully!")
+                else:
+                    st.error(f"❌ Failed to scrape Cerebral Valley {region_name} events")
+
+    with action_col3:
+        if st.button(f"Scrape Both {region_name}", key=f"both_button_{region_name}", type="primary", width="stretch"):
+            luma_ok = False
+            cv_ok = False
+            with st.spinner(f"Scraping all {region_name} event sources..."):
+                luma_ok = _scrape_luma_region_to_state(region_name, days_to_scrape)
+                cv_ok = _scrape_cerebral_valley_region_to_state(region_name, days_to_scrape)
+            if luma_ok or cv_ok:
+                combined_region_text = (st.session_state.get("region_combined_events") or {}).get(region_name)
+                if combined_region_text:
+                    saved = _auto_save_results(
+                        combined_region_text,
+                        f"combined_{region_name.lower().replace(' ', '_')}_events",
+                    )
+                    if saved:
+                        st.info(f"💾 {region_name} combined events saved to `{os.path.basename(saved)}`")
+                st.success(f"✅ {region_name} sources updated")
+            else:
+                st.warning(f"⚠️ No {region_name} events found from either source")
+
+    st.divider()
+    result_col1, result_col2 = st.columns(2)
+    with result_col1:
+        _render_region_source_section(
+            "Lu.ma",
+            luma_region_results.get(region_name),
+            f"luma-tab-{region_name.lower().replace(' ', '-')}",
+            f"No Lu.ma {region_name} events loaded yet.",
+        )
+    with result_col2:
+        _render_region_source_section(
+            "Cerebral Valley",
+            cv_region_results.get(region_name),
+            f"cv-tab-{region_name.lower().replace(' ', '-')}",
+            f"No Cerebral Valley {region_name} events loaded yet.",
+        )
+
+    combined_text = (st.session_state.get("region_combined_events") or {}).get(region_name)
+    st.markdown("**Combined Region Events**")
+    if combined_text:
+        col_header1, col_header2 = st.columns([3, 1])
+        with col_header1:
+            st.caption(f"All {region_name} events across loaded sources")
+        with col_header2:
+            render_copy_button(combined_text, f"combined-tab-{region_name.lower().replace(' ', '-')}")
+        with st.expander(f"View combined {region_name} events", expanded=True):
+            st.markdown(combined_text)
     else:
-        detailed_events = _enrich_events_with_details(events)
-        filtered_events: List[Dict] = []
-        for event in detailed_events:
-            event_dt: Optional[datetime] = None
-            start_iso = event.get('start_iso')
-            if isinstance(start_iso, str) and start_iso:
-                event_dt = _parse_iso_datetime(start_iso)
-            if not event_dt:
-                date_text = _ensure_text(event.get('date_text', '')).strip()
-                if date_text:
-                    for fmt in ('%B %d, %Y', '%b %d, %Y'):
-                        try:
-                            event_dt = datetime.strptime(date_text, fmt)
-                            break
-                        except ValueError:
-                            continue
-
-            event_dt = _normalize_event_dt(event_dt)
-
-            if event_dt and event_dt > end_date:
-                logger.info(
-                    "Skipping Cerebral Valley event %s (date %s beyond %s days)",
-                    event.get('title'),
-                    event_dt,
-                    days,
-                )
-                continue
-            if event_dt and event_dt < today_floor:
-                logger.info(
-                    "Skipping outdated Cerebral Valley event %s (date %s before today)",
-                    event.get('title'),
-                    event_dt,
-                )
-                continue
-
-            filtered_events.append(event)
-
-        if not filtered_events:
-            header.append("No events within the requested date range")
-        else:
-            for idx, event in enumerate(filtered_events):
-                header.extend(_format_event_entry_lines(event))
-                if idx < len(filtered_events) - 1:
-                    header.append("")
-
-    header.append("")
-    header.append("=" * 50)
-    header.append(f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-    return '\n'.join(header)
+        st.info(f"No combined {region_name} events available yet.")
 
 
 def fix_relative_urls(link_line):
@@ -2327,233 +2762,14 @@ def main():
     st.divider()
 
     st.subheader("🎯 Event Sources")
-    tab_luma, tab_cv = st.tabs(["Lu.ma Events", "Cerebral Valley Events"])
+    st.caption("Bay Area and New York are separate workspaces. Each tab manages its own source scrapes and results.")
+    region_tab_bay, region_tab_ny = st.tabs(FOCUS_REGION_ORDER)
 
-    with tab_luma:
-        st.caption("Covers both genai-sf and sf calendars")
-        if st.button("Scrape Lu.ma", key="luma_button", width="stretch"):
-            with st.spinner("Scraping Lu.ma events from genai-sf and sf..."):
-                success, events = generate_events("LUMA_COMBINED", "Lu.ma Events", days_to_scrape)
-                if success:
-                    saved = _auto_save_results(events, "luma_events")
-                    if saved:
-                        st.success(f"✅ Lu.ma events scraped and saved to `{os.path.basename(saved)}`")
-                    else:
-                        st.success("✅ Lu.ma events scraped successfully!")
-                else:
-                    st.error("❌ Failed to scrape Lu.ma events")
+    with region_tab_bay:
+        _render_region_tab_content("Bay Area", days_to_scrape)
 
-    with tab_cv:
-        st.caption("Direct scrape from cerebralvalley.ai/events")
-        if st.button("Scrape Cerebral Valley", key="cv_button", width="stretch"):
-            with st.spinner("Scraping Cerebral Valley events..."):
-                success, events = generate_events("https://cerebralvalley.ai/events", "Cerebral Valley", days_to_scrape)
-                if success:
-                    saved = _auto_save_results(events, "cerebral_valley")
-                    if saved:
-                        st.success(f"✅ Cerebral Valley events scraped and saved to `{os.path.basename(saved)}`")
-                    else:
-                        st.success("✅ Cerebral Valley events scraped successfully!")
-                else:
-                    st.error("❌ Failed to scrape Cerebral Valley events")
-
-    with st.expander("🚀 Bulk Actions", expanded=True):
-        button_all = st.button("Scrape Both Sources", key="all_button", type="primary")
-        if button_all:
-            with st.spinner("Scraping all event sources..."):
-                total_sources = 2
-                success_count = 0
-                all_events = []
-
-            # Initialize placeholders
-            luma_events = None
-            cv_events = None
-
-            # Scrape Lu.ma (genai-sf + sf)
-            st.write("1️⃣ Scraping Lu.ma (genai-sf + sf)...")
-            success, events = generate_events("LUMA_COMBINED", "Lu.ma Events", days_to_scrape)
-            if success:
-                success_count += 1
-                luma_events = events
-                st.success("✅ Lu.ma done!")
-            else:
-                st.warning("⚠️ Lu.ma scraping failed")
-
-            # Scrape Cerebral Valley
-            st.write("2️⃣ Scraping Cerebral Valley...")
-            success, events = generate_events("https://cerebralvalley.ai/events", "Cerebral Valley", days_to_scrape)
-            if success:
-                success_count += 1
-                cv_events = events
-                st.success("✅ Cerebral Valley done!")
-            else:
-                st.warning("⚠️ Cerebral Valley scraping failed")
-
-            # Build final list of sources (Lu.ma + Cerebral Valley)
-            all_events = [luma_events, cv_events]
-
-            # Store all events in session state for persistence
-            if all_events:
-                st.session_state.all_events = all_events
-
-            # Display combined results summary
-            if any(all_events):  # If at least one source has data
-                st.divider()
-                st.subheader("📊 Results Summary")
-
-                tab1, tab2, tab3 = st.tabs(["Lu.ma Events", "Cerebral Valley Events", "📋 Combined Results"])
-
-                with tab1:
-                    st.markdown("**Lu.ma Events**")
-                    if all_events[0]:
-                        st.markdown(all_events[0])
-                    else:
-                        st.info("❌ Lu.ma scraping failed or no events found")
-
-                with tab2:
-                    st.markdown("**Cerebral Valley Events**")
-                    if all_events[1]:
-                        st.markdown(all_events[1])
-                    else:
-                        st.info("❌ Cerebral Valley scraping failed or no events found")
-
-                with tab3:
-                    # Filter out None values for combining while keeping labels
-                    source_labels = ["Lu.ma Events", "Cerebral Valley Events"]
-                    valid_events = [
-                        (source_labels[idx] if idx < len(source_labels) else f"Source {idx + 1}", content)
-                        for idx, content in enumerate(all_events)
-                        if content is not None
-                    ]
-
-                    if valid_events:
-                        # Parse and sort all events chronologically
-                        formatted_combined = parse_and_format_combined_events(valid_events)
-                        
-                        # Header with copy button
-                        col_header1, col_header2 = st.columns([3, 1])
-                        with col_header1:
-                            st.markdown("**All Events Combined (All Sources)**")
-                        with col_header2:
-                            render_copy_button(formatted_combined, "combined-live-1")
-
-                        # Debug info
-                        if not formatted_combined.strip():
-                            st.warning("No combined events found. Debug info:")
-                            st.write(f"Number of valid event sources: {len(valid_events)}")
-                            for i, events in enumerate(valid_events):
-                                st.write(f"Source {i+1} length: {len(events) if events else 0}")
-                                if events:
-                                    st.text_area(f"Source {i+1} raw content (first 500 chars)", events[:500])
-                        else:
-                            # Display in collapsed expander by default
-                            with st.expander("📋 View Combined Events", expanded=False):
-                                st.markdown(formatted_combined)
-                            
-                            # Preview snippet and optional full text expander
-                            st.text_area(
-                                "📋 Preview (first 200 characters)",
-                                value=(
-                                    formatted_combined[:200] +
-                                    ("\n\n... (open expander for full text) ..." if len(formatted_combined) > 200 else "")
-                                ),
-                                height=100,
-                                key="combined_events_preview_1",
-                                label_visibility="visible",
-                                disabled=True
-                            )
-
-                            with st.expander("✏️ View / edit full combined text", expanded=False):
-                                st.text_area(
-                                    "Combined events text",
-                                    value=formatted_combined,
-                                    height=300,
-                                    key="combined_events_text_1",
-                                    label_visibility="collapsed"
-                                )
-
-                        # Store combined events in session state for essay generation
-                        st.session_state.combined_events = formatted_combined
-
-                        # Auto-save combined results
-                        saved = _auto_save_results(formatted_combined, "combined_events")
-                        if saved:
-                            st.info(f"💾 Results auto-saved to `{os.path.basename(saved)}`")
-                    else:
-                        st.warning("❌ All sources failed - no events to combine")
-
-            st.balloons()
-            st.success(f"🎉 Completed! Successfully scraped {success_count}/{total_sources} sources")
-
-    # Display stored events if they exist (persists after page rerun)
-    if 'all_events' in st.session_state and st.session_state.all_events:
-        with st.expander("📊 Stored Results", expanded=False):
-            if len(st.session_state.all_events) >= 2:
-                tab1, tab2, tab3 = st.tabs(["Lu.ma Events", "Cerebral Valley Events", "All Events Combined"])
-
-                with tab1:
-                    if st.session_state.all_events[0]:
-                        st.markdown(st.session_state.all_events[0])
-                    else:
-                        st.info("❌ Lu.ma events not available")
-
-                with tab2:
-                    if st.session_state.all_events[1]:
-                        st.markdown(st.session_state.all_events[1])
-                    else:
-                        st.info("❌ Cerebral Valley events not available")
-
-                with tab3:
-                    stored_labels = ["Lu.ma Events", "Cerebral Valley Events"]
-                    valid_events = [
-                        (stored_labels[idx] if idx < len(stored_labels) else f"Source {idx + 1}", content)
-                        for idx, content in enumerate(st.session_state.all_events)
-                        if content is not None
-                    ]
-
-                    if valid_events:
-                        formatted_combined = parse_and_format_combined_events(valid_events)
-                        col_header1, col_header2 = st.columns([3, 1])
-                        with col_header1:
-                            st.markdown("**All Events Combined (All Sources)**")
-                        with col_header2:
-                            render_copy_button(formatted_combined, "combined-stored-1")
-
-                        if formatted_combined.strip():
-                            with st.expander("📋 View Combined Events", expanded=False):
-                                st.markdown(formatted_combined)
-
-                            st.text_area(
-                                "📋 Preview (first 200 characters)",
-                                value=(
-                                    formatted_combined[:200] +
-                                    ("\n\n... (open expander for full text) ..." if len(formatted_combined) > 200 else "")
-                                ),
-                                height=100,
-                                key="combined_events_preview_2",
-                                label_visibility="visible",
-                                disabled=True
-                            )
-
-                            with st.expander("✏️ View / edit full combined text", expanded=False):
-                                st.text_area(
-                                    "Combined events text",
-                                    value=formatted_combined,
-                                    height=300,
-                                    key="combined_events_text_2",
-                                    label_visibility="collapsed"
-                                )
-                            st.session_state.combined_events = formatted_combined
-                        else:
-                            st.warning("No combined events found.")
-                    else:
-                        st.warning("❌ No valid events to combine")
-
-            elif len(st.session_state.all_events) == 1:
-                if st.session_state.all_events[0]:
-                    st.markdown(st.session_state.all_events[0])
-                else:
-                    st.info("❌ No events available")
+    with region_tab_ny:
+        _render_region_tab_content("New York", days_to_scrape)
 
     with st.expander("💽 Load Events", expanded=False):
         st.write("Upload previously saved events to skip scraping.")
@@ -2567,6 +2783,7 @@ def main():
             try:
                 uploaded_content = uploaded_events_file.getvalue().decode("utf-8")
                 if uploaded_content.strip():
+                    st.session_state.pop("region_combined_events", None)
                     st.session_state.combined_events = uploaded_content
                     st.session_state.loaded_events_source = "Uploaded file"
                     st.success("Saved events loaded successfully. You can generate an essay without scraping.")
@@ -2608,6 +2825,7 @@ def main():
     with st.expander("🗂 Organize Events", expanded=False):
         st.write("Group scraped events by day and region with RSVP links and short descriptions.")
         organized_text = st.session_state.get("organized_events")
+        selected_events_content = _get_selected_events_content("organize_region_select", "Event section")
         use_gpt_polish = st.checkbox(
             "Use GPT-5.4 polish (slower)",
             value=False,
@@ -2615,12 +2833,12 @@ def main():
             help="Fast mode uses the deterministic formatter. Enable this only if you want GPT to rewrite the presentation.",
         )
 
-        if 'combined_events' in st.session_state:
+        if selected_events_content:
             if st.button("Organize Events", key="organize_events_button", type="primary"):
                 spinner_text = "Organizing events with GPT-5.4..." if use_gpt_polish else "Organizing events..."
                 with st.spinner(spinner_text):
                     success, result = generate_organized_events(
-                        st.session_state.combined_events,
+                        selected_events_content,
                         use_gpt_polish=use_gpt_polish,
                     )
                     if success and result:
@@ -2663,11 +2881,12 @@ def main():
     with st.expander("📝 Essay Generation", expanded=False):
         st.write("Generate an essay based on the scraped events")
         button_essay = False
-        if 'combined_events' in st.session_state:
+        selected_events_content = _get_selected_events_content("essay_region_select", "Event section")
+        if selected_events_content:
             button_essay = st.button("Generate Essay from Scraped Events", key="essay_button")
             if button_essay:
                 with st.spinner("Generating essay from scraped events..."):
-                    success, essay_text = generate_essay(st.session_state.combined_events)
+                    success, essay_text = generate_essay(selected_events_content)
                     if success:
                         st.session_state.generated_essay = essay_text
                         st.success("✅ Essay generated successfully!")
@@ -2700,7 +2919,8 @@ def main():
     with st.expander("🎨 Image Generation", expanded=False):
         st.write("Generate a promotional image based on the scraped events using Google's Nano Banana 2 model")
 
-        if 'combined_events' in st.session_state:
+        selected_events_content = _get_selected_events_content("image_region_select", "Event section")
+        if selected_events_content:
             col_img1, col_img2 = st.columns([1, 1])
 
             with col_img1:
@@ -2712,7 +2932,7 @@ def main():
 
             if button_image:
                 with st.spinner("Generating image from events..."):
-                    success, image_payload, error = generate_event_image(st.session_state.combined_events)
+                    success, image_payload, error = generate_event_image(selected_events_content)
 
                     if success and image_payload:
                         st.session_state.generated_image = image_payload

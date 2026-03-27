@@ -209,6 +209,7 @@ CV_REGION_PAGE_URLS = {
     "Bay Area": "https://cerebralvalley.ai/events?locations=BAY_AREA",
     "New York": "https://cerebralvalley.ai/events?locations=NYC",
 }
+EVENT_SNAPSHOT_FORMAT = "ai_events_snapshot_v1"
 CV_EVENTS_API_URL = "https://api.cerebralvalley.ai/v1/public/event/pull"
 CV_REQUEST_HEADERS = {
     "User-Agent": LUMA_REQUEST_HEADERS["User-Agent"],
@@ -2022,6 +2023,121 @@ def _get_selected_events_content(selectbox_key: str, label: str = "Region") -> O
     return st.session_state.get("combined_events")
 
 
+def _clear_event_workspace_state() -> None:
+    keys_to_clear = [
+        "luma_region_results",
+        "cv_region_results",
+        "region_combined_events",
+        "combined_events",
+        "selected_event_region",
+        "organized_events",
+        "organized_events_mode",
+        "organized_events_cache",
+        "loaded_events_source",
+    ]
+    for key in keys_to_clear:
+        st.session_state.pop(key, None)
+
+
+def _build_events_snapshot_payload() -> Optional[Dict[str, object]]:
+    luma_region_results = st.session_state.get("luma_region_results") or {}
+    cv_region_results = st.session_state.get("cv_region_results") or {}
+    region_combined_events = st.session_state.get("region_combined_events") or {}
+    combined_events = _ensure_text(st.session_state.get("combined_events", ""))
+
+    if not any([luma_region_results, cv_region_results, region_combined_events, combined_events.strip()]):
+        return None
+
+    payload: Dict[str, object] = {
+        "format": EVENT_SNAPSHOT_FORMAT,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "selected_event_region": st.session_state.get("selected_event_region"),
+        "luma_region_results": luma_region_results,
+        "cv_region_results": cv_region_results,
+        "region_combined_events": region_combined_events,
+        "combined_events": combined_events,
+        "organized_events": _ensure_text(st.session_state.get("organized_events", "")),
+        "organized_events_mode": _ensure_text(st.session_state.get("organized_events_mode", "")),
+    }
+    return payload
+
+
+def _is_events_snapshot_payload(payload: object) -> bool:
+    return isinstance(payload, dict) and payload.get("format") == EVENT_SNAPSHOT_FORMAT
+
+
+def _restore_events_snapshot_payload(payload: Dict[str, object]) -> bool:
+    if not _is_events_snapshot_payload(payload):
+        return False
+
+    _clear_event_workspace_state()
+
+    selected_region = payload.get("selected_event_region")
+    if selected_region in FOCUS_REGION_ORDER:
+        st.session_state.selected_event_region = selected_region
+
+    luma_region_results = payload.get("luma_region_results")
+    if isinstance(luma_region_results, dict):
+        st.session_state.luma_region_results = luma_region_results
+
+    cv_region_results = payload.get("cv_region_results")
+    if isinstance(cv_region_results, dict):
+        st.session_state.cv_region_results = cv_region_results
+
+    if st.session_state.get("luma_region_results") or st.session_state.get("cv_region_results"):
+        _refresh_region_combined_state()
+
+    region_combined_events = payload.get("region_combined_events")
+    if isinstance(region_combined_events, dict) and not st.session_state.get("region_combined_events"):
+        st.session_state.region_combined_events = region_combined_events
+
+    combined_events = _ensure_text(payload.get("combined_events", ""))
+    if combined_events:
+        st.session_state.combined_events = combined_events
+
+    if st.session_state.get("region_combined_events"):
+        selected = st.session_state.get("selected_event_region")
+        if selected in st.session_state.region_combined_events:
+            st.session_state.combined_events = st.session_state.region_combined_events[selected]
+
+    organized_events = _ensure_text(payload.get("organized_events", ""))
+    if organized_events:
+        st.session_state.organized_events = organized_events
+
+    organized_events_mode = _ensure_text(payload.get("organized_events_mode", ""))
+    if organized_events_mode:
+        st.session_state.organized_events_mode = organized_events_mode
+
+    return bool(
+        st.session_state.get("luma_region_results")
+        or st.session_state.get("cv_region_results")
+        or st.session_state.get("region_combined_events")
+        or st.session_state.get("combined_events")
+    )
+
+
+def _describe_snapshot_payload(payload: Dict[str, object]) -> str:
+    lines: List[str] = []
+    saved_at = _ensure_text(payload.get("saved_at", ""))
+    if saved_at:
+        lines.append(f"Saved at: {saved_at}")
+
+    for region_name in FOCUS_REGION_ORDER:
+        sources: List[str] = []
+        luma_result = ((payload.get("luma_region_results") or {}) if isinstance(payload.get("luma_region_results"), dict) else {}).get(region_name, {})
+        cv_result = ((payload.get("cv_region_results") or {}) if isinstance(payload.get("cv_region_results"), dict) else {}).get(region_name, {})
+        if isinstance(luma_result, dict) and luma_result.get("has_events"):
+            sources.append("Lu.ma")
+        if isinstance(cv_result, dict) and cv_result.get("has_events"):
+            sources.append("Cerebral Valley")
+        if sources:
+            lines.append(f"{region_name}: {', '.join(sources)}")
+
+    if not lines:
+        lines.append("Snapshot contains saved event text.")
+    return "\n".join(lines)
+
+
 def _render_region_summary_tabs(
     luma_region_results: Optional[Dict[str, Dict[str, object]]],
     cv_region_results: Optional[Dict[str, Dict[str, object]]],
@@ -2743,6 +2859,23 @@ def _auto_save_results(content: str, source_name: str) -> Optional[str]:
         return None
 
 
+def _save_events_snapshot(payload: Dict[str, object]) -> Optional[str]:
+    if not payload:
+        return None
+    try:
+        save_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scraped_results")
+        os.makedirs(save_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filepath = os.path.join(save_dir, f"events_snapshot_{timestamp}.json")
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        logger.info("Saved events snapshot to %s", filepath)
+        return filepath
+    except Exception as exc:
+        logger.warning("Failed to save events snapshot: %s", exc)
+        return None
+
+
 def main():
     st.title("AI Events Scraper")
     st.header("Automatically extract and display AI events")
@@ -2771,8 +2904,47 @@ def main():
     with region_tab_ny:
         _render_region_tab_content("New York", days_to_scrape)
 
+    with st.expander("💾 Save Events", expanded=False):
+        st.write("Save the current event workspace as a JSON snapshot that can be loaded later.")
+        snapshot_payload = _build_events_snapshot_payload()
+        if snapshot_payload:
+            snapshot_text = json.dumps(snapshot_payload, ensure_ascii=False, indent=2)
+            snapshot_filename = (
+                f"events_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            )
+
+            st.text_area(
+                "Snapshot summary",
+                value=_describe_snapshot_payload(snapshot_payload),
+                height=100,
+                key="events_snapshot_summary",
+                label_visibility="visible",
+                disabled=True,
+            )
+
+            col_save1, col_save2 = st.columns(2)
+            with col_save1:
+                st.download_button(
+                    "Download Events Snapshot",
+                    data=snapshot_text.encode("utf-8"),
+                    file_name=snapshot_filename,
+                    mime="application/json",
+                    key="download_events_snapshot",
+                    type="primary",
+                    help="Download a JSON snapshot that can be reloaded later from the Load Events section.",
+                )
+            with col_save2:
+                if st.button("Save Events to Workspace", key="save_events_snapshot_button", width="stretch"):
+                    saved = _save_events_snapshot(snapshot_payload)
+                    if saved:
+                        st.success(f"✅ Events snapshot saved to `{os.path.basename(saved)}`")
+                    else:
+                        st.error("❌ Failed to save events snapshot")
+        else:
+            st.info("No event workspace state is available to save yet.")
+
     with st.expander("💽 Load Events", expanded=False):
-        st.write("Upload previously saved events to skip scraping.")
+        st.write("Upload a saved events snapshot or a plain text events file to skip scraping.")
         uploaded_events_file = st.file_uploader(
             "Load saved events file",
             type=["txt", "json"],
@@ -2783,40 +2955,64 @@ def main():
             try:
                 uploaded_content = uploaded_events_file.getvalue().decode("utf-8")
                 if uploaded_content.strip():
-                    st.session_state.pop("region_combined_events", None)
-                    st.session_state.combined_events = uploaded_content
-                    st.session_state.loaded_events_source = "Uploaded file"
-                    st.success("Saved events loaded successfully. You can generate an essay without scraping.")
+                    loaded_snapshot = None
+                    try:
+                        parsed_json = json.loads(uploaded_content)
+                        if _is_events_snapshot_payload(parsed_json):
+                            loaded_snapshot = parsed_json
+                    except json.JSONDecodeError:
+                        loaded_snapshot = None
 
-                    with st.expander("Preview Loaded Events", expanded=False):
-                        col_header1, col_header2 = st.columns([3, 1])
-                        with col_header1:
-                            st.markdown("**Loaded Events (Uploaded Preview)**")
-                        with col_header2:
-                            render_copy_button(uploaded_content, "loaded-preview")
-
-                        st.markdown(uploaded_content)
-
-                        st.text_area(
-                            "📋 Preview (first 200 characters)",
-                            value=(
-                                uploaded_content[:200]
-                                + ("\n\n... (open expander for full text) ..." if len(uploaded_content) > 200 else "")
-                            ),
-                            height=100,
-                            key="loaded_events_preview",
-                            label_visibility="visible",
-                            disabled=True
-                        )
-
-                        with st.expander("✏️ View / edit full loaded text", expanded=False):
+                    if loaded_snapshot:
+                        restored = _restore_events_snapshot_payload(loaded_snapshot)
+                        if restored:
+                            st.session_state.loaded_events_source = uploaded_events_file.name or "Uploaded snapshot"
+                            st.success("Events snapshot loaded successfully.")
                             st.text_area(
-                                "Loaded events text",
-                                value=uploaded_content,
-                                height=300,
-                                key="loaded_events_text",
-                                label_visibility="collapsed"
+                                "Loaded snapshot summary",
+                                value=_describe_snapshot_payload(loaded_snapshot),
+                                height=100,
+                                key="loaded_events_snapshot_summary",
+                                label_visibility="visible",
+                                disabled=True,
                             )
+                        else:
+                            st.error("Unable to restore the uploaded events snapshot.")
+                    else:
+                        _clear_event_workspace_state()
+                        st.session_state.combined_events = uploaded_content
+                        st.session_state.loaded_events_source = uploaded_events_file.name or "Uploaded text file"
+                        st.success("Saved events text loaded successfully. You can generate an essay without scraping.")
+
+                        with st.expander("Preview Loaded Events", expanded=False):
+                            col_header1, col_header2 = st.columns([3, 1])
+                            with col_header1:
+                                st.markdown("**Loaded Events (Uploaded Preview)**")
+                            with col_header2:
+                                render_copy_button(uploaded_content, "loaded-preview")
+
+                            st.markdown(uploaded_content)
+
+                            st.text_area(
+                                "📋 Preview (first 200 characters)",
+                                value=(
+                                    uploaded_content[:200]
+                                    + ("\n\n... (open expander for full text) ..." if len(uploaded_content) > 200 else "")
+                                ),
+                                height=100,
+                                key="loaded_events_preview",
+                                label_visibility="visible",
+                                disabled=True
+                            )
+
+                            with st.expander("✏️ View / edit full loaded text", expanded=False):
+                                st.text_area(
+                                    "Loaded events text",
+                                    value=uploaded_content,
+                                    height=300,
+                                    key="loaded_events_text",
+                                    label_visibility="collapsed"
+                                )
                 else:
                     st.warning("Uploaded file is empty.")
             except Exception as exc:

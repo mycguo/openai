@@ -252,6 +252,10 @@ PODCAST_SOURCES = {
         "episodes_url": "https://podcasts.apple.com/us/podcast/ai-news-today-julian-goldie-podcast/id1851256047",
         "rss_url": "https://anchor.fm/s/10b0edd94/podcast/rss",
     },
+    "How I AI": {
+        "episodes_url": "https://www.podchaser.com/podcasts/how-i-ai-6074236/episodes/recent",
+        "rss_url": "https://anchor.fm/s/1035b1568/podcast/rss",
+    },
 }
 ENABLE_BROWSER_SCRAPE = os.getenv("ENABLE_PLAYWRIGHT_SCRAPE", "").lower() in {"1", "true", "yes"}
 
@@ -966,6 +970,19 @@ def _is_local_redirect_host(hostname: str) -> bool:
     return host in {"localhost", "127.0.0.1", "0.0.0.0"}
 
 
+def _get_runtime_url() -> str:
+    try:
+        return str(getattr(st.context, "url", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _is_local_runtime() -> bool:
+    runtime_url = _get_runtime_url()
+    parsed_runtime = urllib.parse.urlsplit(runtime_url) if runtime_url else urllib.parse.SplitResult("", "", "", "", "")
+    return _is_local_redirect_host(parsed_runtime.hostname or "")
+
+
 def _strip_redirect_uri_extras(raw_uri: str) -> str:
     """Drop query/fragment while preserving the original scheme/host/path shape."""
     parsed = urllib.parse.urlsplit(str(raw_uri or "").strip())
@@ -987,12 +1004,7 @@ def _normalize_redirect_uri(raw_uri: str) -> str:
     configured = str(raw_uri or "").strip()
     parsed_configured_raw = urllib.parse.urlsplit(configured) if configured else urllib.parse.SplitResult("", "", "", "", "")
 
-    runtime_url = ""
-    try:
-        runtime_url = str(getattr(st.context, "url", "") or "").strip()
-    except Exception:
-        runtime_url = ""
-
+    runtime_url = _get_runtime_url()
     normalized_runtime = _strip_redirect_uri_extras(runtime_url)
     parsed_runtime = urllib.parse.urlsplit(normalized_runtime) if normalized_runtime else urllib.parse.SplitResult("", "", "", "", "")
 
@@ -1069,43 +1081,38 @@ def generate_auth_url(config):
     return f"{LINKEDIN_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
 
-def render_same_tab_auth_form(config: Dict[str, str]) -> None:
-    """Render a same-tab OAuth submit button with hidden inputs for LinkedIn params."""
+def render_linkedin_auth_button(config: Dict[str, str]) -> None:
+    """Render LinkedIn auth in the most reliable way for the current runtime."""
     if not config:
         return
-    session_id = _get_session_id()
-    params = {
-        "response_type": "code",
-        "client_id": config["client_id"],
-        "redirect_uri": config["redirect_uri"],
-        "scope": "w_member_social openid email profile",
-        "state": f"ai_podcast_app_{session_id}",
-    }
-    hidden_inputs = "\n".join(
-        f'<input type="hidden" name="{html.escape(key, quote=True)}" '
-        f'value="{html.escape(value, quote=True)}" />'
-        for key, value in params.items()
-    )
+    auth_url = generate_auth_url(config)
+
+    if not _is_local_runtime():
+        st.link_button("🔗 Authorize on LinkedIn", auth_url, type="primary")
+        return
+
+    escaped_url = html.escape(auth_url, quote=True)
     st.html(
         f"""
-        <form action="{LINKEDIN_AUTH_URL}" method="get" style="margin: 0;">
-            {hidden_inputs}
-            <button
-                type="submit"
-                style="
-                    background: #9ad1ff;
-                    border: 1px solid #7fbef2;
-                    color: #0b2e4b;
-                    border-radius: 0.5rem;
-                    padding: 0.5rem 0.9rem;
-                    font-size: 1rem;
-                    font-weight: 600;
-                    cursor: pointer;
-                "
-            >
-                🔗 Authorize on LinkedIn
-            </button>
-        </form>
+        <a
+            href="{escaped_url}"
+            target="_self"
+            style="
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                background: #9ad1ff;
+                border: 1px solid #7fbef2;
+                color: #0b2e4b;
+                border-radius: 0.5rem;
+                padding: 0.5rem 0.9rem;
+                font-size: 1rem;
+                font-weight: 600;
+                text-decoration: none;
+            "
+        >
+            🔗 Authorize on LinkedIn
+        </a>
         """,
         width="content",
     )
@@ -1584,7 +1591,7 @@ def main():
             if config:
                 if st.session_state.get("_oauth_ready"):
                     st.info("Click below to authorize with LinkedIn:")
-                    render_same_tab_auth_form(config)
+                    render_linkedin_auth_button(config)
                     if st.button("Cancel", key="cancel_oauth"):
                         st.session_state.pop("_oauth_ready", None)
                         st.rerun()

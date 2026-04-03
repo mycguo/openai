@@ -260,6 +260,10 @@ PODCAST_SOURCES = {
         "episodes_url": "https://www.podchaser.com/podcasts/chain-of-thought-ai-agents-inf-5932316/episodes/recent",
         "rss_url": "https://feeds.transistor.fm/chain-of-thought",
     },
+    "TBPN": {
+        "episodes_url": "https://www.podchaser.com/podcasts/tbpn-5850620/episodes/recent",
+        "rss_url": "https://feeds.transistor.fm/technology-brother",
+    },
 }
 ENABLE_BROWSER_SCRAPE = os.getenv("ENABLE_PLAYWRIGHT_SCRAPE", "").lower() in {"1", "true", "yes"}
 

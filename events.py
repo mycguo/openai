@@ -177,7 +177,7 @@ DEFAULT_GPT_MODELS: List[str] = [
     "gpt-4o",
     "gpt-4-turbo",
 ]
-NANO_BANANA_MODEL = "gemini-3.1-flash-image-preview"
+NANO_BANANA_2_MODEL = "gemini-3.1-flash-image"
 LUMA_BASE_URL = "https://lu.ma"
 LUMA_REQUEST_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
@@ -1452,10 +1452,9 @@ def generate_event_image(combined_events_content=None):
             return False, None, "Google API key is not configured. Set GOOGLE_API_KEY in secrets or env."
 
         prompt_for_image = (
-            "Create a simple, clean image representing AI and tech events in San Francisco. "
-            "Include minimal text with words like 'AI Events', 'Tech Community', 'Innovation'. "
-            "The image should be modern, professional, and relate to technology and community gatherings. "
-            "Use a simple design with bold, readable text and tech-themed visual elements."
+            "Create a clean modern image for San Francisco AI events. "
+            "Show a small audience, speaker stage, demo tables, laptops, calendar pins, and subtle SF skyline. "
+            "Use light abstract network patterns. Text only: AI Events."
         )
 
         event_names = []
@@ -1468,14 +1467,14 @@ def generate_event_image(combined_events_content=None):
         if event_names:
             event_names_str = ", ".join(event_names[:3])
             prompt_for_image = (
-                f"Create a modern promotional image for AI tech events including: {event_names_str}. "
-                "Incorporate minimal text like 'AI Events', 'Tech Community', 'San Francisco'. "
-                "Use bold typography, futuristic gradients, and tech-themed icons."
+                f"Create a clean modern image inspired by these AI events: {event_names_str}. "
+                "Show people gathering for talks and demos, with laptops, calendar pins, and subtle SF skyline. "
+                "Do not render event names. Text only: AI Events."
             )
 
         client = genai.Client(api_key=GOOGLE_API_KEY)
         response = client.models.generate_content(
-            model=NANO_BANANA_MODEL,
+            model=NANO_BANANA_2_MODEL,
             contents=prompt_for_image,
             config=types.GenerateContentConfig(
                 response_modalities=["TEXT", "IMAGE"],

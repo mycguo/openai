@@ -169,9 +169,10 @@ GOOGLE_API_KEY = (
     st.secrets.get("GOOGLE_API_KEY")
     or os.getenv("GOOGLE_API_KEY")
 )
+PREFERRED_GPT_MODEL = "gpt-5.5"
 DEFAULT_GPT_MODELS: List[str] = [
+    PREFERRED_GPT_MODEL,
     CONFIGURED_GPT_MODEL,
-    "gpt-5.4",
     "gpt-5",
     "gpt-5-turbo",
     "gpt-4o",
@@ -208,6 +209,21 @@ FOCUS_REGION_ORDER = ["Bay Area", "New York"]
 CV_REGION_PAGE_URLS = {
     "Bay Area": "https://cerebralvalley.ai/events?locations=BAY_AREA",
     "New York": "https://cerebralvalley.ai/events?locations=NYC",
+}
+EVION_BASE_URL = "https://evion.app"
+EVION_EVENTS_PAGE_URL = f"{EVION_BASE_URL}/events"
+EVION_SUPABASE_URL = "https://adzesenszyhiexqnkfgh.supabase.co"
+EVION_SUPABASE_ANON_KEY = (
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+    "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFkemVzZW5zenloaWV4cW5rZmdoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTkxNzI2NDEsImV4cCI6MjA3NDc0ODY0MX0."
+    "Eg8mLCeFZrRSaSQrbcdMV0qWzzUtlq59UpXOxlm_iO8"
+)
+EVION_REQUEST_HEADERS = {
+    "User-Agent": LUMA_REQUEST_HEADERS["User-Agent"],
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "apikey": EVION_SUPABASE_ANON_KEY,
+    "Authorization": f"Bearer {EVION_SUPABASE_ANON_KEY}",
 }
 EVENT_SNAPSHOT_FORMAT = "ai_events_snapshot_v1"
 CV_EVENTS_API_URL = "https://api.cerebralvalley.ai/v1/public/event/pull"
@@ -753,15 +769,10 @@ def _cerebral_valley_start_datetime_utc() -> str:
 
 def _infer_cerebral_valley_timezone(location: str, venue: str = "") -> timezone | ZoneInfo:
     combined = f"{location} {venue}".lower()
-    if any(token in combined for token in ["new york", "nyc", "brooklyn", "manhattan", "queens", "bronx"]):
+    region_name = _classify_event_region(combined)
+    if region_name in {"New York", "Boston / Cambridge"}:
         return ZoneInfo("America/New_York")
-    if any(token in combined for token in ["boston", "cambridge"]):
-        return ZoneInfo("America/New_York")
-    if any(token in combined for token in [
-        "san francisco", "sf", "stanford", "palo alto", "mountain view",
-        "san jose", "oakland", "berkeley", "fremont", "seattle", "bay area",
-        "los gatos", "soma",
-    ]):
+    if region_name in {"Bay Area", "Pacific Northwest"}:
         return ZoneInfo("America/Los_Angeles")
     if "london" in combined:
         return ZoneInfo("Europe/London")
@@ -799,6 +810,14 @@ def _format_cerebral_valley_location(location: str, venue: str) -> str:
     if venue_text and location_text and venue_text.lower() != location_text.lower():
         return f"{venue_text}, {location_text}"
     return venue_text or location_text
+
+
+def _merge_location_parts(primary: str, secondary: str) -> str:
+    primary_text = _ensure_text(primary).strip()
+    secondary_text = _ensure_text(secondary).strip()
+    if primary_text and secondary_text and primary_text.lower() != secondary_text.lower():
+        return f"{primary_text}, {secondary_text}"
+    return primary_text or secondary_text
 
 
 def _map_cerebral_valley_api_event(raw_event: Dict) -> Dict:
@@ -1213,6 +1232,383 @@ def _scrape_cerebral_valley_via_api(days: int = 8) -> List[Dict]:
     return collected_events
 
 
+def _fetch_evion_json(path: str, params: Dict[str, object]) -> List[Dict]:
+    response = requests.get(
+        f"{EVION_SUPABASE_URL}{path}",
+        params=params,
+        headers=EVION_REQUEST_HEADERS,
+        timeout=30,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, list):
+        raise ValueError(f"Unexpected Evion response shape for {path}")
+    return payload
+
+
+@lru_cache(maxsize=1)
+def _fetch_evion_hidden_external_urls() -> List[str]:
+    rows = _fetch_evion_json(
+        "/rest/v1/hidden_external_events",
+        {"select": "url"},
+    )
+    hidden_urls = []
+    for row in rows:
+        normalized = _canonicalize_event_url(_ensure_text(row.get("url")).strip())
+        if normalized:
+            hidden_urls.append(normalized)
+    return hidden_urls
+
+
+def _fetch_evion_public_events() -> List[Dict]:
+    return _fetch_evion_json(
+        "/rest/v1/events_public",
+        {
+            "select": ",".join(
+                [
+                    "id",
+                    "title",
+                    "description",
+                    "event_date",
+                    "event_start_date",
+                    "event_end_date",
+                    "event_time",
+                    "event_start_time",
+                    "event_end_time",
+                    "event_timezone",
+                    "timezone",
+                    "location",
+                    "venue",
+                    "address",
+                    "slug",
+                    "category",
+                    "tags",
+                    "is_public",
+                    "is_free",
+                    "is_online",
+                    "is_all_day",
+                    "is_featured",
+                    "price",
+                    "admin_hidden",
+                    "deleted_at",
+                    "meeting_url",
+                ]
+            ),
+            "is_public": "eq.true",
+            "deleted_at": "is.null",
+            "order": "event_date.desc",
+        },
+    )
+
+
+def _fetch_evion_discovered_events() -> List[Dict]:
+    start_floor = datetime.now().strftime("%Y-%m-%dT00:00:00")
+    return _fetch_evion_json(
+        "/rest/v1/discovered_events",
+        {
+            "select": ",".join(
+                [
+                    "id",
+                    "url",
+                    "title",
+                    "description",
+                    "category",
+                    "industry",
+                    "location",
+                    "venue_name",
+                    "organizer",
+                    "source",
+                    "source_badge",
+                    "region",
+                    "start_at",
+                    "payload",
+                ]
+            ),
+            "or": f"(start_at.is.null,start_at.gte.{start_floor})",
+            "order": "start_at.asc",
+            "limit": 3000,
+        },
+    )
+
+
+def _is_evion_ai_relevant(raw_event: Dict) -> bool:
+    normalized_categories = {
+        _ensure_text(raw_event.get("category")).strip().lower(),
+        _ensure_text(raw_event.get("industry")).strip().lower(),
+    }
+    normalized_categories.discard("")
+    if normalized_categories.intersection({"ai", "genai", "ml", "machine learning", "artificial intelligence"}):
+        return True
+
+    payload = raw_event.get("payload") if isinstance(raw_event.get("payload"), dict) else {}
+    tag_text = _ensure_text(raw_event.get("tags"))
+    searchable_parts = [
+        raw_event.get("title"),
+        raw_event.get("description"),
+        raw_event.get("category"),
+        raw_event.get("industry"),
+        raw_event.get("location"),
+        raw_event.get("venue"),
+        raw_event.get("venue_name"),
+        raw_event.get("organizer"),
+        raw_event.get("source_badge"),
+        tag_text,
+        payload.get("title"),
+        payload.get("description"),
+        payload.get("category"),
+        payload.get("industry"),
+        payload.get("labels"),
+    ]
+    searchable = " ".join(
+        _ensure_text(part).strip().lower()
+        for part in searchable_parts
+        if _ensure_text(part).strip()
+    )
+    return bool(
+        re.search(
+            r"\b(ai|a\.i\.|llm|ml|genai|rag|gpt|agentic|artificial intelligence|machine learning|deep learning|computer vision|nlp|voice ai|multimodal|inference|embedding|openai|anthropic|claude)\b",
+            searchable,
+        )
+    )
+
+
+def _parse_evion_public_datetime(raw_event: Dict) -> Optional[datetime]:
+    date_value = _ensure_text(raw_event.get("event_start_date") or raw_event.get("event_date")).strip()
+    if not date_value:
+        return None
+
+    time_value = _ensure_text(raw_event.get("event_start_time") or raw_event.get("event_time")).strip() or "00:00:00"
+    try:
+        parsed = datetime.fromisoformat(f"{date_value}T{time_value}")
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(date_value)
+        except ValueError:
+            return None
+
+    tz_name = _ensure_text(raw_event.get("event_timezone")).strip()
+    location = _ensure_text(raw_event.get("location")).strip()
+    venue = _ensure_text(raw_event.get("venue")).strip()
+    if tz_name:
+        try:
+            return parsed.replace(tzinfo=ZoneInfo(tz_name))
+        except Exception:  # noqa: BLE001
+            pass
+
+    short_tz = _ensure_text(raw_event.get("timezone")).strip().upper()
+    short_tz_map = {
+        "PT": "America/Los_Angeles",
+        "PST": "America/Los_Angeles",
+        "PDT": "America/Los_Angeles",
+        "ET": "America/New_York",
+        "EST": "America/New_York",
+        "EDT": "America/New_York",
+    }
+    if short_tz in short_tz_map:
+        return parsed.replace(tzinfo=ZoneInfo(short_tz_map[short_tz]))
+
+    return parsed.replace(tzinfo=_infer_cerebral_valley_timezone(location, venue))
+
+
+def _parse_evion_discovered_datetime(raw_event: Dict) -> Optional[datetime]:
+    payload = raw_event.get("payload") if isinstance(raw_event.get("payload"), dict) else {}
+    raw_start = _ensure_text(raw_event.get("start_at") or payload.get("start")).strip()
+    parsed = _parse_iso_datetime(raw_start)
+    if not parsed:
+        return None
+
+    location = _ensure_text(raw_event.get("location") or payload.get("location")).strip()
+    venue = _ensure_text(raw_event.get("venue_name") or payload.get("venueName")).strip()
+    timezone_hint = _infer_cerebral_valley_timezone(location, venue)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone_hint)
+    return parsed.astimezone(timezone_hint)
+
+
+def _map_evion_public_event(raw_event: Dict) -> Optional[Dict]:
+    slug = _ensure_text(raw_event.get("slug")).strip()
+    if not slug:
+        return None
+
+    title = _ensure_text(raw_event.get("title"), "Untitled Event").strip() or "Untitled Event"
+    start_dt = _parse_evion_public_datetime(raw_event)
+    datetime_parts = _format_datetime_parts(start_dt)
+    if raw_event.get("is_all_day") or not _ensure_text(raw_event.get("event_start_time") or raw_event.get("event_time")).strip():
+        datetime_parts["time_text"] = ""
+
+    location = _merge_location_parts(
+        _ensure_text(raw_event.get("venue")).strip(),
+        _ensure_text(raw_event.get("location")).strip(),
+    )
+    description = _clean_description(_ensure_text(raw_event.get("description")))
+    url = _ensure_text(raw_event.get("meeting_url")).strip() or f"{EVION_BASE_URL}/events/{slug}"
+
+    return {
+        "id": f"evion-public:{_ensure_text(raw_event.get('id') or slug).strip()}",
+        "title": title,
+        "url": url,
+        "host": "Evion",
+        "location": location,
+        "description": description,
+        "date_text": datetime_parts["date_text"],
+        "time_text": datetime_parts["time_text"],
+        "start_iso": start_dt.isoformat() if start_dt else "",
+    }
+
+
+def _map_evion_discovered_event(raw_event: Dict) -> Optional[Dict]:
+    payload = raw_event.get("payload") if isinstance(raw_event.get("payload"), dict) else {}
+    url = _ensure_text(raw_event.get("url") or payload.get("url")).strip()
+    if not url:
+        return None
+    parsed_url = urlparse(url)
+    if parsed_url.netloc.lower().endswith("google.com") and parsed_url.path == "/search":
+        return None
+
+    title = (
+        _ensure_text(raw_event.get("title")).strip()
+        or _ensure_text(payload.get("title")).strip()
+        or "Untitled Event"
+    )
+    location = _merge_location_parts(
+        _ensure_text(raw_event.get("venue_name") or payload.get("venueName")).strip(),
+        _ensure_text(raw_event.get("location") or payload.get("location")).strip(),
+    )
+    start_dt = _parse_evion_discovered_datetime(raw_event)
+    datetime_parts = _format_datetime_parts(start_dt)
+    description = _clean_description(
+        _ensure_text(raw_event.get("description") or payload.get("description"))
+    )
+    host = (
+        _ensure_text(raw_event.get("organizer") or payload.get("organizer")).strip()
+        or _ensure_text(raw_event.get("source_badge") or payload.get("sourceBadge")).strip()
+        or "Evion"
+    )
+
+    return {
+        "id": f"evion-discovered:{_ensure_text(raw_event.get('id') or url).strip()}",
+        "title": title,
+        "url": url,
+        "host": host,
+        "location": location,
+        "description": description,
+        "date_text": datetime_parts["date_text"],
+        "time_text": datetime_parts["time_text"],
+        "start_iso": start_dt.isoformat() if start_dt else "",
+    }
+
+
+def _event_datetime_for_sort(event: Dict) -> Optional[datetime]:
+    start_iso = _ensure_text(event.get("start_iso")).strip()
+    if start_iso:
+        parsed = _parse_iso_datetime(start_iso)
+        if parsed:
+            local_tz = datetime.now().astimezone().tzinfo
+            if parsed.tzinfo and local_tz:
+                return parsed.astimezone(local_tz).replace(tzinfo=None)
+            return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+
+    date_text = _ensure_text(event.get("date_text")).strip()
+    time_text = _ensure_text(event.get("time_text")).strip()
+    if date_text and time_text:
+        parsed = _parse_event_datetime_text(f"{date_text} {time_text}")
+        if parsed:
+            return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+    if date_text:
+        for fmt in ("%B %d, %Y", "%b %d, %Y"):
+            try:
+                return datetime.strptime(date_text, fmt)
+            except ValueError:
+                continue
+    return None
+
+
+def _sort_events_by_start(events: List[Dict]) -> List[Dict]:
+    def _sort_key(event: Dict) -> tuple:
+        parsed = _event_datetime_for_sort(event)
+        return (
+            parsed is None,
+            parsed or datetime.max,
+            _ensure_text(event.get("title")).strip().lower(),
+        )
+
+    return sorted(events, key=_sort_key)
+
+
+def generate_evion_region_events(days: int = 8):
+    logger.info("Fetching Evion events from %s via Supabase API", EVION_EVENTS_PAGE_URL)
+    hidden_urls = set(_fetch_evion_hidden_external_urls())
+    public_events = _fetch_evion_public_events()
+    discovered_events = _fetch_evion_discovered_events()
+
+    collected_events: List[Dict] = []
+    seen_keys = set()
+
+    def _append_event(mapped_event: Optional[Dict]) -> None:
+        if not mapped_event:
+            return
+        if not mapped_event.get("url"):
+            return
+        if not mapped_event.get("date_text") and not mapped_event.get("start_iso"):
+            return
+        canonical_url = _canonicalize_event_url(_ensure_text(mapped_event.get("url")).strip())
+        dedupe_key = canonical_url or _ensure_text(mapped_event.get("id")).strip() or (
+            f"{mapped_event.get('title')}|{mapped_event.get('start_iso')}"
+        )
+        if dedupe_key in seen_keys:
+            return
+        seen_keys.add(dedupe_key)
+        mapped_event["url"] = canonical_url or _ensure_text(mapped_event.get("url")).strip()
+        collected_events.append(mapped_event)
+
+    for raw_event in public_events:
+        if raw_event.get("admin_hidden"):
+            continue
+        if not _is_evion_ai_relevant(raw_event):
+            continue
+        _append_event(_map_evion_public_event(raw_event))
+
+    for raw_event in discovered_events:
+        if not _is_evion_ai_relevant(raw_event):
+            continue
+        url = _canonicalize_event_url(_ensure_text(raw_event.get("url")).strip())
+        if not url or url in hidden_urls:
+            continue
+        _append_event(_map_evion_discovered_event(raw_event))
+
+    detailed_events = _sort_events_by_start(_filter_events_for_date_range(collected_events, days))
+    split_events = _split_focus_region_events(detailed_events)
+
+    region_results: Dict[str, Dict[str, object]] = {}
+    for region_name in FOCUS_REGION_ORDER:
+        region_events = split_events.get(region_name, [])
+        region_results[region_name] = {
+            "formatted": _format_event_collection(
+                region_events,
+                f"Evion {region_name}",
+                days,
+                f"No {region_name} events found in Evion.",
+            ),
+            "has_events": bool(region_events),
+            "caption": EVION_EVENTS_PAGE_URL,
+        }
+
+    combined_formatted = "\n".join(
+        [
+            _format_event_collection(
+                detailed_events,
+                "Evion",
+                days,
+                "No events found on evion.app/events",
+            ),
+            "",
+            "=" * 50,
+            f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        ]
+    )
+    return bool(detailed_events), combined_formatted, region_results
+
+
 def _ensure_playwright_browsers() -> None:
     """Install Playwright Chromium if not already present."""
     import subprocess
@@ -1418,7 +1814,7 @@ def generate_essay(combined_events_content=None):
                 prompt,
                 temperature=1.0,
                 max_tokens=3000,
-                model_override="gpt-5.4",
+                model_override=PREFERRED_GPT_MODEL,
             )
         cleaned_result = raw_result.strip()
         logger.info("Essay generated with %d characters", len(cleaned_result))
@@ -1987,6 +2383,8 @@ def _refresh_region_combined_state() -> None:
         source_region_results["Lu.ma Events"] = st.session_state.luma_region_results
     if st.session_state.get("cv_region_results"):
         source_region_results["Cerebral Valley Events"] = st.session_state.cv_region_results
+    if st.session_state.get("evion_region_results"):
+        source_region_results["Evion Events"] = st.session_state.evion_region_results
 
     combined_by_region = _build_region_combined_events(source_region_results)
     if not combined_by_region:
@@ -2026,6 +2424,7 @@ def _clear_event_workspace_state() -> None:
     keys_to_clear = [
         "luma_region_results",
         "cv_region_results",
+        "evion_region_results",
         "region_combined_events",
         "combined_events",
         "selected_event_region",
@@ -2041,10 +2440,11 @@ def _clear_event_workspace_state() -> None:
 def _build_events_snapshot_payload() -> Optional[Dict[str, object]]:
     luma_region_results = st.session_state.get("luma_region_results") or {}
     cv_region_results = st.session_state.get("cv_region_results") or {}
+    evion_region_results = st.session_state.get("evion_region_results") or {}
     region_combined_events = st.session_state.get("region_combined_events") or {}
     combined_events = _ensure_text(st.session_state.get("combined_events", ""))
 
-    if not any([luma_region_results, cv_region_results, region_combined_events, combined_events.strip()]):
+    if not any([luma_region_results, cv_region_results, evion_region_results, region_combined_events, combined_events.strip()]):
         return None
 
     payload: Dict[str, object] = {
@@ -2053,6 +2453,7 @@ def _build_events_snapshot_payload() -> Optional[Dict[str, object]]:
         "selected_event_region": st.session_state.get("selected_event_region"),
         "luma_region_results": luma_region_results,
         "cv_region_results": cv_region_results,
+        "evion_region_results": evion_region_results,
         "region_combined_events": region_combined_events,
         "combined_events": combined_events,
         "organized_events": _ensure_text(st.session_state.get("organized_events", "")),
@@ -2083,7 +2484,15 @@ def _restore_events_snapshot_payload(payload: Dict[str, object]) -> bool:
     if isinstance(cv_region_results, dict):
         st.session_state.cv_region_results = cv_region_results
 
-    if st.session_state.get("luma_region_results") or st.session_state.get("cv_region_results"):
+    evion_region_results = payload.get("evion_region_results")
+    if isinstance(evion_region_results, dict):
+        st.session_state.evion_region_results = evion_region_results
+
+    if (
+        st.session_state.get("luma_region_results")
+        or st.session_state.get("cv_region_results")
+        or st.session_state.get("evion_region_results")
+    ):
         _refresh_region_combined_state()
 
     region_combined_events = payload.get("region_combined_events")
@@ -2110,6 +2519,7 @@ def _restore_events_snapshot_payload(payload: Dict[str, object]) -> bool:
     return bool(
         st.session_state.get("luma_region_results")
         or st.session_state.get("cv_region_results")
+        or st.session_state.get("evion_region_results")
         or st.session_state.get("region_combined_events")
         or st.session_state.get("combined_events")
     )
@@ -2125,10 +2535,13 @@ def _describe_snapshot_payload(payload: Dict[str, object]) -> str:
         sources: List[str] = []
         luma_result = ((payload.get("luma_region_results") or {}) if isinstance(payload.get("luma_region_results"), dict) else {}).get(region_name, {})
         cv_result = ((payload.get("cv_region_results") or {}) if isinstance(payload.get("cv_region_results"), dict) else {}).get(region_name, {})
+        evion_result = ((payload.get("evion_region_results") or {}) if isinstance(payload.get("evion_region_results"), dict) else {}).get(region_name, {})
         if isinstance(luma_result, dict) and luma_result.get("has_events"):
             sources.append("Lu.ma")
         if isinstance(cv_result, dict) and cv_result.get("has_events"):
             sources.append("Cerebral Valley")
+        if isinstance(evion_result, dict) and evion_result.get("has_events"):
+            sources.append("Evion")
         if sources:
             lines.append(f"{region_name}: {', '.join(sources)}")
 
@@ -2140,12 +2553,14 @@ def _describe_snapshot_payload(payload: Dict[str, object]) -> str:
 def _render_region_summary_tabs(
     luma_region_results: Optional[Dict[str, Dict[str, object]]],
     cv_region_results: Optional[Dict[str, Dict[str, object]]],
+    evion_region_results: Optional[Dict[str, Dict[str, object]]],
     key_prefix: str,
 ) -> None:
     combined_by_region = _build_region_combined_events(
         {
             "Lu.ma Events": luma_region_results or {},
             "Cerebral Valley Events": cv_region_results or {},
+            "Evion Events": evion_region_results or {},
         }
     )
     tabs = st.tabs(FOCUS_REGION_ORDER)
@@ -2172,6 +2587,16 @@ def _render_region_summary_tabs(
                         f"{key_prefix}-cv-{region_name.lower().replace(' ', '-')}",
                     )
                 st.markdown(_ensure_text(cv_result.get("formatted", "")))
+
+            evion_result = (evion_region_results or {}).get(region_name)
+            if evion_result:
+                st.markdown("Evion")
+                if evion_result.get("has_events"):
+                    render_copy_button(
+                        _ensure_text(evion_result.get("formatted", "")),
+                        f"{key_prefix}-evion-{region_name.lower().replace(' ', '-')}",
+                    )
+                st.markdown(_ensure_text(evion_result.get("formatted", "")))
 
             combined_text = combined_by_region.get(region_name)
             if combined_text:
@@ -2232,6 +2657,17 @@ def _scrape_cerebral_valley_region_to_state(region_name: str, days: int) -> bool
     return bool(region_events)
 
 
+def _scrape_evion_region_to_state(region_name: str, days: int) -> bool:
+    _, _, source_region_results = generate_evion_region_events(days)
+    result = (source_region_results or {}).get(region_name) or {}
+    region_results = dict(st.session_state.get("evion_region_results") or {})
+    region_results[region_name] = result
+    st.session_state.evion_region_results = region_results
+    st.session_state.selected_event_region = region_name
+    _refresh_region_combined_state()
+    return bool(result.get("has_events"))
+
+
 def _render_region_source_section(
     source_label: str,
     result: Optional[Dict[str, object]],
@@ -2258,8 +2694,9 @@ def _render_region_source_section(
 def _render_region_tab_content(region_name: str, days_to_scrape: int) -> None:
     luma_region_results = st.session_state.get("luma_region_results") or {}
     cv_region_results = st.session_state.get("cv_region_results") or {}
+    evion_region_results = st.session_state.get("evion_region_results") or {}
 
-    action_col1, action_col2, action_col3 = st.columns([1, 1, 1])
+    action_col1, action_col2, action_col3, action_col4 = st.columns([1, 1, 1, 1])
     with action_col1:
         if st.button(f"Scrape Lu.ma {region_name}", key=f"luma_button_{region_name}", width="stretch"):
             with st.spinner(f"Scraping Lu.ma {region_name} events..."):
@@ -2301,13 +2738,39 @@ def _render_region_tab_content(region_name: str, days_to_scrape: int) -> None:
                     st.error(f"❌ Failed to scrape Cerebral Valley {region_name} events")
 
     with action_col3:
-        if st.button(f"Scrape Both {region_name}", key=f"both_button_{region_name}", type="primary", width="stretch"):
+        if st.button(f"Scrape Evion {region_name}", key=f"evion_button_{region_name}", width="stretch"):
+            with st.spinner(f"Scraping Evion {region_name} events..."):
+                success = _scrape_evion_region_to_state(region_name, days_to_scrape)
+                result = (st.session_state.get("evion_region_results") or {}).get(region_name)
+                if result and result.get("has_events"):
+                    saved = _auto_save_results(
+                        _ensure_text(result.get("formatted", "")),
+                        f"evion_{region_name.lower().replace(' ', '_')}_events",
+                    )
+                    if saved:
+                        st.success(f"✅ Evion {region_name} events saved to `{os.path.basename(saved)}`")
+                    else:
+                        st.success(f"✅ Evion {region_name} events scraped successfully!")
+                elif result:
+                    st.info(
+                        f"ℹ️ Evion scraped successfully, but no {region_name} events were present in the current Evion feed."
+                    )
+                    st.caption(EVION_EVENTS_PAGE_URL)
+                elif not success:
+                    st.error(f"❌ Failed to scrape Evion {region_name} events")
+                else:
+                    st.error(f"❌ Failed to scrape Evion {region_name} events")
+
+    with action_col4:
+        if st.button(f"Scrape All {region_name}", key=f"all_button_{region_name}", type="primary", width="stretch"):
             luma_ok = False
             cv_ok = False
+            evion_ok = False
             with st.spinner(f"Scraping all {region_name} event sources..."):
                 luma_ok = _scrape_luma_region_to_state(region_name, days_to_scrape)
                 cv_ok = _scrape_cerebral_valley_region_to_state(region_name, days_to_scrape)
-            if luma_ok or cv_ok:
+                evion_ok = _scrape_evion_region_to_state(region_name, days_to_scrape)
+            if luma_ok or cv_ok or evion_ok:
                 combined_region_text = (st.session_state.get("region_combined_events") or {}).get(region_name)
                 if combined_region_text:
                     saved = _auto_save_results(
@@ -2318,37 +2781,46 @@ def _render_region_tab_content(region_name: str, days_to_scrape: int) -> None:
                         st.info(f"💾 {region_name} combined events saved to `{os.path.basename(saved)}`")
                 st.success(f"✅ {region_name} sources updated")
             else:
-                st.warning(f"⚠️ No {region_name} events found from either source")
+                st.warning(f"⚠️ No {region_name} events found from the loaded sources")
 
     st.divider()
-    result_col1, result_col2 = st.columns(2)
-    with result_col1:
+    source_tab_luma, source_tab_cv, source_tab_evion, source_tab_combined = st.tabs(
+        ["Lu.ma", "Cerebral Valley", "Evion", "Combined"]
+    )
+    with source_tab_luma:
         _render_region_source_section(
             "Lu.ma",
             luma_region_results.get(region_name),
             f"luma-tab-{region_name.lower().replace(' ', '-')}",
             f"No Lu.ma {region_name} events loaded yet.",
         )
-    with result_col2:
+    with source_tab_cv:
         _render_region_source_section(
             "Cerebral Valley",
             cv_region_results.get(region_name),
             f"cv-tab-{region_name.lower().replace(' ', '-')}",
             f"No Cerebral Valley {region_name} events loaded yet.",
         )
-
-    combined_text = (st.session_state.get("region_combined_events") or {}).get(region_name)
-    st.markdown("**Combined Region Events**")
-    if combined_text:
-        col_header1, col_header2 = st.columns([3, 1])
-        with col_header1:
-            st.caption(f"All {region_name} events across loaded sources")
-        with col_header2:
-            render_copy_button(combined_text, f"combined-tab-{region_name.lower().replace(' ', '-')}")
-        with st.expander(f"View combined {region_name} events", expanded=True):
-            st.markdown(combined_text)
-    else:
-        st.info(f"No combined {region_name} events available yet.")
+    with source_tab_evion:
+        _render_region_source_section(
+            "Evion",
+            evion_region_results.get(region_name),
+            f"evion-tab-{region_name.lower().replace(' ', '-')}",
+            f"No Evion {region_name} events loaded yet.",
+        )
+    with source_tab_combined:
+        combined_text = (st.session_state.get("region_combined_events") or {}).get(region_name)
+        st.markdown("**Combined Region Events**")
+        if combined_text:
+            col_header1, col_header2 = st.columns([3, 1])
+            with col_header1:
+                st.caption(f"All {region_name} events across loaded sources")
+            with col_header2:
+                render_copy_button(combined_text, f"combined-tab-{region_name.lower().replace(' ', '-')}")
+            with st.expander(f"View combined {region_name} events", expanded=True):
+                st.markdown(combined_text)
+        else:
+            st.info(f"No combined {region_name} events available yet.")
 
 
 def fix_relative_urls(link_line):
@@ -2567,6 +3039,15 @@ def _classify_event_region(location: str) -> str:
             "sunnyvale",
             "santa clara",
             "alameda",
+            "san ramon",
+            "foster city",
+            "milpitas",
+            "millbrae",
+            "redwood city",
+            "san mateo",
+            "burlingame",
+            "cupertino",
+            "embarcadero",
         ]
     ):
         return "Bay Area"
@@ -2757,7 +3238,7 @@ def generate_organized_events(combined_events_content=None, use_gpt_polish: bool
             prompt,
             temperature=0.1,
             max_tokens=5000,
-            model_override="gpt-5.4",
+            model_override=PREFERRED_GPT_MODEL,
         ).strip()
 
         if not organized_output or "RSVP:" not in organized_output:
@@ -2880,21 +3361,10 @@ def main():
     st.header("Automatically extract and display AI events")
 
     st.divider()
-
-    # Configuration section
-    st.subheader("⚙️ Configuration")
-    days_to_scrape = st.number_input(
-        "Days to scrape",
-        min_value=1,
-        max_value=30,
-        value=8,
-        help="Number of days ahead to scrape events for"
-    )
-
-    st.divider()
+    days_to_scrape = int(st.session_state.get("days_to_scrape", 8))
 
     st.subheader("🎯 Event Sources")
-    st.caption("Bay Area and New York are separate workspaces. Each tab manages its own source scrapes and results.")
+    st.caption("Bay Area and New York are separate workspaces. Each region tab has independent source tabs for Lu.ma, Cerebral Valley, Evion, and a combined view.")
     region_tab_bay, region_tab_ny = st.tabs(FOCUS_REGION_ORDER)
 
     with region_tab_bay:
@@ -3022,7 +3492,7 @@ def main():
         organized_text = st.session_state.get("organized_events")
         selected_events_content = _get_selected_events_content("organize_region_select", "Event section")
         use_gpt_polish = st.checkbox(
-            "Use GPT-5.4 polish (slower)",
+            f"Use {PREFERRED_GPT_MODEL.upper()} polish (slower)",
             value=False,
             key="organize_events_use_gpt",
             help="Fast mode uses the deterministic formatter. Enable this only if you want GPT to rewrite the presentation.",
@@ -3030,7 +3500,7 @@ def main():
 
         if selected_events_content:
             if st.button("Organize Events", key="organize_events_button", type="primary"):
-                spinner_text = "Organizing events with GPT-5.4..." if use_gpt_polish else "Organizing events..."
+                spinner_text = f"Organizing events with {PREFERRED_GPT_MODEL.upper()}..." if use_gpt_polish else "Organizing events..."
                 with st.spinner(spinner_text):
                     success, result = generate_organized_events(
                         selected_events_content,
@@ -3040,7 +3510,7 @@ def main():
                         organized_text = result
                         st.session_state.organized_events = result
                         st.session_state.organized_events_mode = (
-                            "GPT-5.4 polish" if use_gpt_polish else "Fast deterministic"
+                            f"{PREFERRED_GPT_MODEL.upper()} polish" if use_gpt_polish else "Fast deterministic"
                         )
                         st.success("✅ Events organized successfully!")
                         saved = _auto_save_results(result, "organized_events")
@@ -3170,6 +3640,17 @@ def main():
             caption="AI Events Promotional Image", 
             width="stretch"
         )
+
+    st.divider()
+    st.subheader("⚙️ Configuration")
+    st.number_input(
+        "Days to scrape",
+        min_value=1,
+        max_value=30,
+        value=days_to_scrape,
+        key="days_to_scrape",
+        help="Number of days ahead to scrape events for"
+    )
 
 
 if __name__ == "__main__":

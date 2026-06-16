@@ -1848,9 +1848,8 @@ def generate_event_image(combined_events_content=None):
             return False, None, "Google API key is not configured. Set GOOGLE_API_KEY in secrets or env."
 
         prompt_for_image = (
-            "Create a clean modern image for San Francisco AI events. "
-            "Show a small audience, speaker stage, demo tables, laptops, calendar pins, and subtle SF skyline. "
-            "Use light abstract network patterns. Text only: AI Events."
+            "Create a clean modern image for AI events, "
+            "use small number of texts which relates to the events"
         )
 
         event_names = []
@@ -1861,11 +1860,9 @@ def generate_event_image(combined_events_content=None):
                 event_names.extend(bold_matches)
 
         if event_names:
-            event_names_str = ", ".join(event_names[:3])
             prompt_for_image = (
-                f"Create a clean modern image inspired by these AI events: {event_names_str}. "
-                "Show people gathering for talks and demos, with laptops, calendar pins, and subtle SF skyline. "
-                "Do not render event names. Text only: AI Events."
+                "Create a clean modern image for AI events relating to the events names, "
+                "use small number of texts which relates to the events"
             )
 
         client = genai.Client(api_key=GOOGLE_API_KEY)
@@ -3089,6 +3086,7 @@ def _extract_organize_candidate_events(combined_events_content: str) -> List[Dic
                 "rsvp_link": match.group("url").strip(),
                 "date_time_raw": "",
                 "location": "",
+                "host": "",
                 "description": "",
             }
             continue
@@ -3101,6 +3099,8 @@ def _extract_organize_candidate_events(combined_events_content: str) -> List[Dic
             current_event["date_time_raw"] = stripped.split(":", 1)[1].strip()
         elif stripped.startswith("Location/Venue:"):
             current_event["location"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("Host:"):
+            current_event["host"] = stripped.split(":", 1)[1].strip()
         elif stripped.startswith("Brief Description:"):
             current_event["description"] = stripped.split(":", 1)[1].strip()
 
@@ -3136,6 +3136,7 @@ def _extract_organize_candidate_events(combined_events_content: str) -> List[Dic
             "date_heading": _format_organized_day_heading(parsed_dt),
             "time_display": _format_organized_time(parsed_dt, event["date_time_raw"]),
             "location": location,
+            "host": _ensure_text(event.get("host", "")).strip(),
             "suggested_region": _classify_event_region(location),
             "description": _shorten_event_description(event["description"]),
             "sort_key": parsed_dt.isoformat(),
@@ -3163,6 +3164,30 @@ def _build_organized_events_fallback(events: List[Dict[str, str]]) -> str:
         region = event["suggested_region"]
         grouped.setdefault(day_heading, {}).setdefault(region, []).append(event)
 
+    unique_regions = {event["suggested_region"] for event in events if event.get("suggested_region")}
+    show_region_headings = len(unique_regions) > 1
+
+    def _format_linkedin_bullet(event: Dict[str, str]) -> str:
+        title_link = f"[{event['title']}]({event['rsvp_link']})"
+        bullet = f"{event['time_display']} - {title_link}"
+
+        metadata_parts: List[str] = []
+        location = _ensure_text(event.get("location", "")).strip()
+        if location and location != "Location TBD":
+            metadata_parts.append(location)
+
+        host = _ensure_text(event.get("host", "")).strip()
+        if host:
+            metadata_parts.append(f"Host: {host}")
+
+        details = " - ".join(metadata_parts)
+        description = _ensure_text(event.get("description", "")).strip()
+
+        trailing_parts = [part for part in [details, description] if part]
+        if trailing_parts:
+            bullet = f"{bullet} - {' - '.join(trailing_parts)}"
+        return bullet
+
     lines: List[str] = []
     day_order = sorted(grouped.keys(), key=lambda heading: min(item["sort_key"] for regions in [grouped[heading]] for items in regions.values() for item in items))
     for day_heading in day_order:
@@ -3176,19 +3201,18 @@ def _build_organized_events_fallback(events: List[Dict[str, str]]) -> str:
         ordered_regions.extend(sorted(name for name in regions if name not in region_order))
 
         for region in ordered_regions:
-            lines.append(region)
-            lines.append("")
-            for event in regions[region]:
-                lines.append(f"{event['time_display']} — {event['title']} · {event['location']}")
-                lines.append(f"RSVP: {event['rsvp_link']}")
-                lines.append(f"About: {event['description']}")
+            if show_region_headings:
+                lines.append(region)
                 lines.append("")
+            for event in regions[region]:
+                lines.append(_format_linkedin_bullet(event))
+            lines.append("")
 
     return "\n".join(lines).strip()
 
 
 def _organized_events_cache_key(combined_events_content: str, use_gpt_polish: bool) -> str:
-    payload = f"{int(use_gpt_polish)}::{combined_events_content}"
+    payload = f"linkedin_v3::{int(use_gpt_polish)}::{combined_events_content}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -3222,15 +3246,16 @@ def generate_organized_events(combined_events_content=None, use_gpt_polish: bool
             "- Skip any item without an RSVP link.\n"
             "- Keep events sorted chronologically.\n"
             "- Group by day using the provided `date_heading` value.\n"
-            "- Within each day, group by `suggested_region`.\n"
-            "- For each event, output exactly these 3 lines:\n"
-            "  1. `TIME — TITLE · LOCATION`\n"
-            "  2. `RSVP: URL`\n"
-            "  3. `About: short description`\n"
+            "- If multiple regions are present, group within each day by `suggested_region`.\n"
+            "- If all events share the same region, omit region headings entirely.\n"
+            "- For each event, output exactly one markdown line in this format:\n"
+            "  `TIME - [TITLE](RSVP_URL) - LOCATION - Host: NAME short description`\n"
+            "- Omit the `Host: NAME` segment when no host is provided.\n"
             "- Keep the short description to one sentence.\n"
             "- Preserve the RSVP link exactly.\n"
-            "- Do not add bullets, numbering, commentary, or code fences.\n"
-            "- Separate day sections, region headings, and events with blank lines.\n\n"
+            "- Do not emit separate `RSVP:` or `About:` lines.\n"
+            "- Do not add commentary or code fences.\n"
+            "- Separate day sections and optional region headings with blank lines.\n\n"
             f"Event JSON:\n{json.dumps(events, ensure_ascii=False, indent=2)}"
         )
 
@@ -3532,16 +3557,17 @@ def main():
             with col_header2:
                 render_copy_button(organized_text, "organized-events")
 
-            with st.expander("📋 View Organized Events", expanded=False):
-                st.code(organized_text, language="text")
+            st.markdown("**LinkedIn Preview**")
+            st.markdown(organized_text)
 
-            st.text_area(
-                "Organized events text",
-                value=organized_text,
-                height=420,
-                key="organized_events_text",
-                label_visibility="visible",
-            )
+            with st.expander("✏️ View / edit raw organized text", expanded=False):
+                st.text_area(
+                    "Organized events text",
+                    value=organized_text,
+                    height=420,
+                    key="organized_events_text",
+                    label_visibility="visible",
+                )
 
     with st.expander("📝 Essay Generation", expanded=False):
         st.write("Generate an essay based on the scraped events")

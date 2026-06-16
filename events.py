@@ -240,6 +240,20 @@ CV_REGION_PAGE_URLS = {
     "Bay Area": "https://cerebralvalley.ai/events?locations=BAY_AREA",
     "New York": "https://cerebralvalley.ai/events?locations=NYC",
 }
+MEETUP_REGION_SOURCES = {
+    "Bay Area": {
+        "source_name": "Meetup Bay Area",
+        "url": "https://www.meetup.com/find/?keywords=artificial%20intelligence&source=EVENTS&location=us--ca--San%20Francisco",
+        "caption": "Source: Meetup AI events near San Francisco",
+        "timezone": "America/Los_Angeles",
+    },
+    "New York": {
+        "source_name": "Meetup New York",
+        "url": "https://www.meetup.com/find/?keywords=artificial%20intelligence&source=EVENTS&location=us--ny--New%20York",
+        "caption": "Source: Meetup AI events near New York",
+        "timezone": "America/New_York",
+    },
+}
 EVION_BASE_URL = "https://evion.app"
 EVION_EVENTS_PAGE_URL = f"{EVION_BASE_URL}/events"
 EVION_SUPABASE_URL = "https://adzesenszyhiexqnkfgh.supabase.co"
@@ -263,6 +277,11 @@ CV_REQUEST_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
     "Origin": "https://cerebralvalley.ai",
     "Referer": "https://cerebralvalley.ai/",
+}
+MEETUP_REQUEST_HEADERS = {
+    "User-Agent": LUMA_REQUEST_HEADERS["User-Agent"],
+    "Accept": LUMA_REQUEST_HEADERS["Accept"],
+    "Accept-Language": LUMA_REQUEST_HEADERS["Accept-Language"],
 }
 
 if OPENAI_API_KEY:
@@ -1032,6 +1051,160 @@ def _extract_details_from_jsonld(html: str) -> Dict[str, str]:
     return {}
 
 
+def _clean_meetup_location_text(value: str) -> str:
+    cleaned = _clean_location_for_display(value)
+    cleaned = re.sub(
+        r"\b(San Francisco|New York City|New York)\s+\1\b",
+        r"\1",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return _clean_location_for_display(cleaned)
+
+
+def _format_meetup_location(location_value) -> str:
+    if isinstance(location_value, list):
+        for item in location_value:
+            formatted = _format_meetup_location(item)
+            if formatted:
+                return formatted
+        return ""
+
+    if not isinstance(location_value, dict):
+        return _clean_meetup_location_text(_format_location_value(location_value))
+
+    location_type = _ensure_text(location_value.get("@type")).lower()
+    if "virtuallocation" in location_type:
+        return "Online"
+
+    name = _ensure_text(location_value.get("name")).strip()
+    address = location_value.get("address")
+    address_text = ""
+    if isinstance(address, dict):
+        street = _ensure_text(address.get("streetAddress")).strip()
+        locality = _ensure_text(address.get("addressLocality")).strip()
+        region = _ensure_text(address.get("addressRegion")).strip()
+
+        address_parts: List[str] = []
+        if street:
+            address_parts.append(street)
+            street_lower = street.lower()
+            if locality and locality.lower() not in street_lower:
+                address_parts.append(locality)
+            if region and region.lower() not in street_lower:
+                address_parts.append(region)
+        else:
+            address_parts.extend(part for part in [locality, region] if part)
+        address_text = ", ".join(address_parts)
+    else:
+        address_text = _ensure_text(address).strip()
+
+    if name and address_text:
+        name_lower = name.lower()
+        address_lower = address_text.lower()
+        if name_lower == address_lower or name_lower in address_lower:
+            return _clean_meetup_location_text(address_text)
+        if address_lower in name_lower:
+            return _clean_meetup_location_text(name)
+        return _clean_meetup_location_text(f"{name}, {address_text}")
+
+    return _clean_meetup_location_text(name or address_text)
+
+
+def _clean_meetup_description(text: Optional[str]) -> str:
+    cleaned = _clean_description(text)
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
+    cleaned = re.sub(r"[*_`#>]+", "", cleaned)
+    cleaned = re.sub(r"\\([,\\-])", r"\1", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _map_meetup_jsonld_event(raw_event: Dict, region_name: str) -> Optional[Dict]:
+    title = _ensure_text(raw_event.get("name"), "Untitled Event").strip() or "Untitled Event"
+    url = _canonicalize_event_url(_ensure_text(raw_event.get("url")).strip())
+    if not url:
+        return None
+
+    config = MEETUP_REGION_SOURCES.get(region_name, {})
+    try:
+        region_tz = ZoneInfo(_ensure_text(config.get("timezone")).strip())
+    except Exception:  # noqa: BLE001
+        region_tz = datetime.now().astimezone().tzinfo or timezone.utc
+
+    start_dt = _parse_iso_datetime(_ensure_text(raw_event.get("startDate")).strip())
+    if start_dt and start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=region_tz)
+    elif start_dt:
+        start_dt = start_dt.astimezone(region_tz)
+
+    datetime_parts = _format_datetime_parts(start_dt)
+    location = _format_meetup_location(raw_event.get("location"))
+    if not location and "online" in _ensure_text(raw_event.get("eventAttendanceMode")).lower():
+        location = "Online"
+
+    return {
+        "id": f"meetup:{url}",
+        "title": title,
+        "url": url,
+        "host": _extract_name(raw_event.get("organizer")) or "Meetup",
+        "location": location,
+        "description": _clean_meetup_description(raw_event.get("description")),
+        "date_text": datetime_parts["date_text"],
+        "time_text": datetime_parts["time_text"],
+        "start_iso": start_dt.isoformat() if start_dt else "",
+    }
+
+
+def scrape_meetup_events(url: str, region_name: str) -> List[Dict]:
+    logger.info("Fetching Meetup events from %s", url)
+    response = requests.get(
+        url,
+        headers=MEETUP_REQUEST_HEADERS,
+        timeout=30,
+    )
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    collected_events: List[Dict] = []
+    seen_keys = set()
+    seen_fingerprints = set()
+
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        content = script.string or script.get_text()
+        if not content:
+            continue
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            continue
+
+        for raw_event in _collect_jsonld_events(payload):
+            mapped = _map_meetup_jsonld_event(raw_event, region_name)
+            if not mapped:
+                continue
+            if not mapped.get("date_text") and not mapped.get("start_iso"):
+                continue
+            dedupe_key = _canonicalize_event_url(_ensure_text(mapped.get("url")).strip()) or (
+                f"{mapped.get('title')}|{mapped.get('start_iso')}"
+            )
+            fingerprint = "|".join(
+                [
+                    _ensure_text(mapped.get("title")).strip().lower(),
+                    _ensure_text(mapped.get("start_iso")).strip(),
+                    _ensure_text(mapped.get("location")).strip().lower(),
+                ]
+            )
+            if dedupe_key in seen_keys or fingerprint in seen_fingerprints:
+                continue
+            seen_keys.add(dedupe_key)
+            seen_fingerprints.add(fingerprint)
+            collected_events.append(mapped)
+
+    sorted_events = _sort_events_by_start(collected_events)
+    logger.info("Extracted %d Meetup events from %s", len(sorted_events), url)
+    return sorted_events
+
+
 def _extract_details_fallback(html: str) -> Dict[str, str]:
     soup = BeautifulSoup(html, 'html.parser')
     details: Dict[str, str] = {}
@@ -1637,6 +1810,42 @@ def generate_evion_region_events(days: int = 8):
         ]
     )
     return bool(detailed_events), combined_formatted, region_results
+
+
+def generate_meetup_region_events(days: int = 8):
+    region_results: Dict[str, Dict[str, object]] = {}
+    combined_events: List[Dict] = []
+
+    for region_name in FOCUS_REGION_ORDER:
+        config = MEETUP_REGION_SOURCES[region_name]
+        raw_events = scrape_meetup_events(config["url"], region_name)
+        detailed_events = _sort_events_by_start(_filter_events_for_date_range(raw_events, days))
+        combined_events.extend(detailed_events)
+        region_results[region_name] = {
+            "formatted": _format_event_collection(
+                detailed_events,
+                config["source_name"],
+                days,
+                f"No {region_name} events found on Meetup.",
+            ),
+            "has_events": bool(detailed_events),
+            "caption": config["caption"],
+        }
+
+    combined_formatted = "\n".join(
+        [
+            _format_event_collection(
+                _sort_events_by_start(combined_events),
+                "Meetup",
+                days,
+                "No events found on Meetup",
+            ),
+            "",
+            "=" * 50,
+            f"Updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        ]
+    )
+    return bool(combined_events), combined_formatted, region_results
 
 
 def _ensure_playwright_browsers() -> None:
@@ -2412,6 +2621,8 @@ def _refresh_region_combined_state() -> None:
         source_region_results["Cerebral Valley Events"] = st.session_state.cv_region_results
     if st.session_state.get("evion_region_results"):
         source_region_results["Evion Events"] = st.session_state.evion_region_results
+    if st.session_state.get("meetup_region_results"):
+        source_region_results["Meetup Events"] = st.session_state.meetup_region_results
 
     combined_by_region = _build_region_combined_events(source_region_results)
     if not combined_by_region:
@@ -2452,6 +2663,7 @@ def _clear_event_workspace_state() -> None:
         "luma_region_results",
         "cv_region_results",
         "evion_region_results",
+        "meetup_region_results",
         "region_combined_events",
         "combined_events",
         "selected_event_region",
@@ -2468,10 +2680,18 @@ def _build_events_snapshot_payload() -> Optional[Dict[str, object]]:
     luma_region_results = st.session_state.get("luma_region_results") or {}
     cv_region_results = st.session_state.get("cv_region_results") or {}
     evion_region_results = st.session_state.get("evion_region_results") or {}
+    meetup_region_results = st.session_state.get("meetup_region_results") or {}
     region_combined_events = st.session_state.get("region_combined_events") or {}
     combined_events = _ensure_text(st.session_state.get("combined_events", ""))
 
-    if not any([luma_region_results, cv_region_results, evion_region_results, region_combined_events, combined_events.strip()]):
+    if not any([
+        luma_region_results,
+        cv_region_results,
+        evion_region_results,
+        meetup_region_results,
+        region_combined_events,
+        combined_events.strip(),
+    ]):
         return None
 
     payload: Dict[str, object] = {
@@ -2481,6 +2701,7 @@ def _build_events_snapshot_payload() -> Optional[Dict[str, object]]:
         "luma_region_results": luma_region_results,
         "cv_region_results": cv_region_results,
         "evion_region_results": evion_region_results,
+        "meetup_region_results": meetup_region_results,
         "region_combined_events": region_combined_events,
         "combined_events": combined_events,
         "organized_events": _ensure_text(st.session_state.get("organized_events", "")),
@@ -2515,10 +2736,15 @@ def _restore_events_snapshot_payload(payload: Dict[str, object]) -> bool:
     if isinstance(evion_region_results, dict):
         st.session_state.evion_region_results = evion_region_results
 
+    meetup_region_results = payload.get("meetup_region_results")
+    if isinstance(meetup_region_results, dict):
+        st.session_state.meetup_region_results = meetup_region_results
+
     if (
         st.session_state.get("luma_region_results")
         or st.session_state.get("cv_region_results")
         or st.session_state.get("evion_region_results")
+        or st.session_state.get("meetup_region_results")
     ):
         _refresh_region_combined_state()
 
@@ -2547,6 +2773,7 @@ def _restore_events_snapshot_payload(payload: Dict[str, object]) -> bool:
         st.session_state.get("luma_region_results")
         or st.session_state.get("cv_region_results")
         or st.session_state.get("evion_region_results")
+        or st.session_state.get("meetup_region_results")
         or st.session_state.get("region_combined_events")
         or st.session_state.get("combined_events")
     )
@@ -2563,12 +2790,15 @@ def _describe_snapshot_payload(payload: Dict[str, object]) -> str:
         luma_result = ((payload.get("luma_region_results") or {}) if isinstance(payload.get("luma_region_results"), dict) else {}).get(region_name, {})
         cv_result = ((payload.get("cv_region_results") or {}) if isinstance(payload.get("cv_region_results"), dict) else {}).get(region_name, {})
         evion_result = ((payload.get("evion_region_results") or {}) if isinstance(payload.get("evion_region_results"), dict) else {}).get(region_name, {})
+        meetup_result = ((payload.get("meetup_region_results") or {}) if isinstance(payload.get("meetup_region_results"), dict) else {}).get(region_name, {})
         if isinstance(luma_result, dict) and luma_result.get("has_events"):
             sources.append("Lu.ma")
         if isinstance(cv_result, dict) and cv_result.get("has_events"):
             sources.append("Cerebral Valley")
         if isinstance(evion_result, dict) and evion_result.get("has_events"):
             sources.append("Evion")
+        if isinstance(meetup_result, dict) and meetup_result.get("has_events"):
+            sources.append("Meetup")
         if sources:
             lines.append(f"{region_name}: {', '.join(sources)}")
 
@@ -2581,6 +2811,7 @@ def _render_region_summary_tabs(
     luma_region_results: Optional[Dict[str, Dict[str, object]]],
     cv_region_results: Optional[Dict[str, Dict[str, object]]],
     evion_region_results: Optional[Dict[str, Dict[str, object]]],
+    meetup_region_results: Optional[Dict[str, Dict[str, object]]],
     key_prefix: str,
 ) -> None:
     combined_by_region = _build_region_combined_events(
@@ -2588,6 +2819,7 @@ def _render_region_summary_tabs(
             "Lu.ma Events": luma_region_results or {},
             "Cerebral Valley Events": cv_region_results or {},
             "Evion Events": evion_region_results or {},
+            "Meetup Events": meetup_region_results or {},
         }
     )
     tabs = st.tabs(FOCUS_REGION_ORDER)
@@ -2624,6 +2856,16 @@ def _render_region_summary_tabs(
                         f"{key_prefix}-evion-{region_name.lower().replace(' ', '-')}",
                     )
                 st.markdown(_ensure_text(evion_result.get("formatted", "")))
+
+            meetup_result = (meetup_region_results or {}).get(region_name)
+            if meetup_result:
+                st.markdown("Meetup")
+                if meetup_result.get("has_events"):
+                    render_copy_button(
+                        _ensure_text(meetup_result.get("formatted", "")),
+                        f"{key_prefix}-meetup-{region_name.lower().replace(' ', '-')}",
+                    )
+                st.markdown(_ensure_text(meetup_result.get("formatted", "")))
 
             combined_text = combined_by_region.get(region_name)
             if combined_text:
@@ -2695,6 +2937,27 @@ def _scrape_evion_region_to_state(region_name: str, days: int) -> bool:
     return bool(result.get("has_events"))
 
 
+def _scrape_meetup_region_to_state(region_name: str, days: int) -> bool:
+    config = MEETUP_REGION_SOURCES[region_name]
+    raw_events = scrape_meetup_events(config["url"], region_name)
+    detailed_events = _sort_events_by_start(_filter_events_for_date_range(raw_events, days))
+    region_results = dict(st.session_state.get("meetup_region_results") or {})
+    region_results[region_name] = {
+        "formatted": _format_event_collection(
+            detailed_events,
+            config["source_name"],
+            days,
+            f"No {region_name} events found on Meetup.",
+        ),
+        "has_events": bool(detailed_events),
+        "caption": config["caption"],
+    }
+    st.session_state.meetup_region_results = region_results
+    st.session_state.selected_event_region = region_name
+    _refresh_region_combined_state()
+    return bool(detailed_events)
+
+
 def _render_region_source_section(
     source_label: str,
     result: Optional[Dict[str, object]],
@@ -2722,8 +2985,9 @@ def _render_region_tab_content(region_name: str, days_to_scrape: int) -> None:
     luma_region_results = st.session_state.get("luma_region_results") or {}
     cv_region_results = st.session_state.get("cv_region_results") or {}
     evion_region_results = st.session_state.get("evion_region_results") or {}
+    meetup_region_results = st.session_state.get("meetup_region_results") or {}
 
-    action_col1, action_col2, action_col3, action_col4 = st.columns([1, 1, 1, 1])
+    action_col1, action_col2, action_col3, action_col4, action_col5 = st.columns([1, 1, 1, 1, 1])
     with action_col1:
         if st.button(f"Scrape Lu.ma {region_name}", key=f"luma_button_{region_name}", width="stretch"):
             with st.spinner(f"Scraping Lu.ma {region_name} events..."):
@@ -2789,15 +3053,34 @@ def _render_region_tab_content(region_name: str, days_to_scrape: int) -> None:
                     st.error(f"❌ Failed to scrape Evion {region_name} events")
 
     with action_col4:
+        if st.button(f"Scrape Meetup {region_name}", key=f"meetup_button_{region_name}", width="stretch"):
+            with st.spinner(f"Scraping Meetup {region_name} events..."):
+                success = _scrape_meetup_region_to_state(region_name, days_to_scrape)
+                result = (st.session_state.get("meetup_region_results") or {}).get(region_name)
+                if success and result:
+                    saved = _auto_save_results(
+                        _ensure_text(result.get("formatted", "")),
+                        f"meetup_{region_name.lower().replace(' ', '_')}_events",
+                    )
+                    if saved:
+                        st.success(f"✅ Meetup {region_name} events saved to `{os.path.basename(saved)}`")
+                    else:
+                        st.success(f"✅ Meetup {region_name} events scraped successfully!")
+                else:
+                    st.error(f"❌ Failed to scrape Meetup {region_name} events")
+
+    with action_col5:
         if st.button(f"Scrape All {region_name}", key=f"all_button_{region_name}", type="primary", width="stretch"):
             luma_ok = False
             cv_ok = False
             evion_ok = False
+            meetup_ok = False
             with st.spinner(f"Scraping all {region_name} event sources..."):
                 luma_ok = _scrape_luma_region_to_state(region_name, days_to_scrape)
                 cv_ok = _scrape_cerebral_valley_region_to_state(region_name, days_to_scrape)
                 evion_ok = _scrape_evion_region_to_state(region_name, days_to_scrape)
-            if luma_ok or cv_ok or evion_ok:
+                meetup_ok = _scrape_meetup_region_to_state(region_name, days_to_scrape)
+            if luma_ok or cv_ok or evion_ok or meetup_ok:
                 combined_region_text = (st.session_state.get("region_combined_events") or {}).get(region_name)
                 if combined_region_text:
                     saved = _auto_save_results(
@@ -2811,8 +3094,8 @@ def _render_region_tab_content(region_name: str, days_to_scrape: int) -> None:
                 st.warning(f"⚠️ No {region_name} events found from the loaded sources")
 
     st.divider()
-    source_tab_luma, source_tab_cv, source_tab_evion, source_tab_combined = st.tabs(
-        ["Lu.ma", "Cerebral Valley", "Evion", "Combined"]
+    source_tab_luma, source_tab_cv, source_tab_evion, source_tab_meetup, source_tab_combined = st.tabs(
+        ["Lu.ma", "Cerebral Valley", "Evion", "Meetup", "Combined"]
     )
     with source_tab_luma:
         _render_region_source_section(
@@ -2834,6 +3117,13 @@ def _render_region_tab_content(region_name: str, days_to_scrape: int) -> None:
             evion_region_results.get(region_name),
             f"evion-tab-{region_name.lower().replace(' ', '-')}",
             f"No Evion {region_name} events loaded yet.",
+        )
+    with source_tab_meetup:
+        _render_region_source_section(
+            "Meetup",
+            meetup_region_results.get(region_name),
+            f"meetup-tab-{region_name.lower().replace(' ', '-')}",
+            f"No Meetup {region_name} events loaded yet.",
         )
     with source_tab_combined:
         combined_text = (st.session_state.get("region_combined_events") or {}).get(region_name)
@@ -3186,34 +3476,19 @@ def _build_organized_events_fallback(events: List[Dict[str, str]]) -> str:
 def _build_organized_event_sections(
     events: List[Dict[str, str]],
 ) -> Tuple[List[Tuple[str, List[Tuple[str, List[Dict[str, str]]]]]], bool]:
-    region_order = [
-        "Online",
-        "Bay Area",
-        "Pacific Northwest",
-        "New York",
-        "Boston / Cambridge",
-        "Other",
-    ]
-    grouped: Dict[str, Dict[str, List[Dict[str, str]]]] = {}
+    grouped: Dict[str, List[Dict[str, str]]] = {}
     for event in events:
         day_heading = event["date_heading"]
-        region = event["suggested_region"]
-        grouped.setdefault(day_heading, {}).setdefault(region, []).append(event)
+        grouped.setdefault(day_heading, []).append(event)
 
-    unique_regions = {event["suggested_region"] for event in events if event.get("suggested_region")}
-    show_region_headings = len(unique_regions) > 1
-
-    day_order = sorted(grouped.keys(), key=lambda heading: min(item["sort_key"] for regions in [grouped[heading]] for items in regions.values() for item in items))
+    day_order = sorted(grouped.keys(), key=lambda heading: min(item["sort_key"] for item in grouped[heading]))
     ordered_sections: List[Tuple[str, List[Tuple[str, List[Dict[str, str]]]]]] = []
     for day_heading in day_order:
-        regions = grouped[day_heading]
-        ordered_regions = [name for name in region_order if name in regions]
-        ordered_regions.extend(sorted(name for name in regions if name not in region_order))
         ordered_sections.append(
-            (day_heading, [(region, regions[region]) for region in ordered_regions])
+            (day_heading, [("", sorted(grouped[day_heading], key=lambda item: item["sort_key"]))])
         )
 
-    return ordered_sections, show_region_headings
+    return ordered_sections, False
 
 
 def _format_linkedin_event_line(
@@ -3366,7 +3641,7 @@ def _build_organized_events_preview_html(html_content: str) -> str:
 
 
 def _organized_events_cache_key(combined_events_content: str, use_gpt_polish: bool) -> str:
-    payload = f"linkedin_v3::{int(use_gpt_polish)}::{combined_events_content}"
+    payload = f"linkedin_v4::{int(use_gpt_polish)}::{combined_events_content}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -3400,8 +3675,8 @@ def generate_organized_events(combined_events_content=None, use_gpt_polish: bool
             "- Skip any item without an RSVP link.\n"
             "- Keep events sorted chronologically.\n"
             "- Group by day using the provided `date_heading` value.\n"
-            "- If multiple regions are present, group within each day by `suggested_region`.\n"
-            "- If all events share the same region, omit region headings entirely.\n"
+            "- Do not group by region, location, or online/offline status within a day.\n"
+            "- Do not add headings like `Online`, `Bay Area`, `New York`, or `Other`.\n"
             "- For each event, output exactly one markdown line in this format:\n"
             "  `TIME - [TITLE](RSVP_URL) - LOCATION - Host: NAME short description`\n"
             "- Omit the `Host: NAME` segment when no host is provided.\n"
@@ -3409,7 +3684,7 @@ def generate_organized_events(combined_events_content=None, use_gpt_polish: bool
             "- Preserve the RSVP link exactly.\n"
             "- Do not emit separate `RSVP:` or `About:` lines.\n"
             "- Do not add commentary or code fences.\n"
-            "- Separate day sections and optional region headings with blank lines.\n\n"
+            "- Separate day sections with blank lines.\n\n"
             f"Event JSON:\n{json.dumps(events, ensure_ascii=False, indent=2)}"
         )
 
@@ -3543,7 +3818,7 @@ def main():
     days_to_scrape = int(st.session_state.get("days_to_scrape", 8))
 
     st.subheader("🎯 Event Sources")
-    st.caption("Bay Area and New York are separate workspaces. Each region tab has independent source tabs for Lu.ma, Cerebral Valley, Evion, and a combined view.")
+    st.caption("Bay Area and New York are separate workspaces. Each region tab has independent source tabs for Lu.ma, Cerebral Valley, Evion, Meetup, and a combined view.")
     region_tab_bay, region_tab_ny = st.tabs(FOCUS_REGION_ORDER)
 
     with region_tab_bay:

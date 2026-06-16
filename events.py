@@ -9,7 +9,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
-from typing import Dict, List, Optional
+from html import escape as html_escape
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from zoneinfo import ZoneInfo
 
@@ -30,7 +31,12 @@ _luma_detail_rate_limit_lock = threading.Lock()
 _luma_detail_rate_limit_log_until = 0.0
 
 
-def render_copy_button(content: str, key_suffix: str, label: str = "📋 Copy") -> None:
+def render_copy_button(
+    content: str,
+    key_suffix: str,
+    label: str = "📋 Copy",
+    html_content: Optional[str] = None,
+) -> None:
     if not content or not content.strip():
         st.caption("Copy unavailable (no text)")
         return
@@ -38,6 +44,7 @@ def render_copy_button(content: str, key_suffix: str, label: str = "📋 Copy") 
     safe_id = re.sub(r"[^0-9a-zA-Z_-]", "-", key_suffix)
     button_id = f"copy-btn-{safe_id}"
     escaped = json.dumps(content).replace("</", "<\\/")
+    escaped_html = json.dumps(html_content or "").replace("</", "<\\/")
     html = f"""
         <style>
         #{button_id} {{
@@ -62,6 +69,7 @@ def render_copy_button(content: str, key_suffix: str, label: str = "📋 Copy") 
                 return;
             }}
             const text = {escaped};
+            const htmlContent = {escaped_html};
             const defaultLabel = "{label}";
             const successLabel = "✅ Copied!";
             const failureLabel = "⚠️ Copy failed";
@@ -91,7 +99,29 @@ def render_copy_button(content: str, key_suffix: str, label: str = "📋 Copy") 
                 }}
             }};
 
-            const handleClick = () => {{
+            const copyRichHtml = async () => {{
+                if (!htmlContent || !navigator.clipboard || !navigator.clipboard.write || !window.ClipboardItem) {{
+                    return false;
+                }}
+                try {{
+                    const item = new ClipboardItem({{
+                        "text/plain": new Blob([text], {{ type: "text/plain" }}),
+                        "text/html": new Blob([htmlContent], {{ type: "text/html" }})
+                    }});
+                    await navigator.clipboard.write([item]);
+                    return true;
+                }} catch (err) {{
+                    console.warn('Rich HTML clipboard copy failed', err);
+                    return false;
+                }}
+            }};
+
+            const handleClick = async () => {{
+                if (await copyRichHtml()) {{
+                    btn.textContent = successLabel;
+                    setTimeout(() => (btn.textContent = defaultLabel), 2000);
+                    return;
+                }}
                 if (navigator.clipboard && navigator.clipboard.writeText) {{
                     navigator.clipboard
                         .writeText(text)
@@ -3150,6 +3180,12 @@ def _build_organized_events_fallback(events: List[Dict[str, str]]) -> str:
     if not events:
         return "No events with date, time, and RSVP link were available to organize."
 
+    return _build_organized_events_text(events, use_markdown_links=True)
+
+
+def _build_organized_event_sections(
+    events: List[Dict[str, str]],
+) -> Tuple[List[Tuple[str, List[Tuple[str, List[Dict[str, str]]]]]], bool]:
     region_order = [
         "Online",
         "Bay Area",
@@ -3167,48 +3203,166 @@ def _build_organized_events_fallback(events: List[Dict[str, str]]) -> str:
     unique_regions = {event["suggested_region"] for event in events if event.get("suggested_region")}
     show_region_headings = len(unique_regions) > 1
 
-    def _format_linkedin_bullet(event: Dict[str, str]) -> str:
-        title_link = f"[{event['title']}]({event['rsvp_link']})"
-        bullet = f"{event['time_display']} - {title_link}"
-
-        metadata_parts: List[str] = []
-        location = _ensure_text(event.get("location", "")).strip()
-        if location and location != "Location TBD":
-            metadata_parts.append(location)
-
-        host = _ensure_text(event.get("host", "")).strip()
-        if host:
-            metadata_parts.append(f"Host: {host}")
-
-        details = " - ".join(metadata_parts)
-        description = _ensure_text(event.get("description", "")).strip()
-
-        trailing_parts = [part for part in [details, description] if part]
-        if trailing_parts:
-            bullet = f"{bullet} - {' - '.join(trailing_parts)}"
-        return bullet
-
-    lines: List[str] = []
     day_order = sorted(grouped.keys(), key=lambda heading: min(item["sort_key"] for regions in [grouped[heading]] for items in regions.values() for item in items))
+    ordered_sections: List[Tuple[str, List[Tuple[str, List[Dict[str, str]]]]]] = []
     for day_heading in day_order:
+        regions = grouped[day_heading]
+        ordered_regions = [name for name in region_order if name in regions]
+        ordered_regions.extend(sorted(name for name in regions if name not in region_order))
+        ordered_sections.append(
+            (day_heading, [(region, regions[region]) for region in ordered_regions])
+        )
+
+    return ordered_sections, show_region_headings
+
+
+def _format_linkedin_event_line(
+    event: Dict[str, str],
+    *,
+    use_markdown_links: bool,
+    include_plain_rsvp_link: bool = False,
+) -> str:
+    if use_markdown_links:
+        title_text = f"[{event['title']}]({event['rsvp_link']})"
+    else:
+        title_text = event["title"]
+
+    line = f"{event['time_display']} - {title_text}"
+
+    metadata_parts: List[str] = []
+    location = _ensure_text(event.get("location", "")).strip()
+    if location and location != "Location TBD":
+        metadata_parts.append(location)
+
+    host = _ensure_text(event.get("host", "")).strip()
+    if host:
+        metadata_parts.append(f"Host: {host}")
+
+    description = _ensure_text(event.get("description", "")).strip()
+    trailing_parts = metadata_parts[:]
+    if description:
+        trailing_parts.append(description)
+    if trailing_parts:
+        line = f"{line} - {' - '.join(trailing_parts)}"
+    if include_plain_rsvp_link and not use_markdown_links:
+        line = f"{line} - RSVP: {event['rsvp_link']}"
+    return line
+
+
+def _build_organized_events_text(
+    events: List[Dict[str, str]],
+    *,
+    use_markdown_links: bool,
+    include_plain_rsvp_link: bool = False,
+) -> str:
+    if not events:
+        return ""
+
+    ordered_sections, show_region_headings = _build_organized_event_sections(events)
+    lines: List[str] = []
+    for day_heading, ordered_regions in ordered_sections:
         if lines:
             lines.append("")
         lines.append(day_heading)
         lines.append("")
 
-        regions = grouped[day_heading]
-        ordered_regions = [name for name in region_order if name in regions]
-        ordered_regions.extend(sorted(name for name in regions if name not in region_order))
-
-        for region in ordered_regions:
+        for region, region_events in ordered_regions:
             if show_region_headings:
                 lines.append(region)
                 lines.append("")
-            for event in regions[region]:
-                lines.append(_format_linkedin_bullet(event))
+            for event in region_events:
+                lines.append(
+                    _format_linkedin_event_line(
+                        event,
+                        use_markdown_links=use_markdown_links,
+                        include_plain_rsvp_link=include_plain_rsvp_link,
+                    )
+                )
             lines.append("")
 
     return "\n".join(lines).strip()
+
+
+def _build_organized_events_html(events: List[Dict[str, str]]) -> str:
+    if not events:
+        return ""
+
+    ordered_sections, show_region_headings = _build_organized_event_sections(events)
+    html_lines: List[str] = ["<div>"]
+    first_day = True
+    for day_heading, ordered_regions in ordered_sections:
+        if not first_day:
+            html_lines.append("<p><br></p>")
+        first_day = False
+        html_lines.append(f"<p><strong>{html_escape(day_heading)}</strong></p>")
+
+        for region, region_events in ordered_regions:
+            if show_region_headings:
+                html_lines.append(f"<p><strong>{html_escape(region)}</strong></p>")
+            html_lines.append("<ul>")
+            for event in region_events:
+                time_text = html_escape(_ensure_text(event.get("time_display", "")).strip())
+                title_text = html_escape(_ensure_text(event.get("title", "")).strip())
+                rsvp_link = html_escape(_ensure_text(event.get("rsvp_link", "")).strip(), quote=True)
+
+                metadata_parts: List[str] = []
+                location = _ensure_text(event.get("location", "")).strip()
+                if location and location != "Location TBD":
+                    metadata_parts.append(html_escape(location))
+
+                host = _ensure_text(event.get("host", "")).strip()
+                if host:
+                    metadata_parts.append(f"Host: {html_escape(host)}")
+
+                description = _ensure_text(event.get("description", "")).strip()
+                if description:
+                    metadata_parts.append(html_escape(description))
+
+                line = f"{time_text} - <a href=\"{rsvp_link}\">{title_text}</a>"
+                if metadata_parts:
+                    line = f"{line} - {' - '.join(metadata_parts)}"
+                html_lines.append(f"<li>{line}</li>")
+            html_lines.append("</ul>")
+
+    html_lines.append("</div>")
+    return "\n".join(html_lines)
+
+
+def _build_organized_events_preview_html(html_content: str) -> str:
+    safe_html = html_content or "<p>No preview available.</p>"
+    return f"""
+        <style>
+        body {{
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            color: #1f2328;
+            background: white;
+        }}
+        .linkedin-preview {{
+            max-width: 720px;
+            margin: 0 auto;
+            padding: 0.25rem 0.75rem 0.75rem;
+            font-size: 18px;
+            line-height: 1.55;
+        }}
+        .linkedin-preview p {{
+            margin: 0 0 0.9rem 0;
+        }}
+        .linkedin-preview ul {{
+            margin: 0.15rem 0 1rem 1.4rem;
+            padding-left: 1rem;
+        }}
+        .linkedin-preview li {{
+            margin: 0 0 1rem 0;
+        }}
+        .linkedin-preview a {{
+            color: #0a66c2;
+            text-decoration: none;
+            font-weight: 600;
+        }}
+        </style>
+        <div class="linkedin-preview">{safe_html}</div>
+    """
 
 
 def _organized_events_cache_key(combined_events_content: str, use_gpt_polish: bool) -> str:
@@ -3266,7 +3420,7 @@ def generate_organized_events(combined_events_content=None, use_gpt_polish: bool
             model_override=PREFERRED_GPT_MODEL,
         ).strip()
 
-        if not organized_output or "RSVP:" not in organized_output:
+        if not organized_output or not re.search(r"\[[^\]]+\]\(https?://", organized_output):
             logger.warning("Organized events output invalid or empty; using fallback formatter.")
             cache[cache_key] = fallback_output
             return True, fallback_output
@@ -3548,6 +3702,16 @@ def main():
             st.button("Organize Events", key="organize_events_button", disabled=True)
 
         if organized_text:
+            organized_preview_events = _extract_organize_candidate_events(selected_events_content or "")
+            organized_html = _build_organized_events_html(organized_preview_events)
+            organized_plain_text = _build_organized_events_text(
+                organized_preview_events,
+                use_markdown_links=False,
+                include_plain_rsvp_link=True,
+            )
+            st.session_state["organized_events_text"] = organized_text
+            st.session_state["organized_events_html_source"] = organized_html
+
             col_header1, col_header2 = st.columns([3, 1])
             with col_header1:
                 st.markdown("**Organized Events**")
@@ -3555,15 +3719,35 @@ def main():
                 if mode_label:
                     st.caption(mode_label)
             with col_header2:
-                render_copy_button(organized_text, "organized-events")
+                render_copy_button(
+                    organized_plain_text or organized_text,
+                    "organized-events-linkedin",
+                    label="📋 Copy for LinkedIn",
+                    html_content=organized_html or None,
+                )
 
             st.markdown("**LinkedIn Preview**")
-            st.markdown(organized_text)
+            if organized_html:
+                st_components.html(
+                    _build_organized_events_preview_html(organized_html),
+                    height=560,
+                    scrolling=True,
+                )
+                st.caption("This copy button uses rich HTML so pasting into LinkedIn keeps bullets and links when the browser allows it.")
+            else:
+                st.markdown(organized_text)
+
+            with st.expander("💻 View LinkedIn HTML", expanded=False):
+                st.text_area(
+                    "LinkedIn HTML",
+                    key="organized_events_html_source",
+                    height=320,
+                    label_visibility="visible",
+                )
 
             with st.expander("✏️ View / edit raw organized text", expanded=False):
                 st.text_area(
                     "Organized events text",
-                    value=organized_text,
                     height=420,
                     key="organized_events_text",
                     label_visibility="visible",

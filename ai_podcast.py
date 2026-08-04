@@ -21,11 +21,14 @@ logger = logging.getLogger(__name__)
 # ─── Cloud Detection & Database ───────────────────────────────────
 IS_STREAMLIT_CLOUD = os.getenv("STREAMLIT_RUNTIME_ENV") == "cloud" or os.getenv("STREAMLIT_SHARING_MODE") is not None
 
-NEON_DATABASE_URL = "postgresql://neondb_owner:npg_J0ctsQkMWb1L@ep-shy-meadow-akzmy4xi-pooler.c-3.us-west-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+NEON_DATABASE_URL = st.secrets.get("NEON_DATABASE_URL") or os.getenv("NEON_DATABASE_URL") or ""
 
 
 def _get_db_connection():
     """Get a PostgreSQL database connection for cloud storage."""
+    if not NEON_DATABASE_URL:
+        logger.error("NEON_DATABASE_URL is not configured. Set it in secrets or env.")
+        return None
     try:
         import psycopg2
         conn = psycopg2.connect(NEON_DATABASE_URL)

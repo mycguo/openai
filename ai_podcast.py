@@ -373,6 +373,101 @@ def _resolve_episode_audio(
     return audio_url, description
 
 
+_SPOTIFY_EPISODE_RE = re.compile(
+    r"https?://(?:creators|podcasters)\.spotify\.com/pod/(?:profile|show)/[^/]+/episodes/([^/?#]+)",
+    re.IGNORECASE,
+)
+
+
+def _resolve_spotify_creators_audio(episode_url: str) -> dict:
+    """Resolve a Spotify Creators/Podcasters episode page URL to its audio URL.
+
+    The episode page embeds the show's Anchor RSS feed URL; the feed item
+    matching the episode slug carries the audio enclosure. Falls back to the
+    audioUrl embedded in the page JSON when RSS matching fails.
+    """
+    match = _SPOTIFY_EPISODE_RE.match(episode_url.strip())
+    if not match:
+        raise RuntimeError("Not a recognized Spotify Creators episode URL.")
+    slug = match.group(1)
+    # The trailing base-36 token (e.g. "e3mrtg1") uniquely identifies the episode.
+    ep_token = slug.rsplit("-", 1)[-1] if "-" in slug else slug
+
+    page_resp = requests.get(
+        episode_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/125.0.0.0 Safari/537.36",
+        },
+        timeout=25,
+    )
+    page_resp.raise_for_status()
+    html = page_resp.text
+
+    rss_match = re.search(r"https://anchor\.fm/s/[a-z0-9]+/podcast/rss", html)
+    if rss_match:
+        try:
+            from xml.etree import ElementTree
+
+            rss_resp = requests.get(
+                rss_match.group(0),
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=25,
+            )
+            rss_resp.raise_for_status()
+            root = ElementTree.fromstring(rss_resp.content)
+            for item in root.findall(".//channel/item"):
+                link = item.findtext("link") or ""
+                guid = item.findtext("guid") or ""
+                if ep_token in link or ep_token in guid:
+                    enclosure = item.find("enclosure")
+                    audio_url = (enclosure.get("url") or "").strip() if enclosure is not None else ""
+                    if audio_url:
+                        return {
+                            "title": (item.findtext("title") or "Unknown Episode").strip(),
+                            "date": _format_pub_date((item.findtext("pubDate") or "").strip()),
+                            "url": episode_url,
+                            "audio_url": audio_url,
+                            "description": _clean_html_text(item.findtext("description") or ""),
+                        }
+                    break
+        except Exception as exc:
+            logger.warning("Spotify Creators RSS resolution failed: %s", exc)
+
+    audio_match = re.search(r'"audioUrl"\s*:\s*"([^"]+)"', html)
+    if audio_match:
+        audio_url = audio_match.group(1).replace("\\u002F", "/")
+        title_match = re.search(r'"episodeTitle"\s*:\s*"([^"]+)"', html)
+        return {
+            "title": title_match.group(1) if title_match else "Unknown Episode",
+            "date": "",
+            "url": episode_url,
+            "audio_url": audio_url,
+            "description": "",
+        }
+
+    raise RuntimeError("Could not resolve an audio URL from the Spotify episode page.")
+
+
+def _episode_from_direct_input(direct_url: str) -> dict:
+    """Build an episode dict from a pasted URL.
+
+    Accepts either a direct audio file URL or a Spotify Creators/Podcasters
+    episode page URL, which gets resolved to its underlying audio URL.
+    """
+    direct_url = (direct_url or "").strip()
+    if _SPOTIFY_EPISODE_RE.match(direct_url):
+        return _resolve_spotify_creators_audio(direct_url)
+    return {
+        "title": "Manual Audio",
+        "date": "",
+        "url": "",
+        "audio_url": direct_url,
+        "description": "",
+    }
+
+
 def _clean_html_text(value: str) -> str:
     if not value:
         return ""
@@ -1705,24 +1800,24 @@ def main():
         col_url, col_btn = st.columns([3, 1])
         with col_url:
             direct_url = st.text_input(
-                "Audio URL (mp3/m4a):",
+                "Audio URL (mp3/m4a) or Spotify Creators episode link:",
                 key="direct_audio_url",
                 label_visibility="collapsed",
-                placeholder="Paste audio URL here...",
+                placeholder="Paste audio URL or Spotify Creators episode link...",
                 disabled=not source_controls_enabled,
             )
         with col_btn:
             if st.button("Set URL", disabled=(not source_controls_enabled or not direct_url)):
-                st.session_state.episode = {
-                    "title": "Manual Audio",
-                    "date": "",
-                    "url": "",
-                    "audio_url": direct_url,
-                    "description": "",
-                }
-                st.session_state.source_mode = "url"
-                st.success("Audio URL set!")
-                st.rerun()
+                try:
+                    with st.spinner("Resolving audio URL..."):
+                        resolved_episode = _episode_from_direct_input(direct_url)
+                except Exception as e:
+                    st.error(f"Failed to resolve audio URL: {e}")
+                else:
+                    st.session_state.episode = resolved_episode
+                    st.session_state.source_mode = "url"
+                    st.success("Audio URL set!")
+                    st.rerun()
 
     # ── Row 2 ──
     row2_left, row2_right = st.columns(2)
@@ -1749,14 +1844,8 @@ def main():
                     podcast_name = st.session_state.get("selected_podcast", list(PODCAST_SOURCES.keys())[0])
 
                     if source_mode == "url" and direct_url:
-                        audio_url = direct_url
-                        episode = {
-                            "title": "Manual Audio",
-                            "date": "",
-                            "url": "",
-                            "audio_url": direct_url,
-                            "description": "",
-                        }
+                        episode = _episode_from_direct_input(direct_url)
+                        audio_url = episode.get("audio_url", "")
                         st.session_state.episode = episode
 
                     if source_mode == "url" and not audio_url:

@@ -401,7 +401,7 @@ def generate_with_claude(prompt: str, temperature: float = 1.0, max_tokens: int 
     response = client.messages.create(
         model=ANTHROPIC_SONNET_MODEL,
         max_tokens=max_tokens,
-        temperature=temperature,
+        extra_body={"temperature": temperature},
         messages=[
             {
                 "role": "user",

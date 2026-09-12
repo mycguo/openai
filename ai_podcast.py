@@ -883,13 +883,29 @@ def generate_with_claude(prompt: str, temperature: float = 1.0, max_tokens: int 
         extra_body={"temperature": temperature},
         messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}],
     )
+    stop_reason = getattr(response, "stop_reason", None)
     text_segments = []
     for block in response.content:
         if getattr(block, "type", "") == "text":
             text_segments.append(block.text)
     full_text = "".join(text_segments).strip()
-    if full_text:
+    if full_text and stop_reason != "refusal":
         return full_text
+    usage = getattr(response, "usage", None)
+    stop_details = getattr(response, "stop_details", None)
+    logger.warning(
+        "Claude generation failed: model=%s stop_reason=%s block_types=%s "
+        "input_tokens=%s output_tokens=%s refusal_category=%s request_id=%s",
+        getattr(response, "model", ANTHROPIC_SONNET_MODEL),
+        stop_reason,
+        [getattr(block, "type", type(block).__name__) for block in response.content],
+        getattr(usage, "input_tokens", None),
+        getattr(usage, "output_tokens", None),
+        getattr(stop_details, "category", None),
+        getattr(response, "_request_id", None),
+    )
+    if stop_reason == "refusal":
+        raise RuntimeError("Claude declined this generation request. No article was generated.")
     raise RuntimeError("Anthropic response did not contain text output")
 
 
@@ -928,7 +944,7 @@ Instructions:
 7. Keep it concise — quality over quantity
 
 Transcript:
-{transcript[:15000]}
+{transcript}
 """
     for attempt in range(max_attempts):
         article = generate_with_claude(prompt, temperature=0.7)

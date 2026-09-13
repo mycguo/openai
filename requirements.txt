@@ -19,6 +19,7 @@ pypdf
 requests
 yt-dlp
 pytube
+youtube-transcript-api==1.2.4
 claude-agent-sdk
 python-dotenv
 anthropic

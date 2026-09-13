@@ -9,6 +9,7 @@ import streamlit as st
 import yt_dlp
 from openai import OpenAI
 from pytube import YouTube as PyTube
+from youtube_captions import fetch_captions, video_id_from_url
 
 
 st.set_page_config(
@@ -18,8 +19,15 @@ st.set_page_config(
 )
 
 
-ASSEMBLYAI_API_KEY = st.secrets.get("ASSEMBLYAI_API_KEY")
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")
+def _optional_secret(name: str) -> Optional[str]:
+    try:
+        return os.environ.get(name) or st.secrets.get(name)
+    except FileNotFoundError:
+        return os.environ.get(name)
+
+
+ASSEMBLYAI_API_KEY = _optional_secret("ASSEMBLYAI_API_KEY")
+OPENAI_API_KEY = _optional_secret("OPENAI_API_KEY")
 
 UPLOAD_ENDPOINT = "https://api.assemblyai.com/v2/upload"
 TRANSCRIPT_ENDPOINT = "https://api.assemblyai.com/v2/transcript"
@@ -71,7 +79,6 @@ def _download_audio(url: str, workdir: str) -> tuple[str, dict, List[str]]:
         "no_warnings": True,
         "noplaylist": True,
         "geo_bypass": True,
-        "nocheckcertificate": True,
         "http_headers": DEFAULT_HTTP_HEADERS,
         "retries": 5,  # More retries
         "fragment_retries": 5,
@@ -83,8 +90,6 @@ def _download_audio(url: str, workdir: str) -> tuple[str, dict, List[str]]:
             }
         },
         # Additional cloud-friendly options
-        "no_check_certificate": True,
-        "prefer_insecure": True,
         "youtube_include_dash_manifest": False,
     }
 
@@ -385,10 +390,10 @@ def _segments_from_utterances(utterances: Optional[Iterable[dict]]) -> tuple[Lis
 
 def _segments_to_srt(segments: Iterable[TranscriptSegment]) -> str:
     def format_timestamp(seconds: float) -> str:
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
-        secs = int(seconds % 60)
-        millis = int(round((seconds - int(seconds)) * 1000))
+        total_millis = max(0, round(seconds * 1000))
+        total_seconds, millis = divmod(total_millis, 1000)
+        total_minutes, secs = divmod(total_seconds, 60)
+        hours, minutes = divmod(total_minutes, 60)
         return f"{hours:02}:{minutes:02}:{secs:02},{millis:03}"
 
     lines: List[str] = []
@@ -402,6 +407,9 @@ def _segments_to_srt(segments: Iterable[TranscriptSegment]) -> str:
 
 
 def _clear_state():
+    from youtube_publishing import clear_generated_content
+    clear_generated_content()
+    st.session_state.pop("yt_download_logs", None)
     for key in [
         "yt_transcript_text",
         "yt_transcript_srt",
@@ -413,6 +421,8 @@ def _clear_state():
 
 
 def _clear_transcript_outputs():
+    from youtube_publishing import clear_generated_content
+    clear_generated_content()
     for key in [
         "yt_transcript_text",
         "yt_transcript_srt",
@@ -477,7 +487,15 @@ def generate_summary(text: str) -> str:
 
 def main() -> None:
     st.title("📺 YouTube Transcript Extractor")
-    st.markdown("Download a YouTube video's audio, transcribe it with AssemblyAI, and save the results.")
+    st.markdown("Paste a YouTube URL to retrieve its complete captions and download a TXT or timestamped SRT file.")
+    with st.expander("How it works"):
+        st.markdown(
+            "1. Validate the video URL.\n"
+            "2. Fetch creator-provided or YouTube-generated captions in your preferred language.\n"
+            "3. Display all caption text with no character cutoff; export TXT and SRT.\n\n"
+            "Captions need no API key. Audio transcription is a separate paid option using AssemblyAI. "
+            "Nothing is sent to a transcription provider in caption mode. Use content you have permission to process."
+        )
 
     # Show cloud platform warning
     st.info(
@@ -485,36 +503,68 @@ def main() -> None:
         "If you encounter download errors, try using different videos or run this app locally."
     )
 
-    if not ASSEMBLYAI_API_KEY:
-        st.error("Missing ASSEMBLYAI_API_KEY in Streamlit secrets. Please configure it to continue.")
-        return
+    mode = st.radio("Transcript source", ["YouTube captions (no API key)", "Transcribe audio with AssemblyAI"], on_change=_clear_state)
+    caption_mode = mode == "YouTube captions (no API key)"
+    languages = st.text_input("Preferred language codes", value="en", help="Comma-separated, in priority order; for example: es,en", on_change=_clear_state) if caption_mode else "en"
+    audio_consent = False
+    if not caption_mode:
+        st.warning("This option downloads audio and uploads it to AssemblyAI for paid transcription.")
+        audio_consent = st.checkbox("I have permission to process this audio and agree to send it to AssemblyAI.")
+        if not ASSEMBLYAI_API_KEY:
+            st.info("Set ASSEMBLYAI_API_KEY in your environment or Streamlit secrets to enable audio transcription.")
 
-    default_url = "https://www.youtube.com/watch?v=c_w0LaFahxk"
     url = st.text_input(
         "YouTube URL",
-        value=default_url,
+        value="",
         placeholder="Paste a YouTube video link",
-        help="The audio will be downloaded and transcribed via AssemblyAI.",
+        help="Supports standard video, shortened, Shorts, and live video links.",
+        on_change=_clear_state,
     )
 
     col1, col2 = st.columns([1, 1])
     with col1:
-        fetch_clicked = st.button("🎬 Fetch Transcript", type="primary")
+        fetch_clicked = st.button("🎬 Fetch Transcript", type="primary", disabled=not caption_mode and (not ASSEMBLYAI_API_KEY or not audio_consent))
     with col2:
         if st.button("🧹 Clear Transcript"):
             _clear_state()
             st.rerun()
 
     if fetch_clicked:
-        if not url or not url.strip():
-            st.error("Please provide a valid YouTube URL.")
+        _clear_state()
+        try:
+            video_id = video_id_from_url(url)
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+        canonical_url = f"https://www.youtube.com/watch?v={video_id}"
+        if caption_mode:
+            preferred_languages = [code.strip().lower() for code in languages.split(",") if code.strip()]
+            if not preferred_languages:
+                st.error("Enter at least one language code, such as en.")
+                return
+            try:
+                with st.spinner("Fetching YouTube captions..."):
+                    transcript = fetch_captions(video_id, preferred_languages)
+                segments = [TranscriptSegment(index=i, start=s.start, end=s.start + s.duration, text=s.text) for i, s in enumerate(transcript, 1)]
+                st.session_state.yt_transcript_text = "\n".join(s.text for s in segments)
+                st.session_state.yt_transcript_srt = _segments_to_srt(segments)
+                st.session_state.yt_transcript_video_id = video_id
+                st.session_state.yt_transcript_metadata = {
+                    "id": video_id, "webpage_url": canonical_url,
+                    "source": "YouTube auto-generated captions" if transcript.is_generated else "YouTube creator-provided captions",
+                    "language": transcript.language,
+                }
+                st.success("Complete caption transcript ready!")
+            except Exception as exc:
+                st.error(f"Could not fetch captions: {exc}")
+                return
         else:
             st.session_state.pop("yt_download_logs", None)
 
             with st.spinner("Downloading audio and requesting transcription..."):
                 try:
                     with tempfile.TemporaryDirectory() as tmpdir:
-                        audio_path, metadata, download_logs = _download_audio(url.strip(), tmpdir)
+                        audio_path, metadata, download_logs = _download_audio(canonical_url, tmpdir)
                         st.session_state.yt_download_logs = download_logs
                         upload_url = _upload_audio(audio_path)
                         transcript_id = _request_transcription(upload_url)
@@ -564,6 +614,7 @@ def main() -> None:
                         "duration": metadata.get("duration"),
                         "webpage_url": metadata.get("webpage_url"),
                         "id": metadata.get("id"),
+                        "source": "AssemblyAI audio transcription",
                     }
                     st.session_state.yt_transcript_video_id = metadata.get("id") or metadata.get("display_id")
 
@@ -626,12 +677,15 @@ def main() -> None:
                             f"Title: {metadata.get('title')}" if metadata.get("title") else None,
                             f"Uploader: {metadata.get('uploader')}" if metadata.get("uploader") else None,
                             f"Duration: {metadata.get('duration')}s" if metadata.get("duration") else None,
+                            metadata.get("source"),
+                            metadata.get("language"),
                         ],
                     )
                 )
             )
 
         st.subheader("📝 Transcript")
+        st.caption(f"{len(st.session_state['yt_transcript_text']):,} characters • Full transcript, not truncated")
         st.text_area(
             "Transcript",
             value=st.session_state["yt_transcript_text"],
@@ -688,6 +742,10 @@ def main() -> None:
                 file_name="transcript_summary.txt",
                 mime="text/plain",
             )
+
+
+    from youtube_publishing import render_workflow
+    render_workflow()
 
 
 if __name__ == "__main__":

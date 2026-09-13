@@ -1026,7 +1026,7 @@ def _build_article_image_prompt(article_text: str = "") -> str:
         "Show the core idea visually with polished editorial art direction, abstract tech forms, "
         "smart composition, and a high-end business/technology feel. "
         "Do not add logos, brand names, screenshots, UI mockups, faces. "
-        "Use small amount of text overlay."
+        "Use as little amount of text overlay as possible."
     )
 
 

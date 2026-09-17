@@ -223,8 +223,9 @@ LUMA_REGION_SOURCES = {
         "urls": [
             f"{LUMA_BASE_URL}/genai-sf?k=c",
             f"{LUMA_BASE_URL}/sf",
+            f"{LUMA_BASE_URL}/angellaunchevents",
         ],
-        "caption": "Sources: genai-sf + sf",
+        "caption": "Sources: genai-sf + sf + angellaunchevents",
     },
     "New York": {
         "source_name": "Lu.ma New York",
@@ -234,7 +235,7 @@ LUMA_REGION_SOURCES = {
         "caption": "Source: nyc",
     },
 }
-LUMA_DISCOVERY_PATHS = {"/sf", "/genai-sf", "/nyc"}
+LUMA_DISCOVERY_PATHS = {"/sf", "/genai-sf", "/angellaunchevents", "/nyc"}
 FOCUS_REGION_ORDER = ["Bay Area", "New York"]
 CV_REGION_PAGE_URLS = {
     "Bay Area": "https://cerebralvalley.ai/events?locations=BAY_AREA",

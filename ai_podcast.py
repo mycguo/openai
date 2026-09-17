@@ -284,7 +284,8 @@ _SESSION_SOURCE_CACHE = os.path.join(SCRAPED_DIR, ".pending_source.json")
 
 # LinkedIn
 LINKEDIN_API_URL = "https://api.linkedin.com/rest/posts"
-LINKEDIN_API_VERSION = os.getenv("LINKEDIN_API_VERSION", "202509")
+DEFAULT_LINKEDIN_API_VERSION = "202609"
+LINKEDIN_API_VERSION = os.getenv("LINKEDIN_API_VERSION", DEFAULT_LINKEDIN_API_VERSION).strip()
 LINKEDIN_IMAGE_INIT_URL = "https://api.linkedin.com/rest/images?action=initializeUpload"
 NANO_BANANA_MODEL = (
     _optional_config("GOOGLE_IMAGE_MODEL")
@@ -1394,6 +1395,12 @@ def upload_linkedin_image(upload_url: str, image_bytes: bytes, mime_type: str):
 
 
 def post_to_linkedin(content, access_token, author_id, image_payload=None, allow_image_fallback: bool = True):
+    if not re.fullmatch(r"\d{6}", LINKEDIN_API_VERSION):
+        return False, (
+            "Invalid LINKEDIN_API_VERSION. LinkedIn requires the YYYYMM format "
+            f"(for example, 202609), but received {LINKEDIN_API_VERSION!r}."
+        )
+
     if not author_id:
         return False, "Missing LinkedIn author ID. Please reconnect your account."
 

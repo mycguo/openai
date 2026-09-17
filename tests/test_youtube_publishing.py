@@ -156,6 +156,23 @@ class PublishingTests(unittest.TestCase):
             self.assertFalse(ok)
             create.assert_not_called()
 
+    def test_linkedin_version_uses_active_release_and_rejects_invalid_format(self):
+        self.assertEqual(services.DEFAULT_LINKEDIN_API_VERSION, "202609")
+        response = Mock(status_code=201, content=b"", headers={})
+        response.raise_for_status.return_value = None
+        with patch.object(services, "LINKEDIN_API_VERSION", services.DEFAULT_LINKEDIN_API_VERSION), \
+             patch.object(services.requests, "post", return_value=response) as create:
+            ok, _ = services.post_to_linkedin("Draft", "test-token", "urn:li:person:test")
+            self.assertTrue(ok)
+            self.assertEqual(create.call_args.kwargs["headers"]["Linkedin-Version"], "202609")
+
+        with patch.object(services, "LINKEDIN_API_VERSION", "20250901"), \
+             patch.object(services.requests, "post") as create:
+            ok, error = services.post_to_linkedin("Draft", "test-token", "urn:li:person:test")
+            self.assertFalse(ok)
+            self.assertIn("YYYYMM", error)
+            create.assert_not_called()
+
     def test_fingerprints_include_image_and_account(self):
         self.assertNotEqual(post_fingerprint("a", None, "x"), post_fingerprint("a", {"bytes": PNG}, "x"))
         self.assertNotEqual(post_fingerprint("a", None, "x"), post_fingerprint("a", None, "y"))

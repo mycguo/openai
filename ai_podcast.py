@@ -1249,6 +1249,42 @@ def render_linkedin_auth_button(config: Dict[str, str]) -> None:
     )
 
 
+def _prepare_linkedin_oauth() -> None:
+    """Cache the current draft and source before leaving for LinkedIn OAuth."""
+    session_id = _get_session_id()
+    article_cache_key = f"pending_article_{session_id}"
+    source_cache_key = f"pending_source_{session_id}"
+
+    article = st.session_state.get("article", "").strip()
+    if article:
+        if IS_STREAMLIT_CLOUD:
+            _db_save_oauth_cache(article_cache_key, article)
+        else:
+            os.makedirs(SCRAPED_DIR, exist_ok=True)
+            with open(_SESSION_ARTICLE_CACHE, "w") as f:
+                f.write(article)
+
+    source_payload = {
+        "episode": st.session_state.get("episode"),
+        "direct_audio_url": st.session_state.get("direct_audio_url", ""),
+        "source_mode": st.session_state.get("source_mode", ""),
+    }
+    try:
+        import json
+
+        source_json = json.dumps(source_payload)
+        if IS_STREAMLIT_CLOUD:
+            _db_save_oauth_cache(source_cache_key, source_json)
+        else:
+            os.makedirs(SCRAPED_DIR, exist_ok=True)
+            with open(_SESSION_SOURCE_CACHE, "w") as f:
+                f.write(source_json)
+    except Exception as exc:
+        logger.warning("Failed to cache source data: %s", exc)
+
+    st.session_state._oauth_ready = True
+
+
 def _get_query_param(params, key):
     if params is None:
         return None
@@ -1659,33 +1695,12 @@ def main():
     st.markdown(
         """
         <style>
-        div[data-testid="stHorizontalBlock"]:nth-of-type(1),
-        div[data-testid="stHorizontalBlock"]:nth-of-type(2) {
-            padding: 0.5rem;
-            border-radius: 0.75rem;
+        div[data-testid="stHorizontalBlock"] {
+            align-items: center;
+            flex-wrap: nowrap !important;
         }
-        div[data-testid="stHorizontalBlock"]:nth-of-type(1) {
-            background: #f2f5ff;
-        }
-        div[data-testid="stHorizontalBlock"]:nth-of-type(2) {
-            background: #f7f3ff;
-        }
-        div[data-testid="stHorizontalBlock"]:nth-of-type(1) > div,
-        div[data-testid="stHorizontalBlock"]:nth-of-type(2) > div {
-            padding: 0.75rem;
-            border-radius: 0.6rem;
-        }
-        div[data-testid="stHorizontalBlock"]:nth-of-type(1) > div:nth-child(1) {
-            background: #e6ecff;
-        }
-        div[data-testid="stHorizontalBlock"]:nth-of-type(1) > div:nth-child(2) {
-            background: #e9f7ff;
-        }
-        div[data-testid="stHorizontalBlock"]:nth-of-type(2) > div:nth-child(1) {
-            background: #fff0f3;
-        }
-        div[data-testid="stHorizontalBlock"]:nth-of-type(2) > div:nth-child(2) {
-            background: #f0fff4;
+        div[data-testid="stHorizontalBlock"] > div {
+            min-width: 0;
         }
         button[kind="primary"] {
             background: #9ad1ff;
@@ -1713,54 +1728,37 @@ def main():
         and time.time() < st.session_state.get("token_expires", 0)
     )
 
-    # ── Row 1 ──
-    row1_left, row1_right = st.columns(2)
+    # ── Step 1: Connect and select a source ──
+    row1_left = st.container(border=True)
+    row1_right = st.container(border=True)
     with row1_left:
-        st.subheader("Connect LinkedIn Account")
-        if not token_active:
-            config = get_linkedin_config()
-            if config:
-                if st.session_state.get("_oauth_ready"):
-                    st.info("Click below to authorize with LinkedIn:")
+        config = get_linkedin_config() if not token_active else None
+        oauth_ready = bool(config and st.session_state.get("_oauth_ready"))
+
+        if config:
+            heading_col, auth_col = st.columns(
+                [2, 1],
+                vertical_alignment="center",
+            )
+            with heading_col:
+                st.subheader("Connect LinkedIn Account")
+            with auth_col:
+                if oauth_ready:
                     render_linkedin_auth_button(config)
-                    if st.button("Cancel", key="cancel_oauth"):
-                        st.session_state.pop("_oauth_ready", None)
-                        st.rerun()
-                else:
-                    if st.button("Connect LinkedIn Account", type="primary"):
-                        # Save article so it survives the OAuth redirect
-                        # Use session-specific cache keys to prevent cross-user conflicts
-                        session_id = _get_session_id()
-                        article_cache_key = f"pending_article_{session_id}"
-                        source_cache_key = f"pending_source_{session_id}"
+                elif st.button(
+                    "Connect LinkedIn Account",
+                    type="primary",
+                    width="stretch",
+                ):
+                    _prepare_linkedin_oauth()
+                    st.rerun()
+        else:
+            st.subheader("Connect LinkedIn Account")
 
-                        article = st.session_state.get("article", "").strip()
-                        if article:
-                            if IS_STREAMLIT_CLOUD:
-                                _db_save_oauth_cache(article_cache_key, article)
-                            else:
-                                os.makedirs(SCRAPED_DIR, exist_ok=True)
-                                with open(_SESSION_ARTICLE_CACHE, "w") as f:
-                                    f.write(article)
-                        source_payload = {
-                            "episode": st.session_state.get("episode"),
-                            "direct_audio_url": st.session_state.get("direct_audio_url", ""),
-                            "source_mode": st.session_state.get("source_mode", ""),
-                        }
-                        try:
-                            import json
-                            source_json = json.dumps(source_payload)
-                            if IS_STREAMLIT_CLOUD:
-                                _db_save_oauth_cache(source_cache_key, source_json)
-                            else:
-                                os.makedirs(SCRAPED_DIR, exist_ok=True)
-                                with open(_SESSION_SOURCE_CACHE, "w") as f:
-                                    f.write(source_json)
-                        except Exception as exc:
-                            logger.warning("Failed to cache source data: %s", exc)
-
-                        st.session_state._oauth_ready = True
-                        st.rerun()
+        if not token_active:
+            if oauth_ready and st.button("Cancel", key="cancel_oauth"):
+                st.session_state.pop("_oauth_ready", None)
+                st.rerun()
         else:
             st.success("LinkedIn connected!")
             if st.button("Disconnect LinkedIn"):
@@ -1770,20 +1768,40 @@ def main():
                 st.rerun()
 
     with row1_right:
-        st.subheader("Set Source")
         source_controls_enabled = token_active
-        if not source_controls_enabled:
-            st.info("Connect LinkedIn Account first to enable source setup.")
-
-        # Podcast selector
         podcast_names = list(PODCAST_SOURCES.keys())
-        selected_podcast = st.selectbox(
-            "Select Podcast",
-            podcast_names,
-            index=0,
-            key="selected_podcast",
-            disabled=not source_controls_enabled,
+        source_heading_col, podcast_selector_col = st.columns(
+            [3, 2],
+            vertical_alignment="center",
         )
+        with source_heading_col:
+            if not source_controls_enabled:
+                st.html(
+                    """
+                    <div style="display:flex; align-items:center; gap:0.65rem; flex-wrap:wrap;">
+                        <h3 style="margin:0;">Set Source</h3>
+                        <span
+                            title="Connect LinkedIn Account first to enable source setup."
+                            style="font-size:0.82rem; color:#64748b;"
+                        >
+                            ⓘ Connect LinkedIn Account first to enable source setup.
+                        </span>
+                    </div>
+                    """,
+                    width="stretch",
+                )
+            else:
+                st.subheader("Set Source")
+        with podcast_selector_col:
+            selected_podcast = st.selectbox(
+                "Select Podcast",
+                podcast_names,
+                index=0,
+                key="selected_podcast",
+                disabled=not source_controls_enabled,
+                label_visibility="collapsed",
+            )
+
         selected_source = PODCAST_SOURCES[selected_podcast]
         st.session_state.selected_podcast_url = selected_source.get("episodes_url", "")
 
@@ -1825,7 +1843,8 @@ def main():
                     st.session_state.episode["audio_url"] = manual_url
                     st.session_state.source_mode = "url"
 
-        col_url, col_btn = st.columns([3, 1])
+        col_url = st.container()
+        col_btn = st.container()
         with col_url:
             direct_url = st.text_input(
                 "Audio URL (mp3/m4a) or Spotify Creators episode link:",
@@ -1847,8 +1866,9 @@ def main():
                     st.success("Audio URL set!")
                     st.rerun()
 
-    # ── Row 2 ──
-    row2_left, row2_right = st.columns(2)
+    # ── Steps 2–4: Run the manual workflow, with automation at the bottom ──
+    row2_left = st.container(border=True)
+    row2_right = st.container(border=True)
     with row2_right:
         st.subheader("Do All (Fetch → Transcribe → Generate → Publish)")
         save_audio_all = st.checkbox("Save audio to disk", value=True, key="doall_save_audio")
@@ -2022,7 +2042,8 @@ def main():
                         st.success(f"Loaded {selected_transcript}")
                     st.rerun()
     
-        col1, col2 = st.columns(2)
+        col1 = st.container()
+        col2 = st.container()
         with col1:
             save_audio = st.checkbox("Save audio to disk", value=True)
         with col2:
@@ -2195,7 +2216,9 @@ def main():
                     file_name="linkedin_article_image.png",
                     mime=st.session_state.article_image.get("mime_type", "image/png"),
                 )
-                img_col1, img_col2, img_col3 = st.columns(3)
+                img_col1 = st.container()
+                img_col2 = st.container()
+                img_col3 = st.container()
                 with img_col1:
                     if st.button("🔄 Generate Again"):
                         with st.spinner("Regenerating image..."):

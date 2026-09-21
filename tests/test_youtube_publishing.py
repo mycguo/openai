@@ -53,6 +53,29 @@ class PublishingTests(unittest.TestCase):
             self.assertEqual(kwargs["prompt_override"], "Custom instructions")
             self.assertEqual(app.session_state.yt_article, "Draft")
 
+    def test_generate_fetches_transcript_first_when_none_is_loaded(self):
+        class Transcript(list):
+            language = "English"
+            is_generated = False
+
+        transcript = Transcript([
+            SimpleNamespace(text="FULL TRANSCRIPT END", start=0.0, duration=1.0),
+        ])
+        with patch("youtube_captions.fetch_captions", return_value=transcript) as fetch, \
+             patch.object(services, "ANTHROPIC_API_KEY", "test"), \
+             patch.object(services, "generate_linkedin_article", return_value="Draft") as generate:
+            app = AppTest.from_file(APP).run()
+            self.assertTrue(element(app.button, "Generate Article").disabled)
+            app.text_input[1].set_value("https://youtu.be/jNQXAC9IVRw").run()
+            generate_button = element(app.button, "Generate Article")
+            self.assertFalse(generate_button.disabled)
+            generate_button.click().run()
+
+            self.assertFalse(app.exception)
+            fetch.assert_called_once_with("jNQXAC9IVRw", ["en"])
+            self.assertEqual(generate.call_args.args[0], "FULL TRANSCRIPT END")
+            self.assertEqual(app.session_state.yt_article, "Draft")
+
     def test_shared_prompt_composition_and_refusal(self):
         with patch.object(services, "generate_with_claude", return_value="Draft") as generate:
             services.generate_linkedin_article("FULL TRANSCRIPT END", prompt_override="My custom {instructions}")
@@ -63,6 +86,13 @@ class PublishingTests(unittest.TestCase):
         client.messages.create.return_value = SimpleNamespace(content=[], stop_reason="refusal")
         with patch.object(services, "_create_anthropic_client", return_value=client), self.assertRaisesRegex(RuntimeError, "declined"):
             services.generate_with_claude("test")
+
+    def test_long_generated_article_is_not_shortened_or_retried(self):
+        long_article = "x" * 5000
+        with patch.object(services, "generate_with_claude", return_value=long_article) as generate:
+            result = services.generate_linkedin_article("Transcript")
+        self.assertEqual(result, long_article)
+        generate.assert_called_once()
 
     def test_image_uses_edited_article_and_is_invalidated(self):
         payload = {"bytes": PNG, "mime_type": "image/png"}
@@ -107,13 +137,17 @@ class PublishingTests(unittest.TestCase):
             app.run()
             publish.assert_called_once()
 
-    def test_oversize_and_expired_token_block_publish(self):
-        app = self.app()
-        app.session_state.yt_article = "x" * 3001
-        app.session_state.yt_linkedin = {"token": "test", "author": "urn:li:person:test", "expires": time.time() + 1000}
-        app.session_state.yt_publish_confirm = True
-        app.run()
-        self.assertTrue(element(app.button, "Publish to LinkedIn").disabled)
+    def test_long_content_can_publish_and_expired_token_still_blocks(self):
+        with patch.object(services, "post_to_linkedin", return_value=(True, {"id": "urn:li:share:long"})) as publish:
+            app = self.app()
+            app.session_state.yt_article = "x" * 5000
+            app.session_state.yt_linkedin = {"token": "test", "author": "urn:li:person:test", "expires": time.time() + 1000}
+            app.session_state.yt_publish_confirm = True
+            app.run()
+            self.assertFalse(element(app.button, "Publish to LinkedIn").disabled)
+            element(app.button, "Publish to LinkedIn").click().run()
+            publish.assert_called_once_with("x" * 5000, "test", "urn:li:person:test", image_payload=None, allow_image_fallback=False)
+
         app.session_state.yt_linkedin = {"token": "test", "author": "urn:li:person:test", "expires": 1}
         app.run()
         self.assertNotIn("yt_linkedin", app.session_state)

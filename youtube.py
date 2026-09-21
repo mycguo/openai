@@ -529,7 +529,8 @@ def main() -> None:
             _clear_state()
             st.rerun()
 
-    if fetch_clicked:
+    fetch_for_article = bool(st.session_state.pop("yt_fetch_then_generate_article", False))
+    if fetch_clicked or fetch_for_article:
         _clear_state()
         try:
             video_id = video_id_from_url(url)
@@ -661,6 +662,9 @@ def main() -> None:
                     st.error(f"Failed to generate transcript: {exc}")
                     return
 
+        if fetch_for_article and st.session_state.get("yt_transcript_text"):
+            st.session_state.yt_generate_article_after_fetch = True
+
     if st.session_state.get("yt_download_logs"):
         with st.expander("Download Logs", expanded=False):
             for entry in st.session_state["yt_download_logs"]:
@@ -684,13 +688,8 @@ def main() -> None:
                 )
             )
 
-        st.subheader("📝 Transcript")
-        st.caption(f"{len(st.session_state['yt_transcript_text']):,} characters • Full transcript, not truncated")
-        st.text_area(
-            "Transcript",
-            value=st.session_state["yt_transcript_text"],
-            height=400,
-            disabled=True,
+        st.caption(
+            f"Complete transcript ready • {len(st.session_state['yt_transcript_text']):,} characters"
         )
 
         dl_col1, dl_col2, dl_col3 = st.columns(3)
@@ -745,7 +744,11 @@ def main() -> None:
 
 
     from youtube_publishing import render_workflow
-    render_workflow()
+    render_workflow(
+        fetch_available=bool(url.strip()) and (
+            caption_mode or bool(ASSEMBLYAI_API_KEY and audio_consent)
+        ),
+    )
 
 
 if __name__ == "__main__":

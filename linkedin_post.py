@@ -305,26 +305,12 @@ def main():
     post_content = st.text_area(
         "Post Content",
         height=200,
-        max_chars=3000,
-        placeholder="What would you like to share on LinkedIn? You can write up to 3,000 characters.",
-        help="LinkedIn posts can be up to 3,000 characters long."
+        placeholder="What would you like to share on LinkedIn?",
     )
 
-    # Character counter
+    # Informational character counter; provider validation is handled on publish.
     char_count = len(post_content)
-    char_remaining = 3000 - char_count
-
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if char_remaining < 0:
-            st.error(f"❌ {abs(char_remaining)} characters over limit")
-        elif char_remaining < 100:
-            st.warning(f"⚠️ {char_remaining} characters remaining")
-        else:
-            st.info(f"ℹ️ {char_remaining} characters remaining")
-
-    with col2:
-        st.metric("Character Count", f"{char_count:,}/3,000")
+    st.caption(f"{char_count:,} characters")
 
     # Preview section
     if post_content:
@@ -342,7 +328,7 @@ def main():
             "📤 Post to LinkedIn",
             type="primary",
             width="stretch",
-            disabled=not post_content or char_remaining < 0
+            disabled=not post_content,
         ):
             if not post_content.strip():
                 st.error("Please enter some content to post")

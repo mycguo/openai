@@ -66,13 +66,16 @@ class CaptionTests(unittest.TestCase):
         self.assertFalse(app.button[0].disabled)
 
     @patch("youtube_captions.fetch_captions", return_value=sample_transcript())
-    def test_ui_full_transcript_srt_and_clear(self, fetch):
+    def test_ui_keeps_full_transcript_for_download_without_rendering_it(self, fetch):
         app = AppTest.from_file(APP).run()
         app.text_input[1].set_value(f"https://youtu.be/{VIDEO_ID}")
         app.button[0].click().run()
         self.assertFalse(app.exception)
-        self.assertIn("THE FINAL WORDS", app.text_area[0].value)
-        self.assertGreater(len(app.text_area[0].value), 40000)
+        self.assertFalse(any(area.label == "Transcript" for area in app.text_area))
+        self.assertIn("THE FINAL WORDS", app.session_state["yt_transcript_text"])
+        self.assertGreater(len(app.session_state["yt_transcript_text"]), 40000)
+        self.assertTrue(any(button.label == "💾 Download as Text" for button in app.get("download_button")))
+        self.assertTrue(any(button.label == "💾 Download as SRT" for button in app.get("download_button")))
         self.assertIn("00:01:00,000", app.session_state["yt_transcript_srt"])
         self.assertNotIn(",1000", app.session_state["yt_transcript_srt"])
         app.text_input[1].set_value("https://example.com").run()

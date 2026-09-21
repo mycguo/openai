@@ -10,8 +10,47 @@ import streamlit as st
 import ai_podcast as services
 
 
-DEFAULT_PROMPT = services.default_article_prompt("YouTube video")
-CONTENT_KEYS = ("yt_article", "yt_article_image", "yt_image_prompt", "yt_include_image", "yt_publish_confirm")
+DEFAULT_PROMPT = """You are a professional LinkedIn content writer.
+
+Analyze the following YouTube video transcript and create a compelling LinkedIn post.
+
+STRICT REQUIREMENTS:
+
+- content length should depends on the length of the video. For 10 minutes of video, let's create about 5000 characters
+- Do NOT include any preamble, explanation, or notes outside the post itself.
+- Output ONLY the LinkedIn post text, nothing else.
+- Do NOT use any markdown formatting (no **bold**, no *italics*, no headers, no bullet points with - or *)
+- LinkedIn does not render markdown, so use PLAIN TEXT only
+
+FORMATTING STYLE:
+
+- Use emojis + ALL CAPS for section headings, like:
+  🚀 THE BIG NEWS
+  🔹 KEY TAKEAWAY
+  💡 WHAT THIS MEANS
+  ⚡ WHY IT MATTERS
+- try to use creative and engaging headlines and subheadlines.
+- Add a blank line before and after each heading for visual separation
+- Use emojis at the start of key points (🔹, ▸, →)
+
+Instructions:
+
+1. Identify the most important topics discussed in the YouTube video
+2. Write in a professional but engaging tone suitable for LinkedIn
+3. Start with a compelling one-line hook
+4. Use line breaks for readability, make sure to have enough content to support each topic
+5. End with a question to drive engagement
+6. Use only facts supported by the transcript. Do not invent quotations or claims.
+"""
+CONTENT_KEYS = (
+    "yt_article",
+    "yt_article_image",
+    "yt_image_prompt",
+    "yt_include_image",
+    "yt_publish_confirm",
+    "yt_fetch_then_generate_article",
+    "yt_generate_article_after_fetch",
+)
 
 
 def clear_generated_content():
@@ -134,7 +173,7 @@ def post_fingerprint(article, image, author):
     return digest.hexdigest()
 
 
-def render_workflow():
+def render_workflow(fetch_available: bool = True):
     if st.query_params.get("code") or st.query_params.get("error"):
         st.info("LinkedIn has returned here. Copy this page's full address into the connection form in your original YouTube app tab. Do not share that address.")
 
@@ -147,7 +186,21 @@ def render_workflow():
     transcript = st.session_state.get("yt_transcript_text", "")
     if not services.ANTHROPIC_API_KEY:
         st.info("Set ANTHROPIC_API_KEY to enable article generation.")
-    if st.button("Generate Article", disabled=not transcript or not services.ANTHROPIC_API_KEY or not st.session_state.yt_article_prompt.strip()):
+    generate_clicked = st.button(
+        "Generate Article",
+        disabled=(
+            not services.ANTHROPIC_API_KEY
+            or not st.session_state.yt_article_prompt.strip()
+            or (not transcript and not fetch_available)
+        ),
+        help="If no transcript is loaded, the app fetches it first and then generates the article.",
+    )
+    if generate_clicked and not transcript:
+        st.session_state.yt_fetch_then_generate_article = True
+        st.rerun()
+
+    generate_after_fetch = bool(st.session_state.pop("yt_generate_article_after_fetch", False))
+    if generate_clicked or generate_after_fetch:
         try:
             with st.spinner("Generating article from the full transcript..."):
                 metadata = st.session_state.get("yt_transcript_metadata", {})
@@ -165,7 +218,7 @@ def render_workflow():
     if "yt_article" in st.session_state:
         st.text_area("Edit Article", key="yt_article", height=350, on_change=article_changed)
         article = st.session_state.yt_article.strip()
-        st.caption(f"{len(article):,}/3,000 characters")
+        st.caption(f"{len(article):,} characters")
         st.download_button("Download article", article, file_name="youtube-linkedin-post.txt", mime="text/plain")
     else:
         article = ""
@@ -195,12 +248,10 @@ def render_workflow():
     include_image = st.checkbox("Include generated image", value=True, key="yt_include_image", on_change=lambda: st.session_state.pop("yt_publish_confirm", None)) if image else False
     selected_image = image if include_image else None
     confirmed = st.checkbox("I reviewed this draft and want to publish it publicly to the connected LinkedIn account.", key="yt_publish_confirm")
-    if len(article) > 3000:
-        st.warning("Shorten the article to 3,000 characters or fewer before publishing.")
     attempts = st.session_state.setdefault("yt_publish_attempts", {})
     fingerprint = post_fingerprint(article, selected_image, account["author"]) if account else ""
     prior = attempts.get(fingerprint)
-    if st.button("Publish to LinkedIn", type="primary", disabled=not account or not confirmed or not article or len(article) > 3000 or bool(prior)):
+    if st.button("Publish to LinkedIn", type="primary", disabled=not account or not confirmed or not article or bool(prior)):
         # Mark before sending: reruns must never automatically repeat a create request.
         attempts[fingerprint] = {"status": "uncertain"}
         try:

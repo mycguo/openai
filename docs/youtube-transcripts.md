@@ -20,8 +20,9 @@ On this Mac the tested interpreter is `.venv/bin/python3.14`.
 2. Enter preferred caption language codes, such as `en` or `es,en`.
 3. Click Fetch Transcript. The app fetches available captions using
    `youtube-transcript-api==1.2.4`, preferring manually created tracks when available.
-4. Read the complete text, including the end of long videos. Download TXT or SRT;
-   SRT keeps the caption timestamps. Source and language appear above the text.
+4. The complete text remains in the session without being rendered on screen.
+   Download it as TXT or SRT; SRT keeps the caption timestamps. Source and
+   language appear above the download controls.
 
 This retrieves captions, not newly recognized speech. Auto-generated captions may
 contain errors. Missing captions, unavailable languages, restricted videos, and
@@ -47,7 +48,9 @@ this change does not alter that feature's transcript-excerpt behavior.
 and imports the existing article, image, and publishing services from `ai_podcast.py`.
 Importing the podcast module does not configure another page or initialize its database.
 
-1. Retrieve a transcript.
+1. Paste a YouTube URL. You can retrieve the transcript separately, or click
+   **Generate Article** immediately; when no transcript is loaded, the app fetches
+   it first and continues directly into article generation.
 2. Edit **Article generation prompt**, or keep the default. **Reset article prompt**
    restores the default. The full transcript is automatically appended to the
    instructions. Prompts are session-local, not saved to disk.
@@ -58,7 +61,7 @@ Importing the podcast module does not configure another page or initialize its d
    `GOOGLE_IMAGE_MODEL`) and Claude theme extraction. The edited article is used.
 5. Connect LinkedIn, select whether to include the image, confirm public publishing,
    and click **Publish to LinkedIn**. This creates a feed post, not a LinkedIn
-   long-form article/newsletter. Posts exceeding 3,000 characters are blocked.
+   long-form article/newsletter. Provider validation errors are shown to the user.
 
 Changing the transcript clears article/image outputs; editing the article clears
 the image and publishing confirmation. Caption retrieval never generates content

@@ -1894,10 +1894,12 @@ def main():
             include_image_all = st.checkbox("Generate and include image", value=True, key="doall_include_image")
         else:
             st.caption("Set GOOGLE_API_KEY to enable image generation.")
+        run_prepare_all = st.button("Prepare All")
         run_do_all = st.button("Do All", type="primary")
 
-        if run_do_all:
-            if not token_active:
+        if run_prepare_all or run_do_all:
+            should_publish = run_do_all
+            if should_publish and not token_active:
                 st.error("Connect LinkedIn first to publish.")
             else:
                 temp_audio_dir = None
@@ -1984,39 +1986,44 @@ def main():
                             st.session_state.article_image = img_payload
                             st.session_state.article_image_prompt = prompt_used
                         else:
-                            st.warning(error or "Image generation failed; publishing without image.")
+                            continuation = "publishing" if should_publish else "preparation"
+                            st.warning(error or f"Image generation failed; continuing with {continuation} without an image.")
 
-                    with st.spinner("Publishing to LinkedIn..."):
-                        success, result = post_to_linkedin(
-                            article,
-                            st.session_state.linkedin_token,
-                            st.session_state.author_id,
-                            image_payload=image_payload,
-                        )
-                    if success:
-                        st.success("Published to LinkedIn!")
-                        post_id = ""
-                        if isinstance(result, dict):
-                            warning = result.get("warning")
-                            if warning:
-                                st.warning(warning)
-                            debug_info = result.get("debug")
-                            if debug_info:
-                                st.session_state.last_linkedin_post_debug = debug_info
-                                render_linkedin_post_debug(debug_info, key_prefix="do_all_publish")
-                            post_id = result.get("id") or result.get("post_id") or ""
-                        if post_id:
-                            st.session_state.last_linkedin_post_urn = post_id
-                            st.info(f"Post URN: `{post_id}`")
-                            post_url = build_linkedin_post_url(post_id)
-                            if post_url:
-                                st.session_state.last_linkedin_post_url = post_url
-                                st.text_input("Post URL (copy)", value=post_url)
-                        st.balloons()
+                    if should_publish:
+                        with st.spinner("Publishing to LinkedIn..."):
+                            success, result = post_to_linkedin(
+                                article,
+                                st.session_state.linkedin_token,
+                                st.session_state.author_id,
+                                image_payload=image_payload,
+                            )
+                        if success:
+                            st.success("Published to LinkedIn!")
+                            post_id = ""
+                            if isinstance(result, dict):
+                                warning = result.get("warning")
+                                if warning:
+                                    st.warning(warning)
+                                debug_info = result.get("debug")
+                                if debug_info:
+                                    st.session_state.last_linkedin_post_debug = debug_info
+                                    render_linkedin_post_debug(debug_info, key_prefix="do_all_publish")
+                                post_id = result.get("id") or result.get("post_id") or ""
+                            if post_id:
+                                st.session_state.last_linkedin_post_urn = post_id
+                                st.info(f"Post URN: `{post_id}`")
+                                post_url = build_linkedin_post_url(post_id)
+                                if post_url:
+                                    st.session_state.last_linkedin_post_url = post_url
+                                    st.text_input("Post URL (copy)", value=post_url)
+                            st.balloons()
+                        else:
+                            st.error(f"Failed to publish: {result}")
                     else:
-                        st.error(f"Failed to publish: {result}")
+                        st.success("Preparation complete! Review the article and image below before publishing.")
                 except Exception as e:
-                    st.error(f"Do All failed: {e}")
+                    action_name = "Do All" if should_publish else "Prepare All"
+                    st.error(f"{action_name} failed: {e}")
                 finally:
                     if temp_audio_dir:
                         import shutil

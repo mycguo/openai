@@ -957,17 +957,15 @@ FORMATTING STYLE:
 - try to use creative and engaging headlines and subheadlines.
 - Add a blank line before and after each heading for visual separation
 - Use emojis at the start of key points (🔹, ▸, →)
-- Keep paragraphs short (2-3 sentences max)
 
 Instructions:
-1. Identify the top 3-4 most important topics discussed in the {source_kind}
-2. For each story, write 1-2 sentences max
-3. Write in a professional but engaging tone suitable for LinkedIn
-4. Start with a compelling one-line hook
-5. Use short paragraphs and line breaks for readability
-6. End with a question to drive engagement
-7. Keep it concise — quality over quantity
-8. Use only facts supported by the transcript. Do not invent quotations or claims.
+1. Identify the top 3-4 most important topics discussed in the {source_kind} for shorter podcast, and 6 to 8 topic to longer ones if appropriate
+2. Write in a professional but engaging tone suitable for LinkedIn
+3. Start with a compelling one-line hook
+4. Use short paragraphs and line breaks for readability
+5. End with a question to drive engagement
+6. Keep it concise — quality over quantity
+7. Use only facts supported by the transcript. Do not invent quotations or claims.
 """
 
 

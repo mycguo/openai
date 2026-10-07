@@ -253,6 +253,10 @@ PODCAST_SOURCES = {
         "episodes_url": "https://www.podchaser.com/podcasts/latent-space-the-ai-engineer-p-5164925/episodes/recent",
         "rss_url": "https://rss.flightcast.com/vgnxzgiwwzwke85ym53fjnzu.xml",
     },
+    "AI Engineering PodCast": {
+        "episodes_url": "https://www.podchaser.com/podcasts/ai-engineering-podcast-4792528/episodes/recent",
+        "rss_url": "https://serve.podhome.fm/rss/c9abdd38-a5dc-5eb2-96fd-f833f93208a7",
+    },
     "Lenny's podcast": {
         "episodes_url": "https://www.podchaser.com/podcasts/lennys-podcast-product-career-4750705/episodes/recent",
         "rss_url": "https://api.substack.com/feed/podcast/10845.rss",

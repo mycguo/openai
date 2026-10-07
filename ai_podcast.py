@@ -237,9 +237,9 @@ TRANSCRIPT_ENDPOINT = "https://api.assemblyai.com/v2/transcript"
 CHUNK_SIZE = 5_242_880  # 5 MB
 
 PODCAST_SOURCES = {
-    "The AI Daily Brief": {
-        "episodes_url": "https://www.podchaser.com/podcasts/the-ai-daily-brief-artificial-5260567/episodes/recent",
-        "rss_url": "https://anchor.fm/s/f7cac464/podcast/rss",
+    "The AI Breakdown": {
+        "episodes_url": "https://www.podchaser.com/podcasts/the-ai-breakdown-6160853/episodes/recent",
+        "rss_url": "https://feed.podbean.com/theaibreakdown/feed.xml",
     },
     "Y Combinator Startup Podcast": {
         "episodes_url": "https://www.podchaser.com/podcasts/y-combinator-startup-podcast-526094/episodes/recent",

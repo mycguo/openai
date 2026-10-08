@@ -1,0 +1,94 @@
+name: native-media-rag
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile.media-rag
+  image: native-media-rag-app:local
+  environment: &app-environment
+    MEDIA_RAG_DATABASE_URL: postgresql://media_rag@postgres:5432/media_rag
+    MEDIA_RAG_DATABASE_PASSWORD_FILE: /run/secrets/postgres_password
+    MEDIA_RAG_MINIO_ENDPOINT: minio:9000
+    MEDIA_RAG_MINIO_PUBLIC_ENDPOINT: 127.0.0.1:9010
+    MEDIA_RAG_MINIO_ACCESS_KEY_FILE: /run/secrets/minio_access_key
+    MEDIA_RAG_MINIO_SECRET_KEY_FILE: /run/secrets/minio_secret_key
+    MEDIA_RAG_MINIO_BUCKET: ${MEDIA_RAG_MINIO_BUCKET:-media-rag}
+    TWELVELABS_API_KEY_FILE: /run/secrets/twelvelabs_api_key
+    MEDIA_RAG_GEMINI_MODEL: ${MEDIA_RAG_GEMINI_MODEL:-gemini-3.8-flash}
+  # Compose materializes environment-backed secret files during startup; this
+  # requires a writable container root. The app still runs without root/capabilities.
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 128
+  mem_limit: 2g
+  cpus: 2
+  tmpfs:
+    - /tmp:size=1073741824,mode=1777,nosuid,nodev,noexec
+  depends_on:
+    postgres:
+      condition: service_healthy
+    minio:
+      condition: service_started
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.7-pg17
+    environment:
+      POSTGRES_DB: media_rag
+      POSTGRES_USER: media_rag
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets: [postgres_password]
+    ports:
+      - "127.0.0.1:5544:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U media_rag -d media_rag"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    # Pinned MinIO distribution; no mutable :latest image or anonymous bucket policy.
+    image: cgr.dev/chainguard/minio@sha256:0476769da6d4a45d5b9d4d25bef0d2a5358a34d88ea4aa6bd0c42d657011a681
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER_FILE: /run/secrets/minio_access_key
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_secret_key
+    secrets: [minio_access_key, minio_secret_key]
+    ports:
+      - "127.0.0.1:9010:9000"
+      - "127.0.0.1:9011:9001"
+    volumes:
+      - minio_data:/data
+
+  app:
+    <<: *app
+    environment:
+      <<: *app-environment
+      GEMINI_API_KEY_FILE: /run/secrets/gemini_api_key
+    secrets: [postgres_password, minio_access_key, minio_secret_key, twelvelabs_api_key, gemini_api_key]
+    ports:
+      - "127.0.0.1:8503:8503"
+
+  worker:
+    <<: *app
+    secrets: [postgres_password, minio_access_key, minio_secret_key, twelvelabs_api_key]
+    command: ["python", "-m", "media_rag.worker"]
+    restart: "on-failure:3"
+
+secrets:
+  postgres_password:
+    environment: MEDIA_RAG_POSTGRES_PASSWORD
+  minio_access_key:
+    environment: MEDIA_RAG_MINIO_ACCESS_KEY
+  minio_secret_key:
+    environment: MEDIA_RAG_MINIO_SECRET_KEY
+  twelvelabs_api_key:
+    environment: TWELVELABS_API_KEY
+  gemini_api_key:
+    environment: GEMINI_API_KEY
+
+volumes:
+  postgres_data:
+  minio_data:

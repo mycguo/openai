@@ -1,0 +1,7 @@
+**
+!requirements-media-rag.txt
+!media_rag_app.py
+!media_rag/
+!media_rag/**
+**/__pycache__
+**/*.pyc

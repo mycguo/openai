@@ -133,7 +133,7 @@ class NativeMediaSecurityTests(unittest.TestCase):
 class ComposeSecurityTests(unittest.TestCase):
     def test_container_environment_has_no_secret_values_and_worker_has_no_gemini_key(self):
         result = subprocess.run(["docker", "compose", "--env-file", ".env.media-rag", "-f",
-                                 "compose.media-rag.yaml", "config", "--format", "json"],
+                                 "compose.media-rag.yaml", "--profile", "worker", "config", "--format", "json"],
                                 cwd=ROOT, check=True, capture_output=True, text=True, timeout=30)
         config = json.loads(result.stdout)
         for name, service in config["services"].items():

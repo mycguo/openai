@@ -1,8 +1,8 @@
 # Native media RAG on Streamlit Community Cloud
 
 Community Cloud hosts the Streamlit UI. Neon hosts PostgreSQL and the private
-`rag` bucket. A separate Python worker indexes uploaded recordings; deploying
-the UI does not start that worker.
+`rag` bucket. Recordings are indexed directly in the Streamlit app; no separate
+worker service is required.
 
 ## Deployment files
 
@@ -103,23 +103,30 @@ the trusted user. Apps deployed from a public repository are public by default.
 This application currently shares one library and has no per-user authorization.
 See [Community Cloud sharing](https://docs.streamlit.io/deploy/streamlit-community-cloud/share-your-app).
 
-## Run the indexing worker
+## Index recordings in the app
 
-Run the worker on a separate host with Python, the RAG dependencies, and FFmpeg
-installed. Give it the same Neon database and storage settings plus
-`MEDIA_RAG_STORAGE_PROVIDER=neon` and `TWELVELABS_API_KEY` through that host's
-environment or secrets facility. The worker does not need the Gemini key and
-does not read Community Cloud's Streamlit secrets.
+1. Open **Add media**, choose a recording, and click **Upload & index**.
+2. Keep the page open while the app uploads to TwelveLabs and creates native
+   embeddings. The status panel shows the current step. Once finished, the
+   library refreshes and the recording is ready to search.
+3. For previously queued recordings, click **Index recording** in **Library**.
+   For a failed recording, **Retry indexing** runs the retry immediately in the
+   app, reusing saved provider IDs when possible.
+4. If the app restarts or indexing is interrupted, refresh **Library** and use
+   **Resume indexing**. You may need to wait up to five minutes for the previous
+   processing lease to expire. A timeout preserves the task ID; an explicitly
+   failed or expired provider task is recreated on retry.
 
-```bash
-python -m media_rag.worker
-```
+Indexing runs in the Streamlit session and can take several minutes. It is not
+an always-on background service: app restarts or session reruns can interrupt
+it. PostgreSQL retains progress and prevents another session from claiming the
+same recording while the lease is active. Regular page refreshes do not
+automatically start paid indexing calls.
 
-You can use the local worker with the Neon settings for an initial test. See
-[the Neon guide](media-rag-neon.md) for that command. Upload a small recording,
-wait for it to become **Ready**, then test search, a cited Gemini answer, and
-clip playback. Without a worker, uploads remain queued. Existing local MinIO
-recordings and database rows are not copied to Neon automatically.
+After indexing a small recording, test search, a cited Gemini answer, and clip
+playback. Existing local MinIO recordings and database rows are not copied to
+Neon automatically. The optional command-line worker remains available for
+unattended indexing; see [the local guide](media-rag.md).
 
 ## References
 

@@ -1,13 +1,14 @@
 """Streamlit UI regressions with local services and providers substituted."""
 
 from pathlib import Path
+import io
 import unittest
 from unittest.mock import Mock, patch
 
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
-from media_rag.config import Settings
+from media_rag.config import RagError, Settings
 from media_rag.models import Evidence, Hit
 
 
@@ -112,7 +113,87 @@ class AppTests(unittest.TestCase):
         app, library = self.run_with_library(assets=[failed])
         find(app.button, "Retry indexing").click().run()
         self.assertFalse(app.exception)
-        library.database.retry.assert_called_once_with("asset")
+        library.index_recording.assert_called_once()
+        self.assertEqual(library.index_recording.call_args.args, ("asset",))
+        self.assertTrue(library.index_recording.call_args.kwargs["retry"])
+
+    def test_queued_recording_indexes_in_streamlit_and_reruns_do_not_repeat_it(self):
+        queued = {**ASSET, "status": "queued", "stage": "Waiting for the indexing worker"}
+        app, library = self.run_with_library(assets=[queued])
+        self.assertTrue(any(item.value == "Ready to index" for item in app.caption))
+        library.index_recording.side_effect = lambda *args, **kwargs: setattr(
+            library.database.list_assets, "return_value", [ASSET])
+        find(app.button, "Index recording").click().run()
+        self.assertFalse(app.exception)
+        library.index_recording.assert_called_once()
+        self.assertEqual(library.index_recording.call_args.args, ("asset",))
+        self.assertFalse(library.index_recording.call_args.kwargs["retry"])
+        self.assertTrue(any("ready to search" in item.value for item in app.success))
+        find(app.button, "Refresh library").click().run()
+        library.index_recording.assert_called_once()
+
+    def test_interrupted_recording_can_be_resumed(self):
+        interrupted = {**ASSET, "status": "indexing", "stage": "Creating native embeddings"}
+        app, library = self.run_with_library(assets=[interrupted])
+        find(app.button, "Resume indexing").click().run()
+        self.assertFalse(app.exception)
+        library.index_recording.assert_called_once()
+        self.assertFalse(library.index_recording.call_args.kwargs["retry"])
+
+    def test_indexing_failure_stays_visible_without_automatic_retry_on_rerun(self):
+        queued = {**ASSET, "status": "queued"}
+        app, library = self.run_with_library(assets=[queued])
+
+        def fail(*args, **kwargs):
+            library.database.list_assets.return_value = [{**ASSET, "status": "failed", "error": "Provider timeout"}]
+            raise RagError("TwelveLabs returned HTTP 429. Wait, then retry.")
+
+        library.index_recording.side_effect = fail
+        find(app.button, "Index recording").click().run()
+        self.assertFalse(app.exception)
+        self.assertTrue(any("HTTP 429" in item.value for item in app.error))
+        self.assertTrue(any(item.state == "error" for item in app.status))
+        self.assertTrue(find(app.button, "Retry indexing"))
+        app.run()
+        library.index_recording.assert_called_once()
+
+    def test_missing_twelvelabs_key_disables_upload_index_and_retry(self):
+        settings = Settings(database_url="postgresql://test", minio_access_key="test", minio_secret_key="test")
+        queued = {**ASSET, "id": "queued", "status": "queued"}
+        failed = {**ASSET, "id": "failed", "status": "failed", "error": "Provider timeout"}
+        app, library = self.run_with_library(assets=[queued, failed], settings=settings)
+        for label in ["Upload & index", "Index recording", "Retry indexing"]:
+            self.assertTrue(find(app.button, label).disabled)
+        library.index_recording.assert_not_called()
+
+    def test_new_upload_is_indexed_immediately_and_becomes_searchable(self):
+        uploaded = io.BytesIO(b"recording")
+        uploaded.name = "recording.mp3"
+        self.enterContext(patch("streamlit.file_uploader", return_value=uploaded))
+        app, library = self.run_with_library(assets=[])
+        library.add_upload.return_value = ({**ASSET, "status": "queued"}, True)
+        library.index_recording.side_effect = lambda *args, **kwargs: setattr(
+            library.database.list_assets, "return_value", [ASSET])
+        find(app.text_input, "Recording title").set_value("New episode")
+        find(app.button, "Upload & index").click().run()
+        self.assertFalse(app.exception)
+        library.add_upload.assert_called_once_with(uploaded, "New episode")
+        library.index_recording.assert_called_once()
+        self.assertFalse(find(app.button, "Search only").disabled)
+        app.run()
+        library.add_upload.assert_called_once()
+        library.index_recording.assert_called_once()
+
+    def test_upload_of_ready_duplicate_does_not_index_again(self):
+        uploaded = io.BytesIO(b"recording")
+        uploaded.name = "recording.mp3"
+        self.enterContext(patch("streamlit.file_uploader", return_value=uploaded))
+        app, library = self.run_with_library()
+        library.add_upload.return_value = (ASSET, False)
+        find(app.button, "Upload & index").click().run()
+        self.assertFalse(app.exception)
+        library.index_recording.assert_not_called()
+        self.assertTrue(any("already in the library" in item.value for item in app.info))
 
 
 if __name__ == "__main__":

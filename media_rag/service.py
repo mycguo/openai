@@ -8,7 +8,7 @@ import uuid
 from .config import MAX_UPLOAD_BYTES, RagError
 from .database import Database
 from .gemini import Gemini
-from .marengo import Marengo, parse_segments
+from .marengo import Marengo, MarengoError, parse_segments
 from .media import MIME_TYPES, SUPPORTED_EXTENSIONS, extract_clip, probe
 from .models import Evidence, merge_hits
 from .storage import create_storage
@@ -65,6 +65,28 @@ class MediaLibrary:
                 return asset, False
             return asset, True
 
+    def index_recording(self, asset_id, on_progress=None, retry=False):
+        """Index one selected recording in the caller's process with a durable lease."""
+        # Validate the provider key before changing a failed recording's status.
+        marengo = Marengo(self.settings)
+        asset_id = str(asset_id)
+        if retry and not self.database.retry(asset_id):
+            raise RagError("The recording's status changed. Refresh the library and try again.")
+        asset = self.database.claim(asset_id=asset_id)
+        if asset is None:
+            raise RagError("This recording is already ready or being indexed in another session. "
+                           "Refresh the library. If processing was interrupted, wait five minutes "
+                           "and try Resume indexing.")
+        try:
+            index_asset(self, asset, marengo, on_progress=on_progress)
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, RagError) else \
+                      "Indexing failed. Check storage and provider connectivity, then retry."
+            self.database.fail(asset, message,
+                               reset_asset=isinstance(exc, MarengoError) and exc.reset_asset,
+                               reset_task=isinstance(exc, MarengoError) and exc.reset_task)
+            raise RagError(message) from exc
+
     def retrieve(self, question, asset_ids=None, modality=None, top_k=5, min_score=0.15):
         question = question.strip()
         if not question or len(question) > 2000:
@@ -100,22 +122,28 @@ class MediaLibrary:
             return gemini.answer(question, evidence, paths), evidence
 
 
-def index_asset(library, asset, marengo):
+def index_asset(library, asset, marengo, on_progress=None):
     """Resume saved provider IDs; publish all embeddings in one transaction."""
     database = library.database
+
+    def progress(stage, **saved_ids):
+        database.progress(asset, stage, **saved_ids)
+        if on_progress is not None:
+            on_progress(stage)
+
     remote_id, task_id = asset.get("remote_asset_id"), asset.get("task_id")
     if not task_id:
         if not remote_id:
-            database.progress(asset, "Uploading to TwelveLabs")
+            progress("Uploading to TwelveLabs")
             with tempfile.TemporaryDirectory(prefix="media-rag-index-") as directory:
                 path = Path(directory) / ("source" + Path(asset["object_key"]).suffix)
                 library.storage.download(asset["object_key"], path)
-                database.progress(asset, "Uploading to TwelveLabs")
+                progress("Uploading to TwelveLabs")
                 remote_id = marengo.upload(path, asset["mime_type"])
-            database.progress(asset, "Preparing media", remote_asset_id=remote_id)
-        marengo.wait_asset(remote_id, lambda: database.progress(asset, "Preparing media"))
+            progress("Preparing media", remote_asset_id=remote_id)
+        marengo.wait_asset(remote_id, lambda: progress("Preparing media"))
         task_id = marengo.create_task(remote_id, asset["kind"], asset["has_audio"])
-        database.progress(asset, "Creating native embeddings", task_id=task_id)
-    payload = marengo.wait_task(task_id, lambda: database.progress(asset, "Creating native embeddings"))
+        progress("Creating native embeddings", task_id=task_id)
+    payload = marengo.wait_task(task_id, lambda: progress("Creating native embeddings"))
     segments = parse_segments(payload, asset["duration"], asset["kind"], asset["has_audio"])
     database.complete(asset, segments)

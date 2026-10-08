@@ -19,8 +19,10 @@ def get_library(settings):
 
 
 def show_error(exc):
-    st.error(str(exc) if isinstance(exc, RagError) else
-             "The media library could not complete this request. Check the local services and try again.")
+    message = str(exc) if isinstance(exc, RagError) else \
+              "The media library could not complete this request. Check the connections and try again."
+    st.error(message)
+    return message
 
 
 def render_answer(answer, evidence, library):
@@ -55,10 +57,29 @@ def generate_answer(library, search):
     st.session_state.media_rag_answer = {"answer": answer, "evidence": evidence}
 
 
+def index_in_streamlit(library, asset_id, retry=False):
+    with st.status("Indexing recording…", expanded=True) as status:
+        st.write("Keep this page open while indexing. You can resume interrupted processing from the Library tab.")
+        try:
+            library.index_recording(asset_id, on_progress=lambda stage: status.update(label=stage), retry=retry)
+        except Exception as exc:
+            status.update(label="Indexing did not finish", state="error")
+            st.session_state.media_rag_index_error = show_error(exc)
+            return False
+        status.update(label="Ready to search", state="complete", expanded=False)
+    st.session_state.media_rag_notice = "Your recording is ready to search."
+    return True
+
+
 def main():
     st.set_page_config(page_title="Media Library · Native RAG", page_icon="🎞️", layout="wide")
     st.title("Ask your audio and video")
     st.caption("Find the right moment. Get an answer grounded in the original recording.")
+    if notice := st.session_state.pop("media_rag_notice", None):
+        st.success(notice)
+    if error := st.session_state.pop("media_rag_index_error", None):
+        with st.status("Indexing did not finish", state="error", expanded=True):
+            st.error(error)
     try:
         overrides = dict(st.secrets.get("media_rag", {}))
     except st.errors.StreamlitSecretNotFoundError:
@@ -79,7 +100,7 @@ def main():
             st.write("Gemini key: " + ("Configured" if settings.gemini_api_key else "Missing"))
             st.caption("Use MEDIA_RAG_ENV_FILE or the [media_rag] section of Streamlit secrets.")
             if settings.storage_provider == "neon":
-                st.caption("Neon setup and worker commands: docs/media-rag-neon.md")
+                st.caption("Neon setup and indexing: docs/media-rag-neon.md")
             else:
                 st.code("python scripts/init_media_rag.py\n"
                         "docker compose --env-file .env.media-rag -f compose.media-rag.yaml up -d --build", language="bash")
@@ -116,8 +137,7 @@ def main():
     ask_tab, upload_tab, library_tab = st.tabs(["Ask library", "Add media", "Library"])
     with ask_tab:
         if not ready:
-            st.info("Add an audio or video file, then let the indexing worker finish. "
-                    "Refresh the library when it is ready.")
+            st.info("Upload an audio or video file to index it here, or index a saved recording from the Library tab.")
         if not settings.twelvelabs_api_key:
             st.info("Add TWELVELABS_API_KEY to enable native media search.")
         if not settings.gemini_api_key:
@@ -184,13 +204,16 @@ def main():
 
     with upload_tab:
         st.subheader("Add a recording")
-        st.write("Upload audio or video. The worker indexes its sound and visual content directly.")
+        st.write("Upload audio or video and index its sound and visual content directly in this app.")
         st.caption("MP3, WAV, MP4, MOV, or WebM · up to 200 MB per file. "
-                   "Indexing sends the recording to TwelveLabs.")
+                   "Indexing sends the recording to TwelveLabs. Keep this page open until it finishes.")
+        if not settings.twelvelabs_api_key:
+            st.info("Add TWELVELABS_API_KEY to upload and index recordings.")
         with st.form("media_rag_upload", clear_on_submit=True):
             uploaded = st.file_uploader("Recording", type=["mp3", "wav", "mp4", "mov", "webm"])
             title = st.text_input("Recording title", max_chars=200, placeholder="Episode or presentation title")
-            submitted = st.form_submit_button("Add to library", type="primary")
+            submitted = st.form_submit_button("Upload & index", type="primary",
+                                              disabled=not settings.twelvelabs_api_key)
         if submitted:
             try:
                 if uploaded is None:
@@ -198,9 +221,12 @@ def main():
                 with st.spinner("Saving your recording…"):
                     asset, created = library.add_upload(uploaded, title or Path(uploaded.name).stem)
                 if created:
-                    st.success(f"Added {plain_markdown(asset['title'])}. The indexing worker will pick it up shortly.")
+                    st.success(f"Saved {plain_markdown(asset['title'])}.")
                 else:
                     st.info(f"This file is already in the library as {plain_markdown(asset['title'])} ({asset['status']}).")
+                if asset["status"] != "ready":
+                    index_in_streamlit(library, asset["id"], retry=asset["status"] == "failed")
+                    st.rerun()
             except Exception as exc:
                 show_error(exc)
 
@@ -212,19 +238,24 @@ def main():
             with st.container(border=True):
                 columns = st.columns([4, 1, 1])
                 columns[0].markdown(f"**{plain_markdown(asset['title'])}**")
-                columns[0].caption(asset["stage"])
+                columns[0].caption("Ready to index" if asset["status"] == "queued" else asset["stage"])
                 columns[1].write(asset["status"].capitalize())
                 columns[2].write(timestamp(asset["duration"]))
                 if asset["status"] == "ready":
                     st.caption(f"{asset['kind'].capitalize()} · {asset['embedding_count']} indexed embeddings")
+                if asset["status"] in {"queued", "indexing"}:
+                    label = "Index recording" if asset["status"] == "queued" else "Resume indexing"
+                    if asset["status"] == "indexing":
+                        st.caption("If processing was interrupted, wait up to five minutes, then resume.")
+                    if st.button(label, key=f"index_{asset['id']}", disabled=not settings.twelvelabs_api_key):
+                        index_in_streamlit(library, asset["id"])
+                        st.rerun()
                 if asset["status"] == "failed":
                     st.error(asset["error"] or "Indexing failed.")
-                    if st.button("Retry indexing", key=f"retry_{asset['id']}"):
-                        try:
-                            library.database.retry(asset["id"])
-                            st.rerun()
-                        except Exception as exc:
-                            show_error(exc)
+                    if st.button("Retry indexing", key=f"retry_{asset['id']}",
+                                 disabled=not settings.twelvelabs_api_key):
+                        index_in_streamlit(library, asset["id"], retry=True)
+                        st.rerun()
 
 
 if __name__ == "__main__":

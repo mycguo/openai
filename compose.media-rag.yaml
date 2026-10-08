@@ -73,6 +73,7 @@ services:
 
   worker:
     <<: *app
+    profiles: [worker]
     secrets: [postgres_password, minio_access_key, minio_secret_key, twelvelabs_api_key]
     command: ["python", "-m", "media_rag.worker"]
     restart: "on-failure:3"

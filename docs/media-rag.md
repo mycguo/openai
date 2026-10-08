@@ -18,8 +18,8 @@ The initializer generates random local infrastructure passwords and never
 overwrites an existing file. Do not commit this file or publish the output of
 `docker compose config --environment`. Compose reads its secrets from this file
 and mounts only the secrets each service needs under `/run/secrets`; credential
-values are not passed in container environment variables. The worker has no
-Gemini secret. Restart/recreate the services after changing keys.
+values are not passed in container environment variables. The optional worker has
+no Gemini secret. Restart/recreate the services after changing keys.
 `MEDIA_RAG_GEMINI_MODEL`
 defaults to `gemini-3.8-flash`; select a Gemini model supporting audio, video,
 and structured JSON responses if your account uses a different model.
@@ -34,21 +34,22 @@ your local configuration. PostgreSQL is on `127.0.0.1:5544` and the MinIO API is
 on `127.0.0.1:9010`. These ports are bound to loopback. The Compose project has
 its own network and named volumes, independent of the other applications.
 
-Upload MP3, WAV, MP4, MOV, or WebM media (up to 200 MB), give it a title, and add
-it to the library. The worker indexes queued files. Refresh the library to see
-their status. Search the ready recordings, inspect the retrieved moments, and
+Upload MP3, WAV, MP4, MOV, or WebM media (up to 200 MB), give it a title, and
+click **Upload & index**. The app indexes the recording and displays progress;
+keep the page open until it finishes. Existing queued recordings can be indexed
+from **Library**. Search the ready recordings, inspect the retrieved moments, and
 choose **Ask & cite** or **Answer this search with Gemini** for a grounded answer.
 **Search only** uses Marengo without calling Gemini.
 
 ```bash
-docker compose --env-file .env.media-rag -f compose.media-rag.yaml logs --tail 50 worker
+docker compose --env-file .env.media-rag -f compose.media-rag.yaml logs --tail 50 app
 docker compose --env-file .env.media-rag -f compose.media-rag.yaml down
 ```
 
 Stopping the stack preserves its volumes. Avoid `down -v` unless you intend to
 delete the local media and database.
 
-## Run the app and worker on the host
+## Run the app on the host
 
 Python 3.10+ and FFmpeg (including `ffprobe`) are required. Use a virtual environment:
 
@@ -57,33 +58,43 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-media-rag.txt
 python3 scripts/init_media_rag.py
 docker compose --env-file .env.media-rag -f compose.media-rag.yaml up -d postgres minio
-.venv/bin/python -m media_rag.worker
-```
-
-In another terminal:
-
-```bash
 .venv/bin/streamlit run media_rag_app.py --server.address 127.0.0.1 --server.port 8503 --server.maxUploadSize 200 --server.enableCORS true --server.enableXsrfProtection true --server.allowedHosts localhost --server.allowedHosts 127.0.0.1
 ```
 
-Both processes read `.env.media-rag`. Environment variables override this file.
+The app reads `.env.media-rag`. Environment variables override this file.
 The host app can alternatively read the same variable names from a `[media_rag]`
-table in `.streamlit/secrets.toml`; the separate worker still needs environment
-variables or `.env.media-rag`. Credentials are never entered into database rows
+table in `.streamlit/secrets.toml`. Credentials are never entered into database rows
 or shown in the app. Other applications' database settings are not reused.
 Individual credentials can also use their corresponding `*_FILE` settings.
 Unreadable infrastructure secret files stop startup. Missing optional provider
 files disable that provider and do not inherit another key. An explicitly
 configured Gemini file never falls back to a generic `GOOGLE_API_KEY`.
 
+## Optional unattended worker
+
+The app indexes recordings directly; a separate worker is optional. For
+unattended processing of queued recordings, start the Compose worker explicitly:
+
+```bash
+docker compose --env-file .env.media-rag -f compose.media-rag.yaml --profile worker up -d worker
+```
+
+Alternatively, run `.venv/bin/python -m media_rag.worker` on the host. For Neon,
+prefix that command with `MEDIA_RAG_ENV_FILE=.env.neon MEDIA_RAG_STORAGE_PROVIDER=neon`.
+The worker needs environment settings or its dotenv file; it does not read
+Streamlit secrets. Existing worker containers can be stopped with
+`docker compose --env-file .env.media-rag -f compose.media-rag.yaml --profile worker stop worker`
+when switching to indexing only in the app.
+
 ## Data flow and recovery
 
 1. FFprobe checks the file contents and duration. The app streams it to a
    temporary file, computes its SHA-256, and saves the original in MinIO.
    Duplicate content reuses the existing library entry.
-2. PostgreSQL stores the queued job. A worker claims it with `FOR UPDATE SKIP
-   LOCKED` and a five-minute renewable lease. Abandoned jobs can be reclaimed.
-3. The worker uploads the file directly to TwelveLabs; a localhost MinIO URL
+2. PostgreSQL stores the queued job. The app claims the selected recording with
+   `FOR UPDATE SKIP LOCKED` and a five-minute renewable lease. Abandoned jobs can
+   be reclaimed.
+3. The app uploads the file directly to TwelveLabs; a localhost MinIO URL
    would not be reachable by the provider. It persists the remote asset and
    embedding task IDs before polling, and renews the lease at each poll.
 4. Marengo 3.5 creates dynamic clip segments with separate `audio` and `visual`
@@ -105,9 +116,11 @@ configured Gemini file never falls back to a generic `GOOGLE_API_KEY`.
 
 Failed ingestion stays out of search. **Retry indexing** resumes persisted IDs
 when possible; a known failed/expired provider task is cleared so it can be
-recreated. A timeout preserves the task ID. Worker restarts do not require
-re-uploading jobs with saved IDs. A process crash or network timeout between a
-provider POST and saving its returned ID can leave an orphan remote upload/task;
+recreated. A timeout preserves the task ID. **Resume indexing** continues an
+interrupted recording after its previous lease expires (up to five minutes).
+App or optional worker restarts do not require re-uploading jobs with saved IDs.
+A process crash or network timeout between a provider POST and saving its
+returned ID can leave an orphan remote upload/task;
 provider APIs do not provide an idempotency key for those calls.
 
 ## Scope and provider handling

@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS media_rag.assets (
     duration double precision NOT NULL CHECK (duration > 0),
     size_bytes bigint NOT NULL CHECK (size_bytes > 0),
     status text NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'indexing', 'ready', 'failed')),
-    stage text NOT NULL DEFAULT 'Waiting for the indexing worker',
+    stage text NOT NULL DEFAULT 'Waiting to be indexed',
     error text,
     remote_asset_id text,
     task_id text,

@@ -14,24 +14,27 @@ from .models import Hit, validate_vector
 
 
 class Database:
-    def __init__(self, url):
+    def __init__(self, url, schema_url=None):
         self.url = url
+        self.schema_url = schema_url or url
 
     @contextmanager
     def connect(self, vectors=False):
-        connection = psycopg2.connect(self.url, connect_timeout=5,
-                                      options="-c statement_timeout=30000")
+        connection = psycopg2.connect(self.url, connect_timeout=5)
         try:
-            if vectors:
-                register_vector(connection)
             with connection:
                 with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+                    # Poolers reject statement_timeout as a startup parameter.
+                    cursor.execute("SET LOCAL statement_timeout = 30000")
+                    if vectors:
+                        register_vector(connection)
                     yield cursor
         finally:
             connection.close()
 
     def initialize(self):
-        with self.connect() as cursor:
+        # Schema setup uses the direct endpoint; application queries can use a pooler.
+        with Database(self.schema_url).connect() as cursor:
             cursor.execute("SELECT pg_advisory_xact_lock(88445101)")
             cursor.execute(Path(__file__).with_name("schema.sql").read_text())
 

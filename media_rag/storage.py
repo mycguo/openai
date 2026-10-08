@@ -44,3 +44,14 @@ class Storage:
 
     def playback_url(self, key):
         return self.public.presigned_get_object(self.bucket, key, expires=timedelta(minutes=15))
+
+
+def create_storage(settings):
+    """Use the selected backend for both the app and indexing worker."""
+    if settings.storage_provider == "minio":
+        return Storage(settings)
+    if settings.storage_provider == "neon":
+        from .neon_storage import NeonStorage
+        return NeonStorage(settings)
+    from .config import RagError
+    raise RagError("MEDIA_RAG_STORAGE_PROVIDER must be minio or neon.")

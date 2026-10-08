@@ -1,4 +1,12 @@
 /* This stylesheet is loaded only by the media RAG app. */
+.stApp [data-testid="stTab"][aria-selected="true"] {
+    color: #15803d;
+}
+
+.stApp [data-testid="stTab"] .react-aria-SelectionIndicator {
+    background-color: #15803d;
+}
+
 .stApp button[data-testid="stBaseButton-primary"],
 .stApp button[data-testid="stBaseButton-primaryFormSubmit"] {
     background-color: #15803d;

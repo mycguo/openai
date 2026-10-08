@@ -11,14 +11,14 @@ from .gemini import Gemini
 from .marengo import Marengo, parse_segments
 from .media import MIME_TYPES, SUPPORTED_EXTENSIONS, extract_clip, probe
 from .models import Evidence, merge_hits
-from .storage import Storage
+from .storage import create_storage
 
 
 class MediaLibrary:
     def __init__(self, settings, database=None, storage=None):
         self.settings = settings
-        self.database = database or Database(settings.database_url)
-        self.storage = storage or Storage(settings)
+        self.database = database or Database(settings.database_url, schema_url=settings.database_schema_url)
+        self.storage = storage or create_storage(settings)
 
     def initialize(self):
         self.database.initialize()

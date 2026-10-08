@@ -71,19 +71,27 @@ def main():
 
     with st.sidebar:
         st.header("Media Library")
-        st.caption("MinIO · PostgreSQL / pgvector · Marengo 3.5 · Gemini")
+        storage_name = "Neon Object Storage" if settings.storage_provider == "neon" else "MinIO"
+        st.caption(f"{storage_name} · PostgreSQL / pgvector · Marengo 3.5 · Gemini")
         st.button("Refresh library", use_container_width=True)
         with st.expander("Connections and setup"):
             st.write("TwelveLabs key: " + ("Configured" if settings.twelvelabs_api_key else "Missing"))
             st.write("Gemini key: " + ("Configured" if settings.gemini_api_key else "Missing"))
-            st.caption("Use .env.media-rag or the [media_rag] section of Streamlit secrets.")
-            st.code("python scripts/init_media_rag.py\n"
-                    "docker compose --env-file .env.media-rag -f compose.media-rag.yaml up -d --build", language="bash")
+            st.caption("Use MEDIA_RAG_ENV_FILE or the [media_rag] section of Streamlit secrets.")
+            if settings.storage_provider == "neon":
+                st.caption("Neon setup and worker commands: docs/media-rag-neon.md")
+            else:
+                st.code("python scripts/init_media_rag.py\n"
+                        "docker compose --env-file .env.media-rag -f compose.media-rag.yaml up -d --build", language="bash")
 
     if settings.missing_infrastructure():
-        st.info("Set up your local media library to get started.")
-        st.markdown("Run `python scripts/init_media_rag.py`, add your API keys to `.env.media-rag`, "
-                    "then follow the startup commands in `docs/media-rag.md`.")
+        if settings.storage_provider == "neon":
+            st.info("Configure the Neon database and object storage credentials to get started.")
+            st.markdown("Follow the setup commands in `docs/media-rag-neon.md`.")
+        else:
+            st.info("Set up your local media library to get started.")
+            st.markdown("Run `python scripts/init_media_rag.py`, add your API keys to `.env.media-rag`, "
+                        "then follow the startup commands in `docs/media-rag.md`.")
         st.stop()
     try:
         check_tools()
@@ -91,7 +99,10 @@ def main():
         assets = library.database.list_assets()
     except Exception as exc:
         show_error(exc)
-        st.info("Start the MinIO and PostgreSQL services, then refresh this page. See docs/media-rag.md.")
+        if settings.storage_provider == "neon":
+            st.info("Check the Neon database and private bucket configuration. See docs/media-rag-neon.md.")
+        else:
+            st.info("Start the MinIO and PostgreSQL services, then refresh this page. See docs/media-rag.md.")
         st.stop()
 
     ready = [asset for asset in assets if asset["status"] == "ready"]

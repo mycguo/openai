@@ -72,7 +72,9 @@ def index_in_streamlit(library, asset_id, retry=False):
 
 
 def main():
-    st.set_page_config(page_title="Media Library · Native RAG", page_icon="🎞️", layout="wide")
+    st.set_page_config(page_title="Media Library · Native RAG", page_icon="🎞️", layout="wide",
+                       initial_sidebar_state="collapsed")
+    st.html(Path(__file__).with_name("media_rag") / "styles.css")
     st.title("Ask your audio and video")
     st.caption("Find the right moment. Get an answer grounded in the original recording.")
     if notice := st.session_state.pop("media_rag_notice", None):
@@ -89,21 +91,6 @@ def main():
     except RagError as exc:
         show_error(exc)
         st.stop()
-
-    with st.sidebar:
-        st.header("Media Library")
-        storage_name = "Neon Object Storage" if settings.storage_provider == "neon" else "MinIO"
-        st.caption(f"{storage_name} · PostgreSQL / pgvector · Marengo 3.5 · Gemini")
-        st.button("Refresh library", use_container_width=True)
-        with st.expander("Connections and setup"):
-            st.write("TwelveLabs key: " + ("Configured" if settings.twelvelabs_api_key else "Missing"))
-            st.write("Gemini key: " + ("Configured" if settings.gemini_api_key else "Missing"))
-            st.caption("Use MEDIA_RAG_ENV_FILE or the [media_rag] section of Streamlit secrets.")
-            if settings.storage_provider == "neon":
-                st.caption("Neon setup and indexing: docs/media-rag-neon.md")
-            else:
-                st.code("python scripts/init_media_rag.py\n"
-                        "docker compose --env-file .env.media-rag -f compose.media-rag.yaml up -d --build", language="bash")
 
     if settings.missing_infrastructure():
         if settings.storage_provider == "neon":
@@ -128,11 +115,9 @@ def main():
 
     ready = [asset for asset in assets if asset["status"] == "ready"]
     pending = [asset for asset in assets if asset["status"] in {"queued", "indexing"}]
-    with st.sidebar:
-        st.metric("Ready to search", len(ready))
-        st.metric("Waiting or indexing", len(pending))
-        st.caption("Local library for one trusted user. Media sent for indexing goes to TwelveLabs; "
-                   "selected clips sent for answering go to Google Gemini.")
+    status, refresh = st.columns([5, 1], vertical_alignment="center")
+    status.caption(f"{len(ready)} ready to search · {len(pending)} waiting or indexing")
+    refresh.button("Refresh library", use_container_width=True)
 
     ask_tab, upload_tab, library_tab = st.tabs(["Ask library", "Add media", "Library"])
     with ask_tab:
@@ -256,6 +241,20 @@ def main():
                                  disabled=not settings.twelvelabs_api_key):
                         index_in_streamlit(library, asset["id"], retry=True)
                         st.rerun()
+
+        with st.expander("Connections and setup"):
+            storage_name = "Neon Object Storage" if settings.storage_provider == "neon" else "MinIO"
+            st.caption(f"{storage_name} · PostgreSQL / pgvector · Marengo 3.5 · Gemini")
+            st.write("TwelveLabs key: " + ("Configured" if settings.twelvelabs_api_key else "Missing"))
+            st.write("Gemini key: " + ("Configured" if settings.gemini_api_key else "Missing"))
+            st.caption("Use MEDIA_RAG_ENV_FILE or the [media_rag] section of Streamlit secrets.")
+            if settings.storage_provider == "neon":
+                st.caption("Neon setup and indexing: docs/media-rag-neon.md")
+            else:
+                st.code("python scripts/init_media_rag.py\n"
+                        "docker compose --env-file .env.media-rag -f compose.media-rag.yaml up -d --build", language="bash")
+            st.caption("Library for one trusted user. Media sent for indexing goes to TwelveLabs; "
+                       "selected clips sent for answering go to Google Gemini.")
 
 
 if __name__ == "__main__":

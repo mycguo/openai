@@ -1,0 +1,26 @@
+/* This stylesheet is loaded only by the media RAG app. */
+.stApp button[data-testid="stBaseButton-primary"],
+.stApp button[data-testid="stBaseButton-primaryFormSubmit"] {
+    background-color: #15803d;
+    border-color: #15803d;
+    color: #ffffff;
+}
+
+.stApp button[data-testid="stBaseButton-primary"]:hover:not(:disabled),
+.stApp button[data-testid="stBaseButton-primaryFormSubmit"]:hover:not(:disabled) {
+    background-color: #166534;
+    border-color: #166534;
+    color: #ffffff;
+}
+
+.stApp button[data-testid="stBaseButton-primary"]:focus-visible,
+.stApp button[data-testid="stBaseButton-primaryFormSubmit"]:focus-visible {
+    outline: 2px solid #166534;
+    outline-offset: 2px;
+    box-shadow: none;
+}
+
+.stApp button[data-testid="stBaseButton-primary"]:disabled,
+.stApp button[data-testid="stBaseButton-primaryFormSubmit"]:disabled {
+    opacity: 0.5;
+}

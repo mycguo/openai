@@ -133,6 +133,7 @@ celerybeat.pid
 
 # Environments
 .env
+.env.media-rag
 .venv
 env/
 venv/

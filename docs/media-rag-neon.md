@@ -64,12 +64,13 @@ policies. Playback URLs expire after 15 minutes. Errors do not expose credential
 in the UI. Credentials are passed explicitly to the S3 client, so it cannot fall
 back to an unrelated AWS profile or instance role.
 
-For a hosted Streamlit app, provide the same settings under `[media_rag]` in
-Streamlit secrets, including `MEDIA_RAG_STORAGE_PROVIDER = "neon"`. Install
-`requirements-media-rag.txt` and FFmpeg in the hosting environment. Run the
-indexing worker separately with the same branch settings; Community Cloud does
-not host that persistent worker. Keep access restricted to the trusted user
-until application authentication and per-user retrieval boundaries are added.
+For Streamlit Community Cloud, follow the
+[deployment and schema guide](media-rag-community-cloud.md). The Cloud entrypoint
+is `apps/media_rag/app.py`; its adjacent `requirements.txt` installs the RAG
+dependencies, and the root `packages.txt` installs FFmpeg/FFprobe. Run the
+indexing worker separately with the same branch settings. Keep access restricted
+to the trusted user until application authentication and per-user retrieval
+boundaries are added.
 
 Project Codex skills are under `.agents/skills/`. The project OAuth MCP entry
 is in `.codex/config.toml`; authenticate when Codex first connects. These files

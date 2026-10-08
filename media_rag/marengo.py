@@ -22,7 +22,7 @@ class Marengo:
 
     def __init__(self, settings, session=None):
         if not settings.twelvelabs_api_key:
-            raise RagError("Set TWELVELABS_API_KEY before starting the indexing worker or searching.")
+            raise RagError("Set TWELVELABS_API_KEY before indexing recordings or searching.")
         self.settings = settings
         self.session = session or requests.Session()
         self.session.headers.update({"x-api-key": settings.twelvelabs_api_key})

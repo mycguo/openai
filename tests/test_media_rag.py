@@ -221,6 +221,66 @@ class RecoveryTests(unittest.TestCase):
         provider.create_task.assert_not_called()
         library.database.complete.assert_called_once()
 
+    def test_streamlit_indexing_claims_the_selected_recording_and_resumes_saved_task(self):
+        database, storage, provider = Mock(), Mock(), Mock()
+        database.claim.return_value = self.asset()
+        provider.wait_task.side_effect = lambda task_id, heartbeat: (heartbeat(), payload())[1]
+        progress = Mock()
+        with patch("media_rag.service.Marengo", return_value=provider):
+            MediaLibrary(SETTINGS, database, storage).index_recording("asset", on_progress=progress)
+        database.claim.assert_called_once_with(asset_id="asset")
+        database.complete.assert_called_once()
+        progress.assert_called_with("Creating native embeddings")
+        provider.upload.assert_not_called()
+        provider.create_task.assert_not_called()
+
+    def test_streamlit_cannot_index_or_fail_a_recording_owned_by_another_session(self):
+        database, storage, provider = Mock(), Mock(), Mock()
+        database.claim.return_value = None
+        with patch("media_rag.service.Marengo", return_value=provider), self.assertRaises(RagError):
+            MediaLibrary(SETTINGS, database, storage).index_recording("asset")
+        database.fail.assert_not_called()
+        database.complete.assert_not_called()
+        provider.wait_task.assert_not_called()
+        provider.upload.assert_not_called()
+
+    def test_streamlit_retry_validates_key_before_changing_failed_job(self):
+        database, storage = Mock(), Mock()
+        with self.assertRaises(RagError):
+            MediaLibrary(Settings(), database, storage).index_recording("asset", retry=True)
+        database.retry.assert_not_called()
+        database.claim.assert_not_called()
+
+    def test_streamlit_failure_preserves_task_on_timeout_and_resets_failed_task(self):
+        for error, reset in [(MarengoError("timeout"), False), (MarengoError("failed", reset_task=True), True),
+                             (RuntimeError("private-provider-key"), False)]:
+            with self.subTest(error=type(error).__name__, reset=reset):
+                database, storage, provider = Mock(), Mock(), Mock()
+                database.claim.return_value = self.asset()
+                provider.wait_task.side_effect = error
+                with patch("media_rag.service.Marengo", return_value=provider), self.assertRaises(RagError) as raised:
+                    MediaLibrary(SETTINGS, database, storage).index_recording("asset", retry=True)
+                database.retry.assert_called_once_with("asset")
+                database.complete.assert_not_called()
+                self.assertEqual(database.fail.call_args.kwargs["reset_task"], reset)
+                self.assertNotIn("private-provider-key", str(raised.exception))
+                self.assertNotIn("private-provider-key", database.fail.call_args.args[1])
+
+    def test_streamlit_interruption_keeps_saved_remote_id_for_resume(self):
+        database, storage, provider = Mock(), Mock(), Mock()
+        database.claim.return_value = self.asset(remote_asset_id=None, task_id=None)
+        provider.upload.return_value = "saved-remote"
+
+        def interrupt(stage):
+            if stage == "Preparing media":
+                raise KeyboardInterrupt
+
+        with patch("media_rag.service.Marengo", return_value=provider), self.assertRaises(KeyboardInterrupt):
+            MediaLibrary(SETTINGS, database, storage).index_recording("asset", on_progress=interrupt)
+        self.assertEqual(database.progress.call_args.kwargs, {"remote_asset_id": "saved-remote"})
+        database.fail.assert_not_called()
+        provider.create_task.assert_not_called()
+
     def test_completed_upload_id_is_saved_before_polling(self):
         library, provider = Mock(), Mock()
         events = []

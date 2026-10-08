@@ -28,7 +28,8 @@ URL handles application queries; the direct URL handles schema initialization.
 `MEDIA_RAG_STORAGE_BUCKET` defaults to `rag`. Credential settings support `*_FILE`.
 
 Add `TWELVELABS_API_KEY` and `GEMINI_API_KEY` to the new `.env.neon` file or inject
-them through the environment. The worker needs only the TwelveLabs key.
+them through the environment. The optional headless worker needs only the
+TwelveLabs key.
 `MEDIA_RAG_GEMINI_MODEL` can override the Gemini model as in the local setup.
 
 ## Schema and startup
@@ -41,14 +42,7 @@ direct endpoint for schema work. No production schema changes were made during
 the project setup.
 
 Install the Python dependencies and FFmpeg/FFprobe as described in
-[the local guide](media-rag.md). Start the worker:
-
-```bash
-MEDIA_RAG_ENV_FILE=.env.neon MEDIA_RAG_STORAGE_PROVIDER=neon \
-  .venv/bin/python -m media_rag.worker
-```
-
-Start the UI in another terminal:
+[the local guide](media-rag.md). Start the UI; it indexes recordings directly:
 
 ```bash
 MEDIA_RAG_ENV_FILE=.env.neon MEDIA_RAG_STORAGE_PROVIDER=neon \
@@ -67,9 +61,9 @@ back to an unrelated AWS profile or instance role.
 For Streamlit Community Cloud, follow the
 [deployment and schema guide](media-rag-community-cloud.md). The Cloud entrypoint
 is `apps/media_rag/app.py`; its adjacent `requirements.txt` installs the RAG
-dependencies, and the root `packages.txt` installs FFmpeg/FFprobe. Run the
-indexing worker separately with the same branch settings. Keep access restricted
-to the trusted user until application authentication and per-user retrieval
+dependencies, and the root `packages.txt` installs FFmpeg/FFprobe. Upload and
+index recordings in the app; no separate worker service is required. Keep access
+restricted to the trusted user until application authentication and per-user retrieval
 boundaries are added.
 
 Project Codex skills are under `.agents/skills/`. The project OAuth MCP entry

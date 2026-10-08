@@ -184,6 +184,19 @@ class LocalIntegrationTests(unittest.TestCase):
             self.library.database.progress(asset, "Stale worker")
         self.assertEqual(self.library.database.list_assets()[0]["status"], "ready")
 
+    def test_streamlit_indexes_selected_recording_without_claiming_an_older_job(self):
+        audio, _ = self.upload(self.audio, "Older queued audio")
+        video, _ = self.upload(self.video, "Selected silent video")
+        provider = FakeMarengo("video")
+        with patch("media_rag.service.Marengo", return_value=provider):
+            self.library.index_recording(video["id"])
+        rows = {str(row["id"]): row for row in self.library.database.list_assets()}
+        self.assertEqual(rows[str(audio["id"])]["status"], "queued")
+        self.assertEqual(rows[str(video["id"])]["status"], "ready")
+        self.assertEqual(rows[str(video["id"])]["embedding_count"], 2)
+        self.assertIsNone(self.library.database.claim(asset_id=str(video["id"])))
+        self.assertEqual(str(self.library.database.claim()["id"]), str(audio["id"]))
+
     def test_expired_lease_is_reclaimed_and_old_worker_cannot_publish(self):
         self.upload(self.audio, "Lease fixture")
         old = self.library.database.claim()

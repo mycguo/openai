@@ -64,16 +64,17 @@ class Database:
             cursor.execute("SELECT * FROM media_rag.assets WHERE sha256 = %s", (asset["sha256"],))
             return dict(cursor.fetchone())
 
-    def claim(self):
+    def claim(self, asset_id=None):
         token = str(uuid.uuid4())
         with self.connect() as cursor:
             cursor.execute("""WITH candidate AS (
                 SELECT id FROM media_rag.assets WHERE status IN ('queued', 'indexing')
                 AND (lease_until IS NULL OR lease_until < now())
+                AND (%s::uuid IS NULL OR id=%s::uuid)
                 ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1
             ) UPDATE media_rag.assets a SET status='indexing', lease_token=%s,
                 lease_until=now()+interval '5 minutes', updated_at=now()
-              FROM candidate c WHERE a.id=c.id RETURNING a.*""", (token,))
+              FROM candidate c WHERE a.id=c.id RETURNING a.*""", (asset_id, asset_id, token))
             row = cursor.fetchone()
             return dict(row) if row else None
 
@@ -85,7 +86,7 @@ class Database:
                 WHERE id=%s AND lease_token=%s AND status='indexing' RETURNING id""",
                 (stage, remote_asset_id, task_id, str(asset["id"]), str(asset["lease_token"])))
             if cursor.fetchone() is None:
-                raise RagError("The indexing job is now owned by another worker.")
+                raise RagError("Another session is indexing this recording. Refresh the library.")
 
     def complete(self, asset, segments):
         if not segments:
@@ -95,7 +96,7 @@ class Database:
                 WHERE id=%s AND lease_token=%s AND status='indexing' FOR UPDATE""",
                 (str(asset["id"]), str(asset["lease_token"])))
             if cursor.fetchone() is None:
-                raise RagError("The indexing job is now owned by another worker.")
+                raise RagError("Another session is indexing this recording. Refresh the library.")
             cursor.execute("DELETE FROM media_rag.embeddings WHERE asset_id=%s", (str(asset["id"]),))
             execute_values(cursor, """INSERT INTO media_rag.embeddings
                 (asset_id,model,modality,start_sec,end_sec,embedding) VALUES %s""",
@@ -118,7 +119,7 @@ class Database:
     def retry(self, asset_id):
         with self.connect() as cursor:
             cursor.execute("""UPDATE media_rag.assets SET status='queued',
-                stage='Waiting for the indexing worker', error=NULL, updated_at=now()
+                stage='Waiting to be indexed', error=NULL, updated_at=now()
                 WHERE id=%s AND status='failed' RETURNING id""", (str(asset_id),))
             return cursor.fetchone() is not None
 

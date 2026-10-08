@@ -1,0 +1,2 @@
+# Community Cloud discovers this file next to the deployment entrypoint.
+-r ../../requirements-media-rag.txt

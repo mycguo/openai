@@ -508,7 +508,8 @@ CRITICAL URL EXTRACTION RULES:
 """
 
     # Task to scrape events
-    task = f"""Go to {url} and extract AI/GenAI event information for the next {days} days.
+    task = f"""Go to {url} and extract AI/GenAI event information for the next {days} days, starting tomorrow.
+Exclude all events taking place today or earlier.
 
 STEP-BY-STEP PROCESS:
 
@@ -2183,12 +2184,13 @@ def generate_events(url="https://lu.ma/genai-sf?k=c", source_name="Lu.ma GenAI S
 def format_events_for_doc(events_data, source_name="Events", days=8):
     """Format the scraped events into a readable document format"""
     try:
-        # Get current date and next specified days
+        # Start tomorrow and keep the requested number of days ahead
         today = datetime.now()
+        start_date = today + timedelta(days=1)
         end_date = today + timedelta(days=days)
 
         # Create header
-        formatted_text = f"{source_name} Events - {today.strftime('%B %d, %Y')} to {end_date.strftime('%B %d, %Y')}\n\n"
+        formatted_text = f"{source_name} Events - {start_date.strftime('%B %d, %Y')} to {end_date.strftime('%B %d, %Y')}\n\n"
         formatted_text += "=" * 50 + "\n\n"
 
         # Extract clean event information from agent result
@@ -2409,7 +2411,7 @@ def _format_event_entry_lines(event: Dict) -> List[str]:
 def _filter_events_for_date_range(events: List[Dict], days: int) -> List[Dict]:
     today = datetime.now()
     end_date = today + timedelta(days=days)
-    today_floor = today.replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_floor = (today + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     local_tz = datetime.now().astimezone().tzinfo
 
     def _normalize_event_dt(value: Optional[datetime]) -> Optional[datetime]:
@@ -2445,9 +2447,9 @@ def _filter_events_for_date_range(events: List[Dict], days: int) -> List[Dict]:
                 days,
             )
             continue
-        if event_dt and event_dt < today_floor:
+        if event_dt and event_dt < tomorrow_floor:
             logger.info(
-                "Skipping outdated event %s (date %s before today)",
+                "Skipping event %s (date %s before tomorrow)",
                 event.get('title'),
                 event_dt,
             )
@@ -2465,9 +2467,10 @@ def _format_event_collection(
     empty_message: str,
 ) -> str:
     today = datetime.now()
+    start_date = today + timedelta(days=1)
     end_date = today + timedelta(days=days)
     lines = [
-        f"{source_name} Events - {today.strftime('%B %d, %Y')} to {end_date.strftime('%B %d, %Y')}",
+        f"{source_name} Events - {start_date.strftime('%B %d, %Y')} to {end_date.strftime('%B %d, %Y')}",
         "=" * 50,
         "",
     ]
@@ -4135,7 +4138,7 @@ def main():
         max_value=30,
         value=days_to_scrape,
         key="days_to_scrape",
-        help="Number of days ahead to scrape events for"
+        help="Number of days ahead to scrape events for, starting tomorrow (excludes today)"
     )
 
 

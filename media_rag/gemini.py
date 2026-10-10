@@ -1,12 +1,17 @@
 """Answer from uploaded raw clips, with server-validated citation identifiers."""
 
 import json
+import logging
 import time
 
+import httpx
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
 from .config import RagError
+
+
+logger = logging.getLogger(__name__)
 
 
 ANSWER_SCHEMA = {
@@ -57,6 +62,51 @@ def validate_answer(payload, evidence):
     return {"status": "answered", "message": "", "claims": validated}
 
 
+def read_answer(response, evidence):
+    feedback = getattr(response, "prompt_feedback", None)
+    block = getattr(feedback, "block_reason", None)
+    if block and getattr(block, "value", block) != "BLOCKED_REASON_UNSPECIFIED":
+        raise RagError("Gemini blocked this request. Try a different question or different evidence clips.")
+    candidates = getattr(response, "candidates", None) or []
+    finish = getattr(candidates[0], "finish_reason", None) if candidates else None
+    finish = getattr(finish, "value", finish)
+    if finish == "MAX_TOKENS":
+        raise RagError("Gemini's answer was cut off. Try fewer evidence clips or a more focused question.")
+    if finish in {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY",
+                  "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION"}:
+        raise RagError("Gemini blocked the answer. Try a different question or different evidence clips.")
+    text = getattr(response, "text", None)
+    if not isinstance(text, str) or not text.strip():
+        raise RagError("Gemini returned no answer text. Retry with fewer evidence clips or a more focused question.")
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RagError("Gemini returned an unreadable structured answer. Retry the cited answer.") from exc
+    return validate_answer(payload, evidence)
+
+
+def provider_error(exc, stage):
+    """Describe failures without exposing provider bodies, credentials, or media metadata."""
+    code = exc.code if isinstance(exc, errors.APIError) and type(exc.code) is int else None
+    logger.warning("Gemini failed: stage=%s exception=%s http_status=%s", stage, type(exc).__name__, code)
+    if code is not None:
+        guidance = {
+            400: "Check GEMINI_API_KEY and the request's compatibility with the configured model.",
+            401: "Check GEMINI_API_KEY in Streamlit secrets.",
+            402: "Check the Gemini project's billing and available credits.",
+            403: "Check that GEMINI_API_KEY has permission to use the Gemini API and configured model.",
+            404: ("Check MEDIA_RAG_GEMINI_MODEL and whether your project can use it." if stage == "generate a cited answer"
+                  else "An uploaded evidence file was unavailable. Retry the cited answer."),
+            429: "The Gemini rate limit or quota was reached. Check its quota and billing, then retry later.",
+        }.get(code, "Retry later; if this continues, check the Gemini API's availability.")
+        return RagError(f"Gemini could not {stage} (HTTP {code}). {guidance}")
+    if isinstance(exc, httpx.TimeoutException):
+        return RagError(f"Gemini timed out while trying to {stage}. Retry with fewer evidence clips.")
+    if isinstance(exc, httpx.TransportError):
+        return RagError(f"Could not reach Gemini to {stage}. Retry later.")
+    return RagError(f"Gemini could not {stage}. Retry; check the app logs for the failure stage and HTTP status.")
+
+
 class Gemini:
     def __init__(self, settings, client=None):
         if not settings.gemini_api_key:
@@ -79,11 +129,14 @@ class Gemini:
 
     def answer(self, question, evidence, paths):
         uploaded_names = []
+        stage = "upload evidence clips"
         try:
             parts = [types.Part.from_text(text="Question: " + question)]
             for item, path in zip(evidence, paths, strict=True):
+                stage = "upload evidence clips"
                 uploaded = self.client.files.upload(file=str(path))
                 uploaded_names.append(uploaded.name)
+                stage = "process evidence clips"
                 uploaded = self.ready_file(uploaded)
                 metadata = {"source_id": item.source_id, "title": item.title,
                             "start_sec": item.start, "end_sec": item.end}
@@ -92,19 +145,21 @@ class Gemini:
                 if item.kind == "video":
                     part.video_metadata = types.VideoMetadata(fps=2)
                 parts.append(part)
+            stage = "generate a cited answer"
             response = self.client.models.generate_content(
                 model=self.settings.gemini_model,
                 contents=[types.Content(role="user", parts=parts)],
                 config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_INSTRUCTION, temperature=0,
+                    system_instruction=SYSTEM_INSTRUCTION,
                     response_mime_type="application/json", response_json_schema=ANSWER_SCHEMA,
                 ),
             )
-            return validate_answer(json.loads(response.text), evidence)
+            stage = "read the cited answer"
+            return read_answer(response, evidence)
         except RagError:
             raise
         except Exception as exc:
-            raise RagError("Gemini could not generate a cited answer. Check its API key, model, and quota, then retry.") from exc
+            raise provider_error(exc, stage) from exc
         finally:
             for name in uploaded_names:
                 try:

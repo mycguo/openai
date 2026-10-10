@@ -18,9 +18,13 @@ def get_library(settings):
     return library
 
 
+def error_message(exc):
+    return str(exc) if isinstance(exc, RagError) else \
+           "The media library could not complete this request. Check the connections and try again."
+
+
 def show_error(exc):
-    message = str(exc) if isinstance(exc, RagError) else \
-              "The media library could not complete this request. Check the connections and try again."
+    message = error_message(exc)
     st.error(message)
     return message
 
@@ -52,8 +56,13 @@ def render_answer(answer, evidence, library):
 
 
 def generate_answer(library, search):
-    with st.spinner("Examining the retrieved clips with Gemini…"):
-        answer, evidence = library.answer(search["question"], search["hits"])
+    st.session_state.pop("media_rag_answer_error", None)
+    try:
+        with st.spinner("Examining the retrieved clips with Gemini…"):
+            answer, evidence = library.answer(search["question"], search["hits"])
+    except Exception as exc:
+        st.session_state.media_rag_answer_error = error_message(exc)
+        return
     st.session_state.media_rag_answer = {"answer": answer, "evidence": evidence}
 
 
@@ -148,6 +157,7 @@ def main():
         if ask or search_only:
             st.session_state.pop("media_rag_search", None)
             st.session_state.pop("media_rag_answer", None)
+            st.session_state.pop("media_rag_answer_error", None)
             try:
                 modality = {"Audio and video": None, "Speech and sounds": "audio", "Visuals": "visual"}[mode]
                 with st.spinner("Finding relevant moments…"):
@@ -161,6 +171,10 @@ def main():
 
         search = st.session_state.get("media_rag_search")
         if search:
+            if error := st.session_state.get("media_rag_answer_error"):
+                st.error(error)
+                st.info("Search found relevant clips, but Gemini has not completed a cited answer. "
+                        "You can review the clips below or retry the cited answer.")
             st.caption("Results for: " + plain_markdown(search["question"]))
             if not search["hits"]:
                 st.info("No relevant moments were found. Try a different question, a broader recording selection, "
@@ -179,11 +193,11 @@ def main():
                         except Exception as exc:
                             show_error(exc)
                 if "media_rag_answer" not in st.session_state:
-                    if st.button("Answer this search with Gemini", disabled=not settings.gemini_api_key):
-                        try:
-                            generate_answer(library, search)
-                        except Exception as exc:
-                            show_error(exc)
+                    label = "Retry cited answer" if st.session_state.get("media_rag_answer_error") else \
+                            "Answer this search with Gemini"
+                    if st.button(label, key="media_rag_generate_answer", disabled=not settings.gemini_api_key):
+                        generate_answer(library, search)
+                        st.rerun()
         if answer := st.session_state.get("media_rag_answer"):
             render_answer(answer["answer"], answer["evidence"], library)
 
@@ -247,6 +261,7 @@ def main():
             st.caption(f"{storage_name} · PostgreSQL / pgvector · Marengo 3.5 · Gemini")
             st.write("TwelveLabs key: " + ("Configured" if settings.twelvelabs_api_key else "Missing"))
             st.write("Gemini key: " + ("Configured" if settings.gemini_api_key else "Missing"))
+            st.caption("Gemini model: " + plain_markdown(settings.gemini_model))
             st.caption("Use MEDIA_RAG_ENV_FILE or the [media_rag] section of Streamlit secrets.")
             if settings.storage_provider == "neon":
                 st.caption("Neon setup and indexing: docs/media-rag-neon.md")

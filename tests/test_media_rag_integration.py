@@ -20,6 +20,8 @@ from media_rag.gemini import validate_answer
 from media_rag.media import probe
 from media_rag.models import Segment, merge_hits
 from media_rag.service import MediaLibrary, index_asset
+from youtube_rag.download import DownloadedVideo
+from youtube_rag.service import YouTubeLibrary
 
 
 def vector(axis=0):
@@ -211,6 +213,66 @@ class LocalIntegrationTests(unittest.TestCase):
         self.assertEqual(self.library.database.list_assets()[0]["status"], "indexing")
         index_asset(self.library, current, FakeMarengo("audio"))
         self.assertEqual(self.library.database.list_assets()[0]["status"], "ready")
+
+    def test_youtube_import_persistence_deduplication_and_native_cited_clips(self):
+        youtube = YouTubeLibrary(self.settings, self.library.database, self.library.storage)
+        video_id = "jNQXAC9IVRw"
+        url = "https://www.youtube.com/watch?v=" + video_id
+        # Only the public download and model APIs are substituted. Persist, probe,
+        # embed, retrieve, extract, and play through the actual local services.
+        with patch("youtube_rag.service.download_video", return_value=DownloadedVideo(self.video, "YouTube fixture")) as downloader:
+            video, created = youtube.add_youtube("https://youtu.be/" + video_id + "?t=1")
+            self.assertTrue(created)
+            duplicate, created = youtube.add_youtube(url)
+            self.assertFalse(created)
+            self.assertEqual(duplicate["id"], video["id"])
+            self.assertEqual(downloader.call_count, 1)
+            alias, created = youtube.add_youtube("https://www.youtube.com/watch?v=abcdefghijk")
+            self.assertTrue(created)
+            self.assertEqual(alias["id"], video["id"])  # Same content, two source IDs.
+        self.assertEqual(len(youtube.database.list_youtube_assets()), 1)
+        source = youtube.database.find_youtube(video_id)
+        self.assertEqual(source["source_url"], url)
+        audio, _ = self.upload(self.audio, "File upload outside YouTube scope")
+        for asset, kind in [(video, "video"), (audio, "audio")]:
+            with patch("media_rag.service.Marengo", return_value=FakeMarengo(kind)):
+                self.library.index_recording(asset["id"])
+        with patch("media_rag.service.Marengo") as provider:
+            provider.return_value.embed_query.return_value = vector(1)
+            hits = youtube.retrieve("What is shown?", min_score=-1)
+            self.assertEqual([hit.asset_id for hit in hits], [str(video["id"])])
+            self.assertEqual(hits[0].source_url, url)
+            with self.assertRaises(RagError):
+                youtube.retrieve("Find file uploads", [str(audio["id"])])
+        with patch("media_rag.service.Gemini") as provider:
+            def answer(question, evidence, paths):
+                self.assertEqual(evidence[0].source_url, url)
+                self.assertEqual(probe(paths[0])["kind"], "video")
+                self.assertAlmostEqual(probe(paths[0])["duration"], 4, delta=0.3)
+                return validate_answer({"status": "answered", "claims": [
+                    {"text": "A blue frame is shown.", "source_ids": [1]}
+                ]}, evidence)
+            provider.return_value.answer.side_effect = answer
+            result, evidence = youtube.answer("What is shown?", hits)
+        self.assertEqual(result["claims"][0]["source_ids"], [1])
+        playback = requests.get(youtube.storage.playback_url(evidence[0].object_key), timeout=10)
+        self.assertEqual(playback.status_code, 200)
+
+    def test_youtube_source_mapping_keeps_first_asset_and_cascades_on_delete(self):
+        video, _ = self.upload(self.video, "Video")
+        audio, _ = self.upload(self.audio, "Audio")
+        url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+        first, created = self.library.database.link_youtube("jNQXAC9IVRw", url, video["id"])
+        self.assertTrue(created)
+        winner, created = self.library.database.link_youtube("jNQXAC9IVRw", url, audio["id"])
+        self.assertFalse(created)
+        self.assertEqual(winner["id"], first["id"])
+        # Reinitialization is safe for an existing schema and source mapping.
+        self.library.database.initialize()
+        self.assertEqual(self.library.database.find_youtube("jNQXAC9IVRw")["id"], video["id"])
+        with self.library.database.connect() as cursor:
+            cursor.execute("DELETE FROM media_rag.assets WHERE id=%s", (str(video["id"]),))
+        self.assertIsNone(self.library.database.find_youtube("jNQXAC9IVRw"))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,11 @@
+**
+!requirements-media-rag.txt
+!requirements-youtube-rag.txt
+!media_rag_app.py
+!youtube_rag_app.py
+!media_rag/
+!media_rag/**
+!youtube_rag/
+!youtube_rag/**
+**/__pycache__
+**/*.pyc

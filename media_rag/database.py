@@ -51,6 +51,35 @@ class Database:
             row = cursor.fetchone()
             return dict(row) if row else None
 
+    def find_youtube(self, video_id):
+        with self.connect() as cursor:
+            cursor.execute("""SELECT a.*, y.video_id AS youtube_video_id, y.source_url
+                FROM media_rag.youtube_sources y JOIN media_rag.assets a ON a.id=y.asset_id
+                WHERE y.video_id=%s""", (video_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def link_youtube(self, video_id, source_url, asset_id):
+        with self.connect() as cursor:
+            cursor.execute("""INSERT INTO media_rag.youtube_sources (video_id, source_url, asset_id)
+                VALUES (%s,%s,%s) ON CONFLICT (video_id) DO NOTHING RETURNING video_id""",
+                (video_id, source_url, str(asset_id)))
+            created = cursor.fetchone() is not None
+            cursor.execute("""SELECT a.*, y.video_id AS youtube_video_id, y.source_url
+                FROM media_rag.youtube_sources y JOIN media_rag.assets a ON a.id=y.asset_id
+                WHERE y.video_id=%s""", (video_id,))
+            return dict(cursor.fetchone()), created
+
+    def list_youtube_assets(self):
+        with self.connect() as cursor:
+            cursor.execute("""SELECT a.*, y.video_id AS youtube_video_id, y.source_url,
+                (SELECT count(*) FROM media_rag.embeddings e WHERE e.asset_id=a.id) AS embedding_count
+                FROM media_rag.assets a JOIN LATERAL (
+                    SELECT video_id, source_url FROM media_rag.youtube_sources WHERE asset_id=a.id
+                    ORDER BY created_at, video_id LIMIT 1
+                ) y ON true ORDER BY a.created_at DESC""")
+            return [dict(row) for row in cursor.fetchall()]
+
     def create_asset(self, asset):
         with self.connect() as cursor:
             cursor.execute("""INSERT INTO media_rag.assets
@@ -130,7 +159,9 @@ class Database:
             cursor.execute("SET LOCAL hnsw.iterative_scan = 'strict_order'")
             cursor.execute("SET LOCAL hnsw.ef_search = 100")
             cursor.execute("""SELECT a.id, a.title, a.object_key, a.kind, a.has_audio, a.duration,
-                e.start_sec, e.end_sec, e.modality, 1-(e.embedding <=> %s) AS score
+                e.start_sec, e.end_sec, e.modality, 1-(e.embedding <=> %s) AS score,
+                (SELECT source_url FROM media_rag.youtube_sources WHERE asset_id=a.id
+                 ORDER BY created_at, video_id LIMIT 1) AS source_url
                 FROM media_rag.embeddings e JOIN media_rag.assets a ON a.id=e.asset_id
                 WHERE a.status='ready' AND e.model=%s
                 AND (%s::uuid[] IS NULL OR a.id=ANY(%s::uuid[]))
@@ -139,5 +170,5 @@ class Database:
                 (vector, MODEL, asset_ids, asset_ids, modality, modality, vector, limit))
             return [Hit(str(row["id"]), row["title"], row["object_key"], row["kind"],
                         row["duration"], row["start_sec"], row["end_sec"], row["score"],
-                        (row["modality"],), row["has_audio"])
+                        (row["modality"],), row["has_audio"], row["source_url"] or "")
                     for row in cursor.fetchall() if row["score"] >= min_score]

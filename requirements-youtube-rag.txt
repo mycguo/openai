@@ -1,0 +1,3 @@
+-r requirements-media-rag.txt
+# Include EJS and the packaged Deno runtime; no remote EJS component downloads.
+yt-dlp[default,deno]==2026.8.19

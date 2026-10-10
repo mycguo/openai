@@ -38,6 +38,7 @@ class Hit:
     score: float
     modalities: tuple[str, ...]
     has_audio: bool = True
+    source_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ class Evidence:
     start: float
     end: float
     object_key: str
+    source_url: str = ""
 
 
 def timestamp(seconds):
@@ -78,11 +80,11 @@ def merge_hits(hits, limit=5, context_seconds=8.0):
             merged[index] = Hit(
                 old.asset_id, old.title, old.object_key, old.kind, old.duration,
                 min(old.start, start), max(old.end, end), max(old.score, hit.score),
-                tuple(sorted(set(old.modalities + hit.modalities))), old.has_audio,
+                tuple(sorted(set(old.modalities + hit.modalities))), old.has_audio, old.source_url,
             )
         elif len(merged) < limit:
             merged.append(Hit(
                 hit.asset_id, hit.title, hit.object_key, hit.kind, hit.duration,
-                start, end, hit.score, hit.modalities, hit.has_audio,
+                start, end, hit.score, hit.modalities, hit.has_audio, hit.source_url,
             ))
     return merged

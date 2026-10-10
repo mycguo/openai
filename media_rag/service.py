@@ -117,7 +117,7 @@ class MediaLibrary:
                         originals[hit.asset_id] = original
                     extract_clip(originals[hit.asset_id], clip_path, hit.start, hit.end, hit.kind, hit.has_audio)
                     self.storage.upload(key, clip_path, MIME_TYPES[extension])
-                evidence.append(Evidence(source_id, hit.title, hit.kind, hit.start, hit.end, key))
+                evidence.append(Evidence(source_id, hit.title, hit.kind, hit.start, hit.end, key, hit.source_url))
                 paths.append(clip_path)
             return gemini.answer(question, evidence, paths), evidence
 

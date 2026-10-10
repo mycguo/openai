@@ -5,6 +5,9 @@ and playable evidence clips in private MinIO objects, indexes native Marengo 3.5
 audio/visual embeddings in PostgreSQL with pgvector, and sends retrieved raw
 clips to Gemini for cited answers. No transcript is required.
 
+To import a YouTube URL instead of uploading a file, use the separate
+[youtube-rag application](youtube-rag.md) with the same native media pipeline.
+
 ## Start with Docker
 
 From the repository root:

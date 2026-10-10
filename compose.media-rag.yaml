@@ -78,6 +78,20 @@ services:
     command: ["python", "-m", "media_rag.worker"]
     restart: "on-failure:3"
 
+  youtube-rag:
+    <<: *app
+    profiles: [youtube-rag]
+    build:
+      context: .
+      dockerfile: Dockerfile.youtube-rag
+    image: youtube-rag-app:local
+    environment:
+      <<: *app-environment
+      GEMINI_API_KEY_FILE: /run/secrets/gemini_api_key
+    secrets: [postgres_password, minio_access_key, minio_secret_key, twelvelabs_api_key, gemini_api_key]
+    ports:
+      - "127.0.0.1:8504:8504"
+
 secrets:
   postgres_password:
     environment: MEDIA_RAG_POSTGRES_PASSWORD

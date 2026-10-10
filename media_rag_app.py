@@ -12,8 +12,12 @@ from media_rag.ui import plain_markdown
 
 
 @st.cache_resource(show_spinner=False)
-def get_library(settings):
-    library = MediaLibrary(settings)
+def get_library(settings, youtube=False):
+    if youtube:
+        from youtube_rag.service import YouTubeLibrary
+        library = YouTubeLibrary(settings)
+    else:
+        library = MediaLibrary(settings)
     library.initialize()
     return library
 
@@ -27,6 +31,16 @@ def show_error(exc):
     message = error_message(exc)
     st.error(message)
     return message
+
+
+def render_source_link(source_url, start=0):
+    if source_url:
+        from media_rag.youtube_urls import timestamp_url
+        try:
+            url = timestamp_url(source_url, start)
+        except (RagError, ValueError, OverflowError):
+            return  # Invalid stored metadata must not become an external link.
+        st.link_button("Open on YouTube", url)
 
 
 def render_answer(answer, evidence, library):
@@ -45,6 +59,7 @@ def render_answer(answer, evidence, library):
         with st.container(border=True):
             st.markdown(f"**[{item.source_id}] {plain_markdown(item.title)}**")
             st.caption(f"{timestamp(item.start)}–{timestamp(item.end)} in the original recording")
+            render_source_link(item.source_url, item.start)
             try:
                 url = library.storage.playback_url(item.object_key)
                 if item.kind == "video":
@@ -80,11 +95,11 @@ def index_in_streamlit(library, asset_id, retry=False):
     return True
 
 
-def main():
-    st.set_page_config(page_title="Media Library · Native RAG", page_icon="🎞️", layout="wide",
+def main(youtube=False):
+    st.set_page_config(page_title="youtube-rag" if youtube else "Media Library · Native RAG", page_icon="🎞️", layout="wide",
                        initial_sidebar_state="collapsed")
     st.html(Path(__file__).with_name("media_rag") / "styles.css")
-    st.title("Ask your audio and video")
+    st.title("youtube-rag" if youtube else "Ask your audio and video")
     st.caption("Find the right moment. Get an answer grounded in the original recording.")
     if notice := st.session_state.pop("media_rag_notice", None):
         st.success(notice)
@@ -92,7 +107,8 @@ def main():
         with st.status("Indexing did not finish", state="error", expanded=True):
             st.error(error)
     try:
-        overrides = dict(st.secrets.get("media_rag", {}))
+        table = "youtube_rag" if youtube and "youtube_rag" in st.secrets else "media_rag"
+        overrides = dict(st.secrets.get(table, {}))
     except st.errors.StreamlitSecretNotFoundError:
         overrides = {}
     try:
@@ -112,8 +128,8 @@ def main():
         st.stop()
     try:
         check_tools()
-        library = get_library(settings)
-        assets = library.database.list_assets()
+        library = get_library(settings, youtube=youtube)
+        assets = library.database.list_youtube_assets() if youtube else library.database.list_assets()
     except Exception as exc:
         show_error(exc)
         if settings.storage_provider == "neon":
@@ -128,10 +144,11 @@ def main():
     status.caption(f"{len(ready)} ready to search · {len(pending)} waiting or indexing")
     refresh.button("Refresh library", use_container_width=True)
 
-    ask_tab, upload_tab, library_tab = st.tabs(["Ask library", "Add media", "Library"])
+    ask_tab, upload_tab, library_tab = st.tabs(["Ask library", "Add YouTube video" if youtube else "Add media", "Library"])
     with ask_tab:
         if not ready:
-            st.info("Upload an audio or video file to index it here, or index a saved recording from the Library tab.")
+            st.info("Add a YouTube URL to index its audio and video, or resume a saved video from the Library tab."
+                    if youtube else "Upload an audio or video file to index it here, or index a saved recording from the Library tab.")
         if not settings.twelvelabs_api_key:
             st.info("Add TWELVELABS_API_KEY to enable native media search.")
         if not settings.gemini_api_key:
@@ -161,7 +178,8 @@ def main():
             try:
                 modality = {"Audio and video": None, "Speech and sounds": "audio", "Visuals": "visual"}[mode]
                 with st.spinner("Finding relevant moments…"):
-                    hits = library.retrieve(question, selected or None, modality, top_k, min_score)
+                    scope = selected or (list(ready_by_id) if youtube else None)
+                    hits = library.retrieve(question, scope, modality, top_k, min_score)
                 search = {"question": question.strip(), "hits": hits}
                 st.session_state.media_rag_search = search
                 if ask and hits:
@@ -184,6 +202,7 @@ def main():
                 for hit in search["hits"]:
                     with st.expander(f"{plain_markdown(hit.title)} · {timestamp(hit.start)}–{timestamp(hit.end)}"):
                         st.caption(f"Matched {', '.join(hit.modalities)} · similarity {hit.score:.3f}")
+                        render_source_link(hit.source_url, hit.start)
                         try:
                             url = library.storage.playback_url(hit.object_key)
                             if hit.kind == "video":
@@ -202,23 +221,44 @@ def main():
             render_answer(answer["answer"], answer["evidence"], library)
 
     with upload_tab:
-        st.subheader("Add a recording")
-        st.write("Upload audio or video and index its sound and visual content directly in this app.")
-        st.caption("MP3, WAV, MP4, MOV, or WebM · up to 200 MB per file. "
-                   "Indexing sends the recording to TwelveLabs. Keep this page open until it finishes.")
+        st.subheader("Add a YouTube video" if youtube else "Add a recording")
+        if youtube:
+            st.write("Paste a YouTube video URL to index its sound and visual content.")
+            st.caption("Publicly accessible videos · up to 60 minutes and 200 MB · downloaded at up to 720p. "
+                       "Keep this page open during import and indexing.")
+        else:
+            st.write("Upload audio or video and index its sound and visual content directly in this app.")
+            st.caption("MP3, WAV, MP4, MOV, or WebM · up to 200 MB per file. "
+                       "Indexing sends the recording to TwelveLabs. Keep this page open until it finishes.")
         if not settings.twelvelabs_api_key:
-            st.info("Add TWELVELABS_API_KEY to upload and index recordings.")
+            st.info("Add TWELVELABS_API_KEY to import and index videos." if youtube else
+                    "Add TWELVELABS_API_KEY to upload and index recordings.")
         with st.form("media_rag_upload", clear_on_submit=True):
-            uploaded = st.file_uploader("Recording", type=["mp3", "wav", "mp4", "mov", "webm"])
-            title = st.text_input("Recording title", max_chars=200, placeholder="Episode or presentation title")
-            submitted = st.form_submit_button("Upload & index", type="primary",
+            if youtube:
+                youtube_url = st.text_input("YouTube URL", max_chars=2048,
+                                            placeholder="https://www.youtube.com/watch?v=…")
+            else:
+                uploaded = st.file_uploader("Recording", type=["mp3", "wav", "mp4", "mov", "webm"])
+            title = st.text_input("Video title (optional)" if youtube else "Recording title", max_chars=200,
+                                  placeholder="Use the YouTube title" if youtube else "Episode or presentation title")
+            submitted = st.form_submit_button("Import & index" if youtube else "Upload & index", type="primary",
                                               disabled=not settings.twelvelabs_api_key)
         if submitted:
             try:
-                if uploaded is None:
-                    raise RagError("Choose an audio or video file first.")
-                with st.spinner("Saving your recording…"):
-                    asset, created = library.add_upload(uploaded, title or Path(uploaded.name).stem)
+                if youtube:
+                    with st.status("Importing YouTube video…", expanded=True) as status:
+                        try:
+                            asset, created = library.add_youtube(
+                                youtube_url, title, on_progress=lambda stage: status.update(label=stage))
+                        except Exception:
+                            status.update(label="Import did not finish", state="error")
+                            raise
+                        status.update(label="Video saved", state="complete", expanded=False)
+                else:
+                    if uploaded is None:
+                        raise RagError("Choose an audio or video file first.")
+                    with st.spinner("Saving your recording…"):
+                        asset, created = library.add_upload(uploaded, title or Path(uploaded.name).stem)
                 if created:
                     st.success(f"Saved {plain_markdown(asset['title'])}.")
                 else:
@@ -240,6 +280,7 @@ def main():
                 columns[0].caption("Ready to index" if asset["status"] == "queued" else asset["stage"])
                 columns[1].write(asset["status"].capitalize())
                 columns[2].write(timestamp(asset["duration"]))
+                render_source_link(asset.get("source_url", ""))
                 if asset["status"] == "ready":
                     st.caption(f"{asset['kind'].capitalize()} · {asset['embedding_count']} indexed embeddings")
                 if asset["status"] in {"queued", "indexing"}:
@@ -262,7 +303,11 @@ def main():
             st.write("TwelveLabs key: " + ("Configured" if settings.twelvelabs_api_key else "Missing"))
             st.write("Gemini key: " + ("Configured" if settings.gemini_api_key else "Missing"))
             st.caption("Gemini model: " + plain_markdown(settings.gemini_model))
-            st.caption("Use MEDIA_RAG_ENV_FILE or the [media_rag] section of Streamlit secrets.")
+            st.caption("Use MEDIA_RAG_ENV_FILE or the [youtube_rag] section of Streamlit secrets. "
+                       "The [media_rag] section is also accepted." if youtube else
+                       "Use MEDIA_RAG_ENV_FILE or the [media_rag] section of Streamlit secrets.")
+            if youtube:
+                st.caption("YouTube setup and deployment: docs/youtube-rag.md")
             if settings.storage_provider == "neon":
                 st.caption("Neon setup and indexing: docs/media-rag-neon.md")
             else:

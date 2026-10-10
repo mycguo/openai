@@ -1,0 +1,2 @@
+# Community Cloud discovers the YouTube dependencies beside this entrypoint.
+-r ../../requirements-youtube-rag.txt

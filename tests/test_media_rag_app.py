@@ -87,6 +87,48 @@ class AppTests(unittest.TestCase):
         library.answer.assert_not_called()
         self.assertTrue(any("No relevant moments" in item.value for item in app.info))
 
+    def test_answer_failure_preserves_search_and_retry_does_not_repeat_retrieval(self):
+        app, library = self.run_with_library()
+        library.answer.side_effect = RagError("Gemini could not generate a cited answer (HTTP 429). Check its quota.")
+        find(app.text_area, "What would you like to know?").set_value("What was explained?")
+        find(app.button, "Ask & cite").click().run()
+        self.assertFalse(app.exception)
+        self.assertTrue(any("HTTP 429" in item.value for item in app.error))
+        self.assertTrue(any("Search found relevant clips" in item.value for item in app.info))
+        self.assertTrue(any(item.label == "Episode · 00:05–00:15" for item in app.expander))
+        find(app.button, "Refresh library").click().run()
+        self.assertTrue(any("HTTP 429" in item.value for item in app.error))
+        library.retrieve.assert_called_once()
+        library.answer.assert_called_once()
+        library.answer.side_effect = None
+        find(app.button, "Retry cited answer").click().run()
+        self.assertFalse(app.exception)
+        self.assertFalse(app.error)
+        self.assertTrue(any("Supported answer" in item.value for item in app.markdown))
+        library.retrieve.assert_called_once()
+        self.assertEqual(library.answer.call_count, 2)
+        self.assertEqual(library.answer.call_args.args, ("What was explained?", [HIT]))
+        app.run()
+        self.assertEqual(library.answer.call_count, 2)
+
+    def test_failed_retry_remains_visible_and_new_search_clears_old_answer_error(self):
+        app, library = self.run_with_library()
+        library.answer.side_effect = RuntimeError("private-key")
+        find(app.text_area, "What would you like to know?").set_value("What was explained?")
+        find(app.button, "Ask & cite").click().run()
+        find(app.button, "Retry cited answer").click().run()
+        self.assertFalse(app.exception)
+        self.assertTrue(app.error)
+        self.assertFalse(any("private-key" in item.value for item in app.error))
+        library.retrieve.assert_called_once()
+        self.assertEqual(library.answer.call_count, 2)
+        find(app.text_area, "What would you like to know?").set_value("A different question")
+        find(app.button, "Search only").click().run()
+        self.assertFalse(app.error)
+        self.assertTrue(find(app.button, "Answer this search with Gemini"))
+        self.assertEqual(library.retrieve.call_count, 2)
+        self.assertEqual(library.answer.call_count, 2)
+
     def test_model_text_and_source_titles_cannot_create_markdown_images(self):
         dangerous = "![leak](https://example.test/image)"
         app, library = self.run_with_library()

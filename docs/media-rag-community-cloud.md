@@ -128,6 +128,29 @@ playback. Existing local MinIO recordings and database rows are not copied to
 Neon automatically. The optional command-line worker remains available for
 unattended indexing; see [the local guide](media-rag.md).
 
+## Troubleshoot cited answers
+
+**Retrieved moments** are search results from Marengo and PostgreSQL. They can
+appear even when Gemini fails to generate the final cited answer. The app keeps
+those results and shows **Retry cited answer**, which retries Gemini without
+running the search again. Refreshing the page does not automatically retry.
+
+Gemini errors identify whether uploading, processing, or answer generation
+failed. HTTP 401/403 points to the key or permissions, 404 during generation to
+the configured model, 429 to rate limits or quota, and 5xx to provider
+availability. HTTP 400 can indicate an invalid key or incompatible request.
+Check **Library → Connections and setup** for the active model; set
+`MEDIA_RAG_GEMINI_MODEL` in `[media_rag]` to override it. The model must support
+audio/video and structured JSON answers.
+
+The default Gemini 3.8 model follows
+[Google's migration guide](https://ai.google.dev/gemini-api/docs/latest-model):
+generation requests omit deprecated sampling parameters such as `temperature`.
+The app's Gemini failure logs include only the stage, exception class, and HTTP
+status, excluding provider error bodies, API keys, questions, and filenames.
+Blocked, empty, truncated, or invalid JSON responses have separate messages
+and are never displayed as validated answers.
+
 ## References
 
 - [Community Cloud file organization](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/file-organization)

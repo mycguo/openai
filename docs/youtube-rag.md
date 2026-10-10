@@ -1,9 +1,60 @@
 # youtube-rag
 
-A separate Streamlit application for the native media RAG pipeline. Paste a
-YouTube video URL instead of uploading a file. The app downloads the audio/video,
-saves it privately, indexes timestamped Marengo 3.5 embeddings in PostgreSQL /
-pgvector, and sends retrieved raw clips to Gemini for cited answers.
+A separate Streamlit application with two ways to ask about YouTube videos:
+
+- **Ask YouTube directly** (default): send a public YouTube URL and a question
+  to Gemini as video input. No download, database, object storage, TwelveLabs,
+  FFmpeg, or indexing worker is used. Gemini analyzes audio and visuals and
+  returns an answer with suggested timestamps to check in the original video.
+- **Indexed library**: download the audio/video, save it privately, index
+  timestamped Marengo 3.5 embeddings in PostgreSQL / pgvector, and send retrieved
+  raw clips to Gemini for cited answers across saved videos.
+
+Direct mode analyzes one video per question and does not create a persistent
+search index. Its timestamps are model suggestions, not independently verified
+retrieved evidence. Choose the indexed library for repeated search across videos.
+
+## Try direct YouTube questions
+
+For an existing Community Cloud deployment, merge this change and let Streamlit
+redeploy (reboot the app if it has not refreshed). Keep the main file path
+`apps/youtube_rag/app.py`. Your existing Gemini key is sufficient; the indexed
+library's other secrets can stay configured.
+
+For a new deployment, add this to **App settings → Secrets**:
+
+```toml
+[youtube_rag]
+GEMINI_API_KEY = "<your Gemini API key>"
+```
+
+Do not create a duplicate `[youtube_rag]` table if it already exists. The app
+also accepts the existing `[media_rag]` table when `[youtube_rag]` is absent,
+or a top-level `GEMINI_API_KEY`. The optional `MEDIA_RAG_GEMINI_MODEL` defaults
+to `gemini-3.8-flash`; choose a model available to your project that supports
+video URLs and structured output.
+
+1. Select **Ask YouTube directly**.
+2. Paste a **public** video URL and enter your question.
+3. Click **Ask Gemini** and keep the page open during analysis.
+4. Read the answer and use **Open on YouTube** or **Play this moment** to check
+   the suggested timestamps. They can be inaccurate.
+
+The Gemini API supports public YouTube URLs as a preview. Private and unlisted
+videos are unsupported, and access to every public video is not guaranteed.
+Requests use your Gemini project's quota/billing. Each submitted question or
+explicit retry makes one generation request; ordinary page reruns do not repeat
+it. The app uses a three-minute request timeout and no automatic provider
+retries. HTTP failures show safe model/key/quota guidance without exposing
+provider response bodies. A blocked download does not trigger this mode
+automatically; select it explicitly.
+
+Only the canonical video URL and question are sent by the app to Gemini. Direct
+mode stores its current answer in the Streamlit session rather than the library.
+Embedded playback loads YouTube in the browser. Gemini's handling of a video
+URL is separate from yt-dlp running on Community Cloud, so this is an alternative
+when the server's downloads are blocked; it is still subject to Gemini access
+and availability.
 
 ## Run locally
 
@@ -14,7 +65,9 @@ uv venv .venv-youtube-rag --python 3.12
 uv pip install --python .venv-youtube-rag/bin/python -r requirements-youtube-rag.txt
 ```
 
-Reuse the existing `.env.media-rag` settings and local MinIO/PostgreSQL services.
+For direct mode, set `GEMINI_API_KEY` in the environment or `.env.media-rag` and
+run the Streamlit command below; no local database/storage services are needed.
+For **Indexed library**, reuse the existing `.env.media-rag` settings and local MinIO/PostgreSQL services.
 If they are not configured yet, follow [the local media guide](media-rag.md).
 Start only the infrastructure if necessary:
 
@@ -50,7 +103,7 @@ The adjacent requirements install the YouTube dependencies independently of
 other applications. The existing root `packages.txt` supplies FFmpeg. No
 separate worker service is needed.
 
-Configure the same Neon infrastructure and provider keys as the existing media
+For **Indexed library**, configure the same Neon infrastructure and provider keys as the existing media
 app, under `[youtube_rag]`. An existing `[media_rag]` section is also accepted if
 `[youtube_rag]` is absent. Credentials stay in Streamlit secrets, never Git:
 
@@ -72,7 +125,7 @@ GEMINI_API_KEY = "<Gemini API key>"
 `MEDIA_RAG_ENV_FILE=.env.neon MEDIA_RAG_STORAGE_PROVIDER=neon` as described in
 [the Neon guide](media-rag-neon.md).
 
-## Database compatibility
+## Indexed library: database compatibility
 
 The shared schema adds `media_rag.youtube_sources` and an index on `asset_id`.
 Its canonical video ID points to an existing media asset. Existing recordings
@@ -88,9 +141,9 @@ youtube-rag lists and searches only ready assets with a saved YouTube source.
 The original media app can also see these recordings. Configure a separate
 database and bucket if separate libraries are desired.
 
-## Use the application
+## Use the indexed library
 
-1. Open **Add YouTube video**, paste the video URL, and optionally provide a title.
+1. Select **Indexed library**, then open **Add YouTube video**, paste the video URL, and optionally provide a title.
 2. Click **Import & index** and keep the page open until processing finishes.
 3. Open **Ask library**, ask a question, and choose **Search only** or **Ask & cite**.
 4. Play the retrieved/cited clips, or use **Open on YouTube** to open the original
@@ -110,7 +163,7 @@ must be imported again; saved indexing work is resumable. Concurrent URL imports
 converge on the first saved source mapping, though differing downloaded versions
 can leave an extra unlinked media asset.
 
-## Import limits and hosting behavior
+## Indexed library: import limits and hosting behavior
 
 Use videos you are allowed to download and send to the model providers. The
 importer supports publicly accessible individual videos, up to 60 minutes and
@@ -130,9 +183,9 @@ back to transcript-only indexing. If the hosting IP is blocked, run the same app
 locally or on a host permitted to retrieve that video. Previously saved videos
 remain searchable without another YouTube download.
 
-Restrict the Cloud app to the trusted user, as in the
+For either mode, restrict the Cloud app to the trusted user, as in the
 [Community Cloud guide](media-rag-community-cloud.md). This version shares one
-library; it does not add authentication or tenant isolation. Recordings go to
+library; it does not add authentication or tenant isolation. In indexed mode, recordings go to
 TwelveLabs for indexing, selected evidence clips go to Gemini for answering,
 and private objects use short-lived signed playback URLs.
 
@@ -152,5 +205,6 @@ MEDIA_RAG_INTEGRATION=1 .venv-youtube-rag/bin/python -m unittest discover -s tes
 ```
 
 References: [TwelveLabs media upload requirements](https://docs.twelvelabs.io/docs/concepts/upload-methods),
+[Gemini YouTube video input](https://ai.google.dev/gemini-api/docs/generate-content/video-understanding),
 [yt-dlp](https://github.com/yt-dlp/yt-dlp),
 [JavaScript runtime requirements](https://github.com/yt-dlp/yt-dlp/wiki/EJS).

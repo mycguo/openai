@@ -62,27 +62,33 @@ def validate_answer(payload, evidence):
     return {"status": "answered", "message": "", "claims": validated}
 
 
-def read_answer(response, evidence):
+def read_response_json(response, retry_hint="fewer evidence clips or a more focused question",
+                       evidence_hint="different evidence clips"):
+    """Reject blocked, truncated, empty, or malformed output before validation."""
     feedback = getattr(response, "prompt_feedback", None)
     block = getattr(feedback, "block_reason", None)
     if block and getattr(block, "value", block) != "BLOCKED_REASON_UNSPECIFIED":
-        raise RagError("Gemini blocked this request. Try a different question or different evidence clips.")
+        raise RagError(f"Gemini blocked this request. Try a different question or {evidence_hint}.")
     candidates = getattr(response, "candidates", None) or []
     finish = getattr(candidates[0], "finish_reason", None) if candidates else None
     finish = getattr(finish, "value", finish)
     if finish == "MAX_TOKENS":
-        raise RagError("Gemini's answer was cut off. Try fewer evidence clips or a more focused question.")
+        raise RagError(f"Gemini's answer was cut off. Try {retry_hint}.")
     if finish in {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY",
                   "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION"}:
-        raise RagError("Gemini blocked the answer. Try a different question or different evidence clips.")
+        raise RagError(f"Gemini blocked the answer. Try a different question or {evidence_hint}.")
     text = getattr(response, "text", None)
     if not isinstance(text, str) or not text.strip():
-        raise RagError("Gemini returned no answer text. Retry with fewer evidence clips or a more focused question.")
+        raise RagError(f"Gemini returned no answer text. Retry with {retry_hint}.")
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
         raise RagError("Gemini returned an unreadable structured answer. Retry the cited answer.") from exc
-    return validate_answer(payload, evidence)
+    return payload
+
+
+def read_answer(response, evidence):
+    return validate_answer(read_response_json(response), evidence)
 
 
 def provider_error(exc, stage):
@@ -91,17 +97,21 @@ def provider_error(exc, stage):
     logger.warning("Gemini failed: stage=%s exception=%s http_status=%s", stage, type(exc).__name__, code)
     if code is not None:
         guidance = {
-            400: "Check GEMINI_API_KEY and the request's compatibility with the configured model.",
+            400: ("Check that the video is public and the configured model supports YouTube video input and structured output. "
+                  "Check GEMINI_API_KEY and model compatibility." if stage == "answer from a YouTube video"
+                  else "Check GEMINI_API_KEY and the request's compatibility with the configured model."),
             401: "Check GEMINI_API_KEY in Streamlit secrets.",
             402: "Check the Gemini project's billing and available credits.",
             403: "Check that GEMINI_API_KEY has permission to use the Gemini API and configured model.",
-            404: ("Check MEDIA_RAG_GEMINI_MODEL and whether your project can use it." if stage == "generate a cited answer"
+            404: ("Check MEDIA_RAG_GEMINI_MODEL and whether your project can use it." if stage in {
+                      "generate a cited answer", "answer from a YouTube video"}
                   else "An uploaded evidence file was unavailable. Retry the cited answer."),
             429: "The Gemini rate limit or quota was reached. Check its quota and billing, then retry later.",
         }.get(code, "Retry later; if this continues, check the Gemini API's availability.")
         return RagError(f"Gemini could not {stage} (HTTP {code}). {guidance}")
     if isinstance(exc, httpx.TimeoutException):
-        return RagError(f"Gemini timed out while trying to {stage}. Retry with fewer evidence clips.")
+        hint = "a shorter public video or a more focused question" if stage == "answer from a YouTube video" else "fewer evidence clips"
+        return RagError(f"Gemini timed out while trying to {stage}. Retry with {hint}.")
     if isinstance(exc, httpx.TransportError):
         return RagError(f"Could not reach Gemini to {stage}. Retry later.")
     return RagError(f"Gemini could not {stage}. Retry; check the app logs for the failure stage and HTTP status.")

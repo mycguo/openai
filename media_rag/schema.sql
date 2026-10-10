@@ -35,3 +35,12 @@ CREATE TABLE IF NOT EXISTS media_rag.embeddings (
 CREATE INDEX IF NOT EXISTS embeddings_cosine_idx
     ON media_rag.embeddings USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS assets_queue_idx ON media_rag.assets (status, lease_until, created_at);
+
+-- Preserve YouTube identity independently of content-hash deduplication.
+CREATE TABLE IF NOT EXISTS media_rag.youtube_sources (
+    video_id text PRIMARY KEY CHECK (video_id ~ '^[A-Za-z0-9_-]{11}$'),
+    source_url text NOT NULL CHECK (source_url = 'https://www.youtube.com/watch?v=' || video_id),
+    asset_id uuid NOT NULL REFERENCES media_rag.assets(id) ON DELETE CASCADE,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS youtube_sources_asset_idx ON media_rag.youtube_sources (asset_id);

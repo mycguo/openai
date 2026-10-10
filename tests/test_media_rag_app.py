@@ -1,7 +1,9 @@
 """Streamlit UI regressions with local services and providers substituted."""
 
+from dataclasses import replace
 from pathlib import Path
 import io
+import sys
 import unittest
 from unittest.mock import Mock, patch
 
@@ -77,6 +79,21 @@ class AppTests(unittest.TestCase):
         self.assertTrue(any("00:05–00:15 in the original recording" in item.value for item in app.caption))
         app.run()
         library.answer.assert_called_once()
+
+    def test_shared_media_app_renders_youtube_sources_without_downloader_package(self):
+        url = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+        # The original Docker image includes media_rag, without youtube_rag or yt-dlp.
+        with patch.dict(sys.modules, {"youtube_rag": None}):
+            app, library = self.run_with_library(assets=[{**ASSET, "source_url": url}])
+            library.retrieve.return_value = [replace(HIT, source_url=url)]
+            library.answer.return_value = (
+                {"status": "answered", "claims": [{"text": "Supported answer", "source_ids": [1]}]},
+                [Evidence(1, "Episode", "audio", 5, 15, "clip.mp3", url)],
+            )
+            find(app.text_area, "What would you like to know?").set_value("What was explained?")
+            find(app.button, "Ask & cite").click().run()
+            self.assertFalse(app.exception)
+            self.assertTrue(any(item.proto.url == url + "&t=5s" for item in app.get("link_button")))
 
     def test_zero_hits_do_not_send_media_to_gemini(self):
         app, library = self.run_with_library()

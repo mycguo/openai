@@ -135,6 +135,7 @@ celerybeat.pid
 .env
 .env.media-rag
 .venv
+.venv-youtube-rag/
 env/
 venv/
 ENV/

@@ -111,6 +111,13 @@ def main(youtube=False):
         overrides = dict(st.secrets.get(table, {}))
     except st.errors.StreamlitSecretNotFoundError:
         overrides = {}
+    if youtube:
+        mode = st.radio("How would you like to ask?", ["Ask YouTube directly", "Indexed library"],
+                        horizontal=True, key="youtube_rag_mode")
+        if mode == "Ask YouTube directly":
+            from youtube_rag.direct_app import render_direct
+            render_direct(overrides)
+            return
     try:
         settings = Settings.load(overrides)
     except RagError as exc:

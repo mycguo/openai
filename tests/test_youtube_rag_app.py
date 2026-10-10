@@ -39,8 +39,9 @@ class YouTubeAppTests(unittest.TestCase):
         )
         self.enterContext(patch("media_rag.config.Settings.load", return_value=settings))
         self.enterContext(patch("youtube_rag.service.YouTubeLibrary", return_value=library))
-        self.enterContext(patch("media_rag.media.check_tools"))
+        self.enterContext(patch("media_rag_app.check_tools"))
         app = AppTest.from_file(APP, default_timeout=15).run()
+        app.radio[0].set_value("Indexed library").run()
         self.assertFalse(app.exception)
         return app, library
 

@@ -1,4 +1,8 @@
-/* This stylesheet is loaded only by the media RAG app. */
+/* This stylesheet is loaded only by the media RAG applications. */
+.stApp [data-testid="stRadioOption"][data-selected="true"] > div > div:first-child {
+    background-color: #15803d;
+}
+
 .stApp [data-testid="stTab"][aria-selected="true"] {
     color: #15803d;
 }

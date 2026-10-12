@@ -92,6 +92,20 @@ services:
     ports:
       - "127.0.0.1:8504:8504"
 
+  ask-my-photo:
+    <<: *app
+    profiles: [ask-my-photo]
+    build:
+      context: .
+      dockerfile: Dockerfile.ask-my-photo
+    image: ask-my-photo-app:local
+    environment:
+      <<: *app-environment
+      GEMINI_API_KEY_FILE: /run/secrets/gemini_api_key
+    secrets: [postgres_password, minio_access_key, minio_secret_key, gemini_api_key]
+    ports:
+      - "127.0.0.1:8505:8505"
+
 secrets:
   postgres_password:
     environment: MEDIA_RAG_POSTGRES_PASSWORD

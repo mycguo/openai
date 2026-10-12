@@ -1,0 +1,10 @@
+**
+!requirements-media-rag.txt
+!requirements-ask-my-photo.txt
+!ask_my_photo_app.py
+!media_rag/
+!media_rag/**
+!photo_rag/
+!photo_rag/**
+**/__pycache__
+**/*.pyc

@@ -1,0 +1,2 @@
+# Keep the photo frontend independent of the other apps' dependencies.
+-r ../../requirements-ask-my-photo.txt

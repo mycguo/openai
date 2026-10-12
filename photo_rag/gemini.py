@@ -1,6 +1,8 @@
 """Native image embeddings and grounded answers using the existing Gemini API key."""
 
 import json
+import random
+import time
 
 from google import genai
 from google.genai import errors, types
@@ -18,6 +20,10 @@ an exact location, date, or hidden detail without evidence. Do not claim exhaust
 these are retrieved examples, not the whole library. If the photos cannot answer the question,
 return insufficient_evidence, no claims, and a brief message explaining what is missing.
 """
+
+ANSWER_TIMEOUT_SECONDS = 180
+ANSWER_ATTEMPTS = 3
+RETRYABLE_STATUS_CODES = {500, 503}
 
 
 class PhotoGemini:
@@ -70,6 +76,29 @@ class PhotoGemini:
     def embed_query(self, question):
         return self.embed(types.Part.from_text(text="task: search result | query: " + validate_question(question)))
 
+    def generate_answer(self, parts):
+        # Retry the same evidence only on provider failures. Each attempt shares
+        # the original time budget; SDK retries stay disabled to avoid nesting.
+        deadline = time.monotonic() + ANSWER_TIMEOUT_SECONDS
+        for attempt in range(ANSWER_ATTEMPTS):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RagError("Gemini's answer time limit was reached. Retry with fewer evidence photos.")
+            try:
+                return self.client.models.generate_content(model=self.settings.gemini_model,
+                    contents=types.Content(role="user", parts=parts), config=types.GenerateContentConfig(
+                        system_instruction=INSTRUCTION, response_mime_type="application/json",
+                        response_json_schema=ANSWER_SCHEMA, max_output_tokens=8192,
+                        http_options=types.HttpOptions(timeout=max(1, int(remaining * 1000)),
+                            retry_options=types.HttpRetryOptions(attempts=1))))
+            except errors.APIError as exc:
+                if exc.code not in RETRYABLE_STATUS_CODES:
+                    raise
+                delay = (2 ** attempt) + random.uniform(0, 0.5)
+                if attempt == ANSWER_ATTEMPTS - 1 or deadline - time.monotonic() <= delay:
+                    raise
+                time.sleep(delay)
+
     def answer(self, question, evidence, paths):
         question = validate_question(question)
         if not evidence or len(evidence) > 8:
@@ -80,10 +109,7 @@ class PhotoGemini:
                 {"source_id": item.source_id, "title": item.title})))
             parts.append(self.image_part(path))
         try:
-            response = self.client.models.generate_content(model=self.settings.gemini_model,
-                contents=types.Content(role="user", parts=parts), config=types.GenerateContentConfig(
-                    system_instruction=INSTRUCTION, response_mime_type="application/json",
-                    response_json_schema=ANSWER_SCHEMA, max_output_tokens=8192))
+            response = self.generate_answer(parts)
             payload = read_response_json(response, retry_hint="fewer photos or a more focused question",
                                          evidence_hint="different photos")
             # Bound text before accepting citations or rendering provider output.
@@ -102,4 +128,8 @@ class PhotoGemini:
         except RagError:
             raise
         except Exception as exc:
-            raise provider_error(exc, "generate a cited answer") from exc
+            error = provider_error(exc, "generate a cited answer")
+            if isinstance(exc, errors.APIError) and exc.code in RETRYABLE_STATUS_CODES:
+                error = RagError(f"Gemini could not generate a cited answer (HTTP {exc.code}). "
+                                 "Try 3 evidence photos or retry the answer later.")
+            raise error from exc

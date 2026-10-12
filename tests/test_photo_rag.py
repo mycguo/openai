@@ -84,6 +84,75 @@ class ImageTests(unittest.TestCase):
 
 
 class PhotoProviderTests(unittest.TestCase):
+    def test_actual_sdk_recovers_from_503_then_500_with_the_same_photo_request(self):
+        requests = []
+
+        def respond(request):
+            requests.append(request)
+            if len(requests) < 3:
+                return httpx.Response([503, 500][len(requests) - 1], json={
+                    "error": {"code": [503, 500][len(requests) - 1], "message": "private-provider-body"}})
+            return httpx.Response(200, json={"candidates": [{"finishReason": "STOP", "content": {
+                "role": "model", "parts": [{"text": json.dumps(ANSWER)}]}}]})
+
+        # Leave SDK defaults enabled here to prove per-request retries cannot nest.
+        sdk = genai.Client(api_key="test-key", http_options=types.HttpOptions(
+            httpx_client=httpx.Client(transport=httpx.MockTransport(respond))))
+        self.addCleanup(sdk.close)
+        with TemporaryDirectory() as directory, patch("photo_rag.gemini.time.sleep") as sleep:
+            path = Path(directory) / "photo.jpg"
+            path.write_bytes(upload("JPEG").getvalue())
+            self.assertEqual(PhotoGemini(SETTINGS, sdk).answer("What is visible?", EVIDENCE, [path]), ANSWER)
+        self.assertEqual(len(requests), 3)
+        self.assertEqual([request.content for request in requests], [requests[0].content] * 3)
+        self.assertEqual(len({str(request.url) for request in requests}), 1)
+        self.assertEqual(sleep.call_count, 2)
+        for call, minimum in zip(sleep.call_args_list, [1, 2]):
+            self.assertGreaterEqual(call.args[0], minimum)
+            self.assertLessEqual(call.args[0], minimum + 0.5)
+
+    def test_retries_are_bounded_and_keep_provider_details_private(self):
+        client = Mock()
+        client.models.generate_content.side_effect = errors.APIError(503, {
+            "error": {"message": "private-key private-photo"}})
+        with TemporaryDirectory() as directory, patch("photo_rag.gemini.time.sleep") as sleep:
+            path = Path(directory) / "photo.jpg"
+            path.write_bytes(upload("JPEG").getvalue())
+            with self.assertLogs("media_rag.gemini") as logs, self.assertRaisesRegex(RagError, "HTTP 503.*3 evidence") as raised:
+                PhotoGemini(SETTINGS, client).answer("Private question", EVIDENCE, [path])
+        self.assertEqual(client.models.generate_content.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        for private in ["private-key", "private-photo", "Private question"]:
+            self.assertNotIn(private, str(raised.exception) + str(logs.output))
+
+    def test_bad_requests_quota_and_timeouts_do_not_repeat_paid_calls(self):
+        with TemporaryDirectory() as directory, patch("photo_rag.gemini.time.sleep") as sleep:
+            path = Path(directory) / "photo.jpg"
+            path.write_bytes(upload("JPEG").getvalue())
+            for failure in [errors.APIError(code, {"error": {"message": "private"}}) for code in [400, 403, 404, 429]] + [
+                    httpx.ReadTimeout("private")]:
+                client = Mock()
+                client.models.generate_content.side_effect = failure
+                with self.subTest(failure=type(failure).__name__), self.assertRaises(RagError):
+                    PhotoGemini(SETTINGS, client).answer("Question", EVIDENCE, [path])
+                client.models.generate_content.assert_called_once()
+            sleep.assert_not_called()
+
+    def test_retries_share_the_original_time_budget(self):
+        client = Mock()
+        client.models.generate_content.side_effect = errors.APIError(500, {"error": {"message": "private"}})
+        with TemporaryDirectory() as directory, patch("photo_rag.gemini.time.sleep") as sleep, \
+                patch("photo_rag.gemini.random.uniform", return_value=0), \
+                patch("photo_rag.gemini.time.monotonic", side_effect=[0, 0, 100, 101, 179]):
+            path = Path(directory) / "photo.jpg"
+            path.write_bytes(upload("JPEG").getvalue())
+            with self.assertRaisesRegex(RagError, "HTTP 500"):
+                PhotoGemini(SETTINGS, client).answer("Question", EVIDENCE, [path])
+        self.assertEqual(client.models.generate_content.call_count, 2)
+        timeouts = [call.kwargs["config"].http_options.timeout for call in client.models.generate_content.call_args_list]
+        self.assertEqual(timeouts, [180_000, 79_000])
+        sleep.assert_called_once_with(1)
+
     def test_actual_sdk_wire_embeds_one_image_and_query_in_same_space_then_sends_image_evidence(self):
         requests = []
 

@@ -96,8 +96,14 @@ can leave unlinked objects; the app retains them instead of deleting possibly
 committed data. A successful duplicate race removes only that upload's unused
 objects. This version deliberately has no delete action.
 
-Inference has a three-minute HTTP timeout and no automatic retries. Failed answers
-can be retried without repeating retrieval. Ordinary reruns do not repeat uploads,
+Embedding requests have a three-minute HTTP timeout and no automatic retries.
+Answer generation retries HTTP 500/503 failures up to twice with short exponential
+backoff and jitter, using the same photos and model within the original three-minute
+request budget. Invalid requests, quota errors, timeouts, and invalid answer output
+are not automatically retried. Failed answers can be retried without repeating
+retrieval. If generation keeps failing, try **3** evidence photos to reduce the
+request size. Reducing the photo count does not guarantee success during provider
+failures. Ordinary reruns do not repeat uploads,
 indexing, or model requests. Model text is escaped; provider bodies, photo contents,
 and credentials are excluded from error messages. Only retrieved source IDs can
 be accepted as answer citations.

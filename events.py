@@ -23,6 +23,8 @@ from google.genai import types
 import requests
 from bs4 import BeautifulSoup
 
+from events_publishing import render_publishing
+
 logger = logging.getLogger(__name__)
 
 _browser_use_file_patch_applied = False
@@ -2106,6 +2108,8 @@ def generate_event_image(combined_events_content=None):
                 "use small number of texts which relates to the events"
             )
 
+        prompt_for_image += f"\n\nUse these events as the source for the image:\n{combined_events_content}"
+
         client = genai.Client(api_key=GOOGLE_API_KEY)
         response = client.models.generate_content(
             model=NANO_BANANA_2_MODEL,
@@ -3457,6 +3461,7 @@ def _extract_organize_candidate_events(combined_events_content: str) -> List[Dic
         organized_events.append({
             "title": title,
             "rsvp_link": rsvp_link,
+            "date_time_raw": event["date_time_raw"],
             "date_heading": _format_organized_day_heading(parsed_dt),
             "time_display": _format_organized_time(parsed_dt, event["date_time_raw"]),
             "location": location,
@@ -3814,12 +3819,54 @@ def _save_events_snapshot(payload: Dict[str, object]) -> Optional[str]:
         return None
 
 
+def _scrape_region_for_publishing(region_name: str, days: int, progress) -> str:
+    """Scrape a fresh regional workspace without reusing previous source results."""
+    if region_name not in FOCUS_REGION_ORDER:
+        raise ValueError("Choose Bay Area or New York.")
+    sources = [
+        ("Lu.ma", "luma_region_results", _scrape_luma_region_to_state),
+        ("Cerebral Valley", "cv_region_results", _scrape_cerebral_valley_region_to_state),
+        ("Evion", "evion_region_results", _scrape_evion_region_to_state),
+        ("Meetup", "meetup_region_results", _scrape_meetup_region_to_state),
+    ]
+    for _, state_key, _ in sources:
+        results = dict(st.session_state.get(state_key) or {})
+        results.pop(region_name, None)
+        st.session_state[state_key] = results
+    _refresh_region_combined_state()
+    for label, _, scrape in sources:
+        progress(f"Scraping {label} {region_name} events…")
+        try:
+            scrape(region_name, days)
+        except Exception:
+            logger.warning("%s scraping failed for %s during publishing", label, region_name)
+            st.warning(f"{label} could not be scraped. Continuing with the other sources.")
+    _refresh_region_combined_state()
+    combined = (st.session_state.get("region_combined_events") or {}).get(region_name, "")
+    candidates = _extract_organize_candidate_events(combined)
+    candidates = [event for event in candidates if event["suggested_region"] == region_name]
+    # Rebuild the organizer's input with only this region's dated, deduplicated events.
+    return "\n\n".join(
+        "\n".join(_format_event_entry_lines({
+            "title": event["title"], "url": event["rsvp_link"],
+            "date_text": event["date_time_raw"], "location": event["location"],
+            "host": event["host"], "description": event["description"],
+        }))
+        for event in candidates
+    )
+
+
 def main():
     st.title("AI Events Scraper")
     st.header("Automatically extract and display AI events")
 
     st.divider()
     days_to_scrape = int(st.session_state.get("days_to_scrape", 8))
+
+    render_publishing(
+        days_to_scrape, _scrape_region_for_publishing, generate_organized_events, generate_event_image,
+    )
+    st.divider()
 
     st.subheader("🎯 Event Sources")
     st.caption("Bay Area and New York are separate workspaces. Each region tab has independent source tabs for Lu.ma, Cerebral Valley, Evion, Meetup, and a combined view.")

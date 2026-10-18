@@ -2,9 +2,10 @@
 
 import base64
 import re
+import sys
 import time
 import unittest
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -12,7 +13,7 @@ from streamlit.testing.v1 import AppTest
 
 with patch("streamlit.runtime.secrets.Secrets.get", return_value=None):
     import events
-    import events_publishing as publishing
+    import events_preparation as publishing
 
 
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=")
@@ -313,6 +314,18 @@ class PublishingUITests(unittest.TestCase):
         if connected:
             app.session_state.events_linkedin = dict(ACCOUNT)
         return app.run()
+
+    def test_entrypoint_starts_with_an_old_publisher_module_cached(self):
+        legacy = ModuleType("events_publishing")
+        legacy.render_publishing = Mock(side_effect=AssertionError("Must not run old publishing flow"))
+        with patch.dict(sys.modules, {"events_publishing": legacy}), \
+             patch.object(publishing.services, "post_to_linkedin") as post:
+            app = AppTest.from_file(events.__file__).run()
+            self.assertFalse(app.exception)
+            for region in ("Bay Area", "New York"):
+                self.assertFalse(element(app.button, f"Prepare {region} events").disabled)
+            legacy.render_publishing.assert_not_called()
+            post.assert_not_called()
 
     def test_disconnected_page_has_connection_and_two_enabled_prepare_buttons(self):
         with patch.object(publishing, "linkedin_config", return_value=CONFIG), \

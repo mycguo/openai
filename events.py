@@ -23,7 +23,7 @@ from google.genai import types
 import requests
 from bs4 import BeautifulSoup
 
-from events_publishing import (
+from events_preparation import (
     handle_authorization_callback, render_preparation,
 )
 

@@ -52,3 +52,12 @@ session and are cleared on disconnect.
 Automated tests mock scraping, generation, and OAuth. They verify that preparation
 never invokes LinkedIn publication or image-upload initialization. They do not
 make billable image requests or create public LinkedIn posts.
+
+## Deployment startup
+
+The Events entrypoint imports its connection and preparation helpers from
+`events_preparation.py`. This module name separates the preparation workflow from
+older `events_publishing` modules that may remain loaded in a long-running
+Streamlit worker during an update. Deploy `events.py` and `events_preparation.py`
+together. If a worker still shows a traceback importing `events_publishing`,
+reboot the Streamlit app to load the current entrypoint.

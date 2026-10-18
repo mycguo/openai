@@ -73,7 +73,7 @@ class PipelineTests(unittest.TestCase):
             self.assertIn(result["organized"], self.image.call_args.args[0])
             self.publish.assert_called_with(
                 result["text"], ACCOUNT["token"], ACCOUNT["author"],
-                image_payload=result["image"], allow_image_fallback=False,
+                image_payload=result["image"], allow_image_fallback=False, plain_text=True,
             )
             self.assertNotIn("**", result["text"])
             self.assertIn("RSVP: https://lu.ma/test", result["text"])
@@ -220,6 +220,42 @@ class BrowserBindingTests(unittest.TestCase):
                 publishing._browser_binding()
 
 
+class LinkedInFormattingTests(unittest.TestCase):
+    def test_published_agenda_matches_existing_organize_copy_format(self):
+        candidates = events._extract_organize_candidate_events(SF + NY)
+        organized = events._build_organized_events_fallback(candidates)
+        expected = events._build_organized_events_text(
+            candidates, use_markdown_links=False, include_plain_rsvp_link=True,
+        )
+        actual = publishing.linkedin_plain_text(organized)
+        self.assertEqual(actual, expected)
+        self.assertIn("RSVP: https://lu.ma/sf-test", actual)
+        self.assertIn("RSVP: https://lu.ma/ny-test", actual)
+        self.assertNotIn("](", actual)
+
+    def test_markdown_titles_and_punctuation_become_readable_plain_text(self):
+        organized = "## Tuesday, October 20\n\n- **6 PM - [AI [Agents] & RAG](https://lu.ma/ai?ref=feed#details)** - SF host\n"
+        self.assertEqual(
+            publishing.linkedin_plain_text(organized),
+            "Tuesday, October 20\n\n• 6 PM - AI [Agents] & RAG - SF host - RSVP: https://lu.ma/ai?ref=feed#details",
+        )
+
+    def test_plain_text_api_encoding_preserves_reserved_punctuation(self):
+        text = "AI [Agents] (RAG) | @host #AI <demo> {tools} \\ * _ ~\nRSVP: https://lu.ma/ai_event#details"
+        response = Mock(status_code=201, content=b"", headers={})
+        response.raise_for_status.return_value = None
+        with patch.object(publishing.services.requests, "post", return_value=response) as create:
+            ok, _ = publishing.services.post_to_linkedin(text, "test-token", ACCOUNT["author"], plain_text=True)
+        self.assertTrue(ok)
+        sent = create.call_args.kwargs["json"]["commentary"]
+        self.assertIn(r"\[Agents\] \(RAG\) \| \@host \#AI", sent)
+        self.assertIn(r"ai\_event\#details", sent)
+        self.assertIn("\nRSVP:", sent)
+        # LinkedIn consumes one escape character, leaving the same text as Copy.
+        import re
+        self.assertEqual(re.sub(r"\\([|{}@\[\]()<>#\\*_~])", r"\1", sent), text)
+
+
 class PublishingUITests(unittest.TestCase):
     def setUp(self):
         publishing._pending_authorizations.clear()
@@ -344,6 +380,7 @@ class PublishingUITests(unittest.TestCase):
              patch.object(events, "_scrape_evion_region_to_state", side_effect=store("evion_region_results")) as evion, \
              patch.object(events, "_scrape_meetup_region_to_state", side_effect=store("meetup_region_results")) as meetup, \
              patch.object(events, "generate_event_image", return_value=(True, {"bytes": PNG}, None)) as image, \
+             patch.object(events, "render_copy_button", wraps=events.render_copy_button) as copy_button, \
              patch.object(publishing.services, "post_to_linkedin", return_value=(True, {"id": "urn:li:share:test"})) as post:
             app = self.app(connected=True)
             for region, own, other in (("Bay Area", "SF AI meetup", "NY AI meetup"), ("New York", "NY AI meetup", "SF AI meetup")):
@@ -355,6 +392,9 @@ class PublishingUITests(unittest.TestCase):
                 self.assertNotIn(other, post.call_args.args[0])
                 self.assertIn(own, image.call_args.args[0])
                 self.assertNotIn(other, image.call_args.args[0])
+                copy_button.assert_any_call(
+                    post.call_args.args[0], f"publish-{region.lower().replace(' ', '-')}", label="📋 Copy for LinkedIn",
+                )
                 self.assertTrue(element(app.button, f"Publish {region} events").disabled)
             app.run()
             self.assertEqual(post.call_count, 2)

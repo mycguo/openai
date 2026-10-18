@@ -3866,6 +3866,7 @@ def main():
 
     render_publishing(
         days_to_scrape, _scrape_region_for_publishing, generate_organized_events, generate_event_image,
+        render_copy_button,
     )
     st.divider()
 

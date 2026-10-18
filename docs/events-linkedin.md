@@ -32,6 +32,12 @@ failed organization, or failed image generation stops publication. An image
 upload failure never falls back to a text-only post. The completed post link and
 its organized text and image remain visible on the page.
 
+Use **Copy for LinkedIn** below either regional result to copy its exact plain-text
+post. Day headings, event details, and full RSVP links match the manual Organize
+Events flow. The preview, clipboard text, and published post share that content;
+Markdown link and bold markers are removed. Reserved API characters are escaped
+only when sending the post, so copied text retains readable punctuation and URLs.
+
 Published runs are blocked from repeating for the same region, account, day, and
 date window within the session. A timeout or unconfirmed create request requires
 checking LinkedIn before explicitly allowing a retry. This is session-local
@@ -43,4 +49,5 @@ and public post still require validation with the configured LinkedIn app.
 
 References: [LinkedIn authorization code flow](https://learn.microsoft.com/en-us/linkedin/shared/authentication/authorization-code-flow),
 [Posts API](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/posts-api),
-and [Images API](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/images-api).
+[Images API](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/images-api),
+and [text format](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/little-text-format).

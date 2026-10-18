@@ -176,9 +176,22 @@ def render_connection():
 
 def linkedin_plain_text(organized):
     """Keep the organized agenda and RSVP URLs in LinkedIn's plain-text commentary."""
-    text = re.sub(r"\[([^\]]+)\]\((https?://[^\s]+)\)", r"\1 - RSVP: \2", organized)
-    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
-    return re.sub(r"(?m)^#{1,6}\s+", "", text).strip()
+    lines = []
+    for line in organized.splitlines():
+        urls = []
+
+        def unwrap_link(match):
+            urls.append(match.group(2))
+            return match.group(1)
+
+        line = re.sub(r"\[(.+?)\]\((https?://[^\s]+)\)", unwrap_link, line)
+        line = re.sub(r"\*\*(.*?)\*\*", r"\1", line)
+        line = re.sub(r"^#{1,6}\s+", "", line)
+        line = re.sub(r"^\s*[-*]\s+", "• ", line)
+        if urls:
+            line += " - RSVP: " + ", ".join(dict.fromkeys(urls))
+        lines.append(line.rstrip())
+    return "\n".join(lines).strip()
 
 
 def run_key(region, days, account):
@@ -233,7 +246,7 @@ def run_pipeline(region, days, account, state, scrape, organize, generate_image,
         progress(f"Publishing {region} events to LinkedIn…")
         ok, result = services.post_to_linkedin(
             run["text"], account["token"], account["author"],
-            image_payload=image, allow_image_fallback=False,
+            image_payload=image, allow_image_fallback=False, plain_text=True,
         )
         if ok:
             run.update(status="published", url=services.build_linkedin_post_url(result.get("id", "")))
@@ -251,7 +264,7 @@ def run_pipeline(region, days, account, state, scrape, organize, generate_image,
     return run
 
 
-def render_publishing(days, scrape, organize, generate_image):
+def render_publishing(days, scrape, organize, generate_image, copy_button):
     st.subheader("Publish events to LinkedIn")
     account = render_connection()
     st.caption("Each button scrapes Lu.ma, Cerebral Valley, Evion, and Meetup, organizes upcoming "
@@ -287,6 +300,7 @@ def render_publishing(days, scrape, organize, generate_image):
                     runs.pop(key, None)
                     st.rerun()
             if run.get("organized"):
+                copy_button(run["text"], f"publish-{region.lower().replace(' ', '-')}", label="📋 Copy for LinkedIn")
                 with st.expander(f"{region} organized events and image"):
                     st.text(run["text"])
                     if run.get("image"):

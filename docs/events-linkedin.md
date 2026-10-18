@@ -11,12 +11,13 @@ Enable Share on LinkedIn and Sign In with LinkedIn using OpenID Connect for
 `w_member_social`, `openid`, and `profile`. The existing `LINKEDIN_API_VERSION`
 setting is shared with the podcast app.
 
-1. Click **Connect to LinkedIn**, then **Authorize on LinkedIn (new tab)**.
-2. After authorization, copy the returned tab's complete address into the masked
-   callback field in the original Events tab and click **Complete connection**.
-   This preserves the original workspace. The connection request expires after
-   ten minutes; its state is validated and consumed once. Tokens remain in this
-   session and are cleared on disconnect. Do not share the callback URL.
+1. Click **Connect to LinkedIn**, then **Authorize on LinkedIn**.
+2. Authorize your account on LinkedIn. You return to Events in the same tab and
+   connect automatically; no URL copying or extra completion step is needed.
+   Your Events workspace is restored after the redirect. Pending requests are
+   kept in server memory for ten minutes, bound to the initiating browser, and
+   consumed once. An app restart requires starting a new connection. Tokens
+   remain in the returned session and are cleared on disconnect.
 3. Click **Publish Bay Area events** or **Publish New York events**. That click
    scrapes all four sources, keeps only upcoming events in the chosen region,
    organizes them into a daily agenda, generates a Google image from that agenda,

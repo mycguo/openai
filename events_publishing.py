@@ -1,7 +1,11 @@
 """LinkedIn connection and one-click regional event publishing."""
 
+import copy
+import hashlib
+import html
 import re
 import secrets
+import threading
 import time
 from datetime import datetime
 from urllib.parse import urlencode
@@ -14,6 +18,33 @@ from youtube_publishing import post_fingerprint, validate_callback
 
 
 REGION_TIMEZONES = {"Bay Area": "America/Los_Angeles", "New York": "America/New_York"}
+WORKSPACE_KEYS = (
+    "days_to_scrape", "luma_region_results", "cv_region_results", "evion_region_results",
+    "meetup_region_results", "region_combined_events", "combined_events", "selected_event_region",
+    "organized_events", "organized_events_mode", "organized_events_cache", "organized_events_text",
+    "generated_image", "generated_essay", "loaded_events_source", "events_publish_runs",
+    "events_linkedin_attempts",
+)
+
+
+@st.cache_resource(show_spinner=False)
+def _pending_authorizations():
+    # A redirect opens a new Streamlit session. Keep only short-lived pending requests here.
+    return {}, threading.Lock()
+
+
+def _browser_binding():
+    cookie = st.context.cookies.get("_streamlit_xsrf", "")
+    if not cookie:
+        raise ValueError("Reload this page before connecting to LinkedIn.")
+    # Tornado can re-mask the same XSRF token when a new WebSocket opens.
+    parts = cookie.split("|")
+    if len(parts) == 4 and parts[0] == "2":
+        mask, token = bytes.fromhex(parts[1]), bytes.fromhex(parts[2])
+        if len(mask) != 4 or len(token) != 16:
+            raise ValueError("Reload this page before connecting to LinkedIn.")
+        cookie = bytes(value ^ mask[index % 4] for index, value in enumerate(token)).hex()
+    return hashlib.sha256(cookie.encode()).hexdigest()
 
 
 def linkedin_config():
@@ -27,9 +58,19 @@ def linkedin_config():
 
 def start_authorization(config):
     state = secrets.token_urlsafe(32)
-    st.session_state.events_oauth_pending = {
+    pending = {
         "state": state, "created": time.time(), "redirect_uri": config["redirect_uri"],
+        "browser": _browser_binding(),
+        "workspace": copy.deepcopy({key: st.session_state[key] for key in WORKSPACE_KEYS if key in st.session_state}),
     }
+    requests, lock = _pending_authorizations()
+    with lock:
+        expired = [key for key, value in requests.items() if time.time() - value["created"] > 600]
+        previous = st.session_state.get("events_oauth_pending", {}).get("state")
+        for key in expired + [previous]:
+            requests.pop(key, None)
+        requests[state] = pending
+    st.session_state.events_oauth_pending = {key: pending[key] for key in ("state", "created", "redirect_uri")}
     return services.LINKEDIN_AUTH_URL + "?" + urlencode({
         "response_type": "code", "client_id": config["client_id"],
         "redirect_uri": config["redirect_uri"], "scope": "w_member_social openid profile",
@@ -37,10 +78,26 @@ def start_authorization(config):
     })
 
 
-def finish_authorization():
-    callback = st.session_state.pop("events_oauth_callback", "")
-    pending = st.session_state.get("events_oauth_pending")
+def handle_authorization_callback():
+    """Connect automatically when LinkedIn returns, as in the podcast app."""
+    if not st.query_params.get("code") and not st.query_params.get("error"):
+        return
     try:
+        state = st.query_params.get("state", "")
+        browser = _browser_binding()
+        requests, lock = _pending_authorizations()
+        with lock:
+            pending = requests.get(state)
+            if not pending or time.time() - pending["created"] > 600:
+                requests.pop(state, None)
+                raise ValueError("Connection expired. Connect to LinkedIn again.")
+            if not secrets.compare_digest(browser, pending["browser"]):
+                raise ValueError("Connection must finish in the browser where it started.")
+            requests.pop(state)
+        callback = services._strip_redirect_uri_extras(services._get_runtime_url()) + "?" + urlencode([
+            (key, value) for key in ("state", "code", "error") for value in st.query_params.get_all(key)
+        ])
+        st.session_state.update(pending["workspace"])
         code = validate_callback(callback, pending)
         config = linkedin_config()
         config["redirect_uri"] = pending["redirect_uri"]
@@ -60,12 +117,21 @@ def finish_authorization():
         st.session_state.pop("events_auth_error", None)
     except Exception:
         st.session_state.events_auth_error = (
-            "Could not connect. Check the returned URL and the ten-minute connection expiry, "
-            "or start a new connection."
+            "Could not connect to LinkedIn. Please start a new connection and authorize "
+            "in this browser within ten minutes."
         )
+    finally:
+        st.session_state.pop("events_oauth_pending", None)
+        st.session_state.pop("events_auth_url", None)
+        for key in ("code", "state", "error", "error_description"):
+            st.query_params.pop(key, None)
 
 
 def disconnect():
+    pending = st.session_state.get("events_oauth_pending", {})
+    requests, lock = _pending_authorizations()
+    with lock:
+        requests.pop(pending.get("state"), None)
     for key in ("events_linkedin", "events_oauth_pending", "events_auth_url",
                 "events_oauth_callback", "events_auth_error"):
         st.session_state.pop(key, None)
@@ -84,18 +150,25 @@ def render_connection():
     config = linkedin_config()
     configured = all(config.values())
     if st.button("Connect to LinkedIn", key="events_connect", disabled=not configured):
-        st.session_state.events_auth_url = start_authorization(config)
+        try:
+            st.session_state.events_auth_url = start_authorization(config)
+            st.session_state.pop("events_auth_error", None)
+        except ValueError as exc:
+            st.session_state.events_auth_error = str(exc)
     if not configured:
         st.info("Set LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET in secrets or environment. "
                 "Set EVENTS_LINKEDIN_REDIRECT_URI to this Events page URL if needed.")
     if st.session_state.get("events_auth_url"):
         st.caption(f"Register this redirect URL in your LinkedIn app: {config['redirect_uri']}")
-        st.link_button("Authorize on LinkedIn (new tab)", st.session_state.events_auth_url)
-        st.write("After authorizing, copy the returned tab's full address and paste it here "
-                 "in this original tab to preserve your workspace.")
-        with st.form("events_connect_form"):
-            st.text_input("Returned callback URL", type="password", key="events_oauth_callback")
-            st.form_submit_button("Complete connection", on_click=finish_authorization)
+        st.html(
+            f'<a href="{html.escape(st.session_state.events_auth_url, quote=True)}" '
+            'target="_self" style="display:inline-block;padding:0.5rem 0.9rem;'
+            'border:1px solid #7fbef2;border-radius:0.5rem;text-decoration:none;">'
+            'Authorize on LinkedIn</a>'
+        )
+        if st.button("Cancel", key="events_cancel_oauth"):
+            disconnect()
+            st.rerun()
     if st.session_state.get("events_auth_error"):
         st.error(st.session_state.events_auth_error)
     return None
@@ -180,9 +253,6 @@ def run_pipeline(region, days, account, state, scrape, organize, generate_image,
 
 def render_publishing(days, scrape, organize, generate_image):
     st.subheader("Publish events to LinkedIn")
-    if st.query_params.get("code") or st.query_params.get("error"):
-        st.info("Return to your original Events tab and paste this tab's full address into "
-                "the connection form. Keep that address private.")
     account = render_connection()
     st.caption("Each button scrapes Lu.ma, Cerebral Valley, Evion, and Meetup, organizes upcoming "
                "events starting tomorrow, generates an image, and publishes both publicly to "

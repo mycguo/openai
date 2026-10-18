@@ -205,7 +205,27 @@ class RegionalScrapeTests(unittest.TestCase):
         self.assertIn("New York AI Events\nNY AI meetup", client.models.generate_content.call_args.kwargs["contents"])
 
 
+class BrowserBindingTests(unittest.TestCase):
+    def test_new_websocket_mask_keeps_the_same_browser_binding(self):
+        bindings = []
+        token = bytes(range(16))
+        for mask in (b"abcd", b"wxyz"):
+            masked = bytes(value ^ mask[index % 4] for index, value in enumerate(token))
+            cookie = f"2|{mask.hex()}|{masked.hex()}|1000"
+            with patch.object(publishing.st, "context", SimpleNamespace(cookies={"_streamlit_xsrf": cookie})):
+                bindings.append(publishing._browser_binding())
+        self.assertEqual(bindings[0], bindings[1])
+        with patch.object(publishing.st, "context", SimpleNamespace(cookies={})):
+            with self.assertRaises(ValueError):
+                publishing._browser_binding()
+
+
 class PublishingUITests(unittest.TestCase):
+    def setUp(self):
+        publishing._pending_authorizations.clear()
+        self.enterContext(patch.object(publishing, "_browser_binding", return_value="test-browser"))
+        self.enterContext(patch.object(publishing.services, "_get_runtime_url", return_value=CONFIG["redirect_uri"]))
+
     def app(self, connected=False):
         app = AppTest.from_string("import events\nevents.main()")
         if connected:
@@ -222,31 +242,93 @@ class PublishingUITests(unittest.TestCase):
                 self.assertTrue(element(app.button, f"Publish {region} events").disabled)
             post.assert_not_called()
 
-    def test_connection_state_validation_exchange_once_and_disconnect(self):
+    def test_automatic_connection_restores_workspace_after_redirect_and_exchanges_once(self):
         with patch.object(publishing, "linkedin_config", return_value=CONFIG), \
              patch.object(publishing.services, "exchange_code_for_token", return_value={"access_token": "test-token", "expires_in": 3600}) as exchange, \
              patch.object(publishing.services, "fetch_authenticated_member_urn", return_value=ACCOUNT["author"]):
             app = self.app()
+            app.session_state.combined_events = SF
+            app.session_state.generated_image = {"bytes": PNG}
+            app.session_state.days_to_scrape = 12
+            app.session_state.events_linkedin_attempts = {"previous": {"status": "published"}}
+            app.run()
             element(app.button, "Connect to LinkedIn").click().run()
             pending = app.session_state.events_oauth_pending
             params = parse_qs(urlsplit(app.session_state.events_auth_url).query)
             self.assertEqual(params["scope"], ["w_member_social openid profile"])
-            bad = CONFIG["redirect_uri"] + "?" + urlencode({"state": "wrong", "code": "code"})
-            element(app.text_input, "Returned callback URL").set_value(bad)
-            element(app.button, "Complete connection").click().run()
             exchange.assert_not_called()
-            callback = CONFIG["redirect_uri"] + "?" + urlencode({"state": pending["state"], "code": "test-code"})
-            element(app.text_input, "Returned callback URL").set_value(callback)
-            element(app.button, "Complete connection").click().run()
+            self.assertFalse(any(item.label == "Returned callback URL" for item in app.text_input))
+            self.assertFalse(any(item.label == "Complete connection" for item in app.button))
+            # A real provider redirect starts a new Streamlit session.
+            app = AppTest.from_string("import events\nevents.main()")
+            app.query_params.update({"state": pending["state"], "code": "test-code"})
+            app.run()
             self.assertFalse(app.exception)
             self.assertEqual(app.session_state.events_linkedin["author"], ACCOUNT["author"])
+            self.assertEqual(app.session_state.combined_events, SF)
+            self.assertEqual(app.session_state.generated_image["bytes"], PNG)
+            self.assertEqual(app.session_state.days_to_scrape, 12)
+            self.assertIn("previous", app.session_state.events_linkedin_attempts)
             self.assertNotIn("events_oauth_pending", app.session_state)
-            self.assertNotIn("events_oauth_callback", app.session_state)
+            self.assertNotIn("code", app.query_params)
+            self.assertNotIn("state", app.query_params)
             app.run()
             exchange.assert_called_once()
             element(app.button, "Disconnect LinkedIn").click().run()
             self.assertNotIn("events_linkedin", app.session_state)
             self.assertTrue(element(app.button, "Publish Bay Area events").disabled)
+
+    def test_automatic_connection_rejects_unknown_expired_and_other_browser_requests(self):
+        with patch.object(publishing, "linkedin_config", return_value=CONFIG), \
+             patch.object(publishing.services, "exchange_code_for_token") as exchange:
+            for invalid in ("unknown", "expired", "other browser", "wrong redirect"):
+                with self.subTest(invalid=invalid):
+                    app = self.app()
+                    element(app.button, "Connect to LinkedIn").click().run()
+                    state = app.session_state.events_oauth_pending["state"]
+                    requests, _ = publishing._pending_authorizations()
+                    if invalid == "unknown":
+                        state = "unknown"
+                    elif invalid == "expired":
+                        requests[state]["created"] -= 601
+                    elif invalid == "other browser":
+                        requests[state]["browser"] = "other-browser"
+                    else:
+                        requests[state]["redirect_uri"] = "http://localhost:8502/"
+                    callback = AppTest.from_string("import events\nevents.main()")
+                    callback.query_params.update({"state": state, "code": "test-code"})
+                    callback.run()
+                    self.assertFalse(callback.exception)
+                    self.assertNotIn("events_linkedin", callback.session_state)
+                    self.assertTrue(callback.error)
+                    self.assertNotIn("code", callback.query_params)
+                    exchange.assert_not_called()
+
+    def test_authorization_denied_restores_workspace_without_connecting(self):
+        with patch.object(publishing, "linkedin_config", return_value=CONFIG), \
+             patch.object(publishing.services, "exchange_code_for_token") as exchange:
+            app = self.app()
+            app.session_state.combined_events = NY
+            element(app.button, "Connect to LinkedIn").click().run()
+            state = app.session_state.events_oauth_pending["state"]
+            callback = AppTest.from_string("import events\nevents.main()")
+            callback.query_params.update({"state": state, "error": "access_denied"})
+            callback.run()
+            self.assertFalse(callback.exception)
+            self.assertEqual(callback.session_state.combined_events, NY)
+            self.assertNotIn("events_linkedin", callback.session_state)
+            self.assertNotIn("error", callback.query_params)
+            exchange.assert_not_called()
+
+    def test_cancel_invalidates_pending_connection(self):
+        with patch.object(publishing, "linkedin_config", return_value=CONFIG):
+            app = self.app()
+            element(app.button, "Connect to LinkedIn").click().run()
+            state = app.session_state.events_oauth_pending["state"]
+            element(app.button, "Cancel").click().run()
+            requests, _ = publishing._pending_authorizations()
+            self.assertNotIn(state, requests)
+            self.assertNotIn("events_auth_url", app.session_state)
 
     def test_publish_buttons_run_all_steps_and_keep_regions_separate(self):
         def store(key):

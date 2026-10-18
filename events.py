@@ -23,7 +23,7 @@ from google.genai import types
 import requests
 from bs4 import BeautifulSoup
 
-from events_publishing import render_publishing
+from events_publishing import handle_authorization_callback, render_publishing
 
 logger = logging.getLogger(__name__)
 
@@ -3857,6 +3857,7 @@ def _scrape_region_for_publishing(region_name: str, days: int, progress) -> str:
 
 
 def main():
+    handle_authorization_callback()
     st.title("AI Events Scraper")
     st.header("Automatically extract and display AI events")
 

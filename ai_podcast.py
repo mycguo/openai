@@ -1437,6 +1437,10 @@ def upload_linkedin_image(upload_url: str, image_bytes: bytes, mime_type: str):
     return False, last_error or "LinkedIn image upload failed after retries."
 
 
+def encode_linkedin_plain_text(content: str) -> str:
+    return re.sub(r"([|{}@\[\]()<>#\\*_~])", r"\\\1", content)
+
+
 def post_to_linkedin(content, access_token, author_id, image_payload=None, allow_image_fallback: bool = True, plain_text: bool = False):
     if not re.fullmatch(r"\d{6}", LINKEDIN_API_VERSION):
         return False, (
@@ -1460,7 +1464,7 @@ def post_to_linkedin(content, access_token, author_id, image_payload=None, allow
     }
     payload = {
         "author": author_urn,
-        "commentary": re.sub(r"([|{}@\[\]()<>#\\*_~])", r"\\\1", content) if plain_text else content,
+        "commentary": encode_linkedin_plain_text(content) if plain_text else content,
         "visibility": "PUBLIC",
         "distribution": {
             "feedDistribution": "MAIN_FEED",

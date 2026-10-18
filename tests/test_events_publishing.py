@@ -1,6 +1,7 @@
 """Offline tests: no scraping, billable generation, OAuth traffic, or public posts."""
 
 import base64
+import re
 import time
 import unittest
 from types import SimpleNamespace
@@ -35,6 +36,18 @@ def element(elements, label):
     return next(item for item in elements if item.label == label)
 
 
+def long_agenda_source(count=110, title_suffix=""):
+    return "\n".join(
+        f"""- **[AI meetup {index:03d} {title_suffix}](https://lu.ma/event-{index:03d})**
+  Date and Time: October 20, 2026 11:30 AM EDT
+  Location/Venue: New York, US
+  Host: NYC AI community and local builders
+  Brief Description: {'Meet local AI builders and explore practical applications. ' * 3}
+"""
+        for index in range(count)
+    )
+
+
 class State(dict):
     """Match Streamlit's mapping and attribute access for offline source tests."""
     __getattr__ = dict.__getitem__
@@ -59,9 +72,9 @@ class PipelineTests(unittest.TestCase):
         self.publish = self.publish_patch.start()
         self.addCleanup(self.publish_patch.stop)
 
-    def run_region(self, region="Bay Area", account=None):
+    def run_region(self, region="Bay Area", account=None, prepare_post=None):
         return publishing.run_pipeline(region, 8, account or ACCOUNT, self.state,
-                                       self.scrape, self.organize, self.image, Mock())
+                                       self.scrape, self.organize, self.image, Mock(), prepare_post=prepare_post)
 
     def test_full_workflow_uses_fresh_region_agenda_and_image(self):
         for region in ("Bay Area", "New York"):
@@ -70,7 +83,7 @@ class PipelineTests(unittest.TestCase):
             self.scrape.assert_called_with(region, 8, unittest.mock.ANY)
             self.organize.assert_called_with(f"{region} fresh source")
             self.assertIn(region, self.image.call_args.args[0])
-            self.assertIn(result["organized"], self.image.call_args.args[0])
+            self.assertIn(result["text"], self.image.call_args.args[0])
             self.publish.assert_called_with(
                 result["text"], ACCOUNT["token"], ACCOUNT["author"],
                 image_payload=result["image"], allow_image_fallback=False, plain_text=True,
@@ -154,12 +167,55 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(self.run_region()["status"], "uncertain")
             create.assert_not_called()
 
-    def test_long_agenda_is_sent_unchanged_except_markdown(self):
+    def test_unstructured_oversized_agenda_stops_before_generation_or_publication(self):
         self.organize.side_effect = None
         self.organize.return_value = (True, "x" * 5000)
         result = self.run_region()
+        self.assertEqual(result["status"], "failed")
+        self.image.assert_not_called()
+        self.publish.assert_not_called()
+
+    def test_long_agenda_creates_one_concise_post_and_preserves_the_full_agenda(self):
+        source = long_agenda_source(130)
+        self.scrape.side_effect = None
+        self.scrape.return_value = source
+        self.organize.side_effect = None
+        self.organize.return_value = True, events._build_organized_events_fallback(
+            events._extract_organize_candidate_events(source),
+        )
+        result = self.run_region("New York", prepare_post=events._prepare_region_linkedin_post)
         self.assertEqual(result["status"], "published")
-        self.assertEqual(self.publish.call_args.args[0], "x" * 5000)
+        self.assertGreater(len(result["full_text"]), 22051)
+        self.assertLessEqual(publishing.linkedin_commentary_length(result["text"]), 4000)
+        self.assertIn("AI meetup 129", result["full_text"])
+        self.assertNotIn("AI meetup 129", result["text"])
+        self.assertIn(result["text"], self.image.call_args.args[0])
+        self.assertNotIn("AI meetup 129", self.image.call_args.args[0])
+        self.assertIn("<ul>", result["html"])
+        self.assertIn('href="https://lu.ma/event-000"', result["html"])
+        self.publish.assert_called_once()
+
+    def test_definitive_length_rejection_allows_an_explicit_retry(self):
+        self.publish.return_value = False, '400: {"message":"ShareCommentary text length exceeded the maximum allowed"}'
+        self.assertEqual(self.run_region()["status"], "failed")
+        self.publish.return_value = True, {"id": "urn:li:share:retry"}
+        self.assertEqual(self.run_region()["status"], "published")
+        self.assertEqual(self.publish.call_count, 2)
+
+    def test_unfittable_url_preserves_a_copyable_agenda_without_generation(self):
+        url = "https://lu.ma/" + "a" * 4100
+        source = SF.replace("https://lu.ma/sf-test", url)
+        self.scrape.side_effect = None
+        self.scrape.return_value = source
+        self.organize.side_effect = None
+        self.organize.return_value = True, events._build_organized_events_fallback(
+            events._extract_organize_candidate_events(source),
+        )
+        result = self.run_region(prepare_post=events._prepare_region_linkedin_post)
+        self.assertEqual(result["status"], "failed")
+        self.assertIn(url, result["text"])
+        self.image.assert_not_called()
+        self.publish.assert_not_called()
 
 
 class RegionalScrapeTests(unittest.TestCase):
@@ -237,8 +293,50 @@ class LinkedInFormattingTests(unittest.TestCase):
         organized = "## Tuesday, October 20\n\n- **6 PM - [AI [Agents] & RAG](https://lu.ma/ai?ref=feed#details)** - SF host\n"
         self.assertEqual(
             publishing.linkedin_plain_text(organized),
-            "Tuesday, October 20\n\n• 6 PM - AI [Agents] & RAG - SF host - RSVP: https://lu.ma/ai?ref=feed#details",
+            "Tuesday, October 20\n\n• 6 PM - AI [Agents] & RAG - SF host\nRSVP: https://lu.ma/ai?ref=feed#details",
         )
+
+    def test_event_blocks_and_links_do_not_run_into_the_next_time(self):
+        candidates = events._extract_organize_candidate_events(SF + NY)
+        text = events._build_organized_events_text(candidates, use_markdown_links=False, include_plain_rsvp_link=True)
+        self.assertIn("RSVP: https://lu.ma/ny-test\n\n• ", text)
+        self.assertNotIn("https://lu.ma/ny-test\n6", text)
+        self.assertTrue(all(line.startswith("https://") for line in re.findall(r"^RSVP: (.+)$", text, re.M)))
+
+    def test_concise_post_keeps_complete_events_and_urls(self):
+        source = long_agenda_source()
+        prepared = events._prepare_region_linkedin_post(source, "", "New York")
+        urls = re.findall(r"^RSVP: (https?://\S+)$", prepared["text"], re.M)
+        self.assertTrue(urls)
+        self.assertEqual(urls, [f"https://lu.ma/event-{index:03d}" for index in range(len(urls))])
+        self.assertIn(f"Showing {len(urls)} of 110 upcoming New York events.", prepared["text"])
+        self.assertEqual(prepared["html"].count("<li>"), len(urls))
+        self.assertLessEqual(publishing.linkedin_commentary_length(prepared["text"]), 4000)
+
+    def test_compaction_keeps_all_events_when_details_alone_exceed_the_limit(self):
+        prepared = events._prepare_region_linkedin_post(long_agenda_source(30), "", "New York")
+        self.assertGreater(publishing.linkedin_commentary_length(prepared["full_text"]), 4000)
+        self.assertEqual(prepared["text"].count("RSVP:"), 30)
+        self.assertNotIn("Showing", prepared["text"])
+        self.assertLessEqual(publishing.linkedin_commentary_length(prepared["text"]), 4000)
+
+    def test_concise_post_counts_api_escapes_and_emoji_pairs(self):
+        source = long_agenda_source(30, "🚀 [Agents] #AI " * 10)
+        prepared = events._prepare_region_linkedin_post(source, "", "New York")
+        self.assertLessEqual(publishing.linkedin_commentary_length(prepared["text"]), 4000)
+        self.assertIn("🚀", prepared["text"])
+        self.assertIn("RSVP: https://lu.ma/event-000", prepared["text"])
+
+    def test_short_post_uses_exact_organized_events_html(self):
+        prepared = events._prepare_region_linkedin_post(SF, "", "Bay Area")
+        expected = events._build_organized_events_html(events._extract_organize_candidate_events(SF))
+        self.assertEqual(prepared["html"], expected)
+        self.assertEqual(prepared["text"], prepared["full_text"])
+
+    def test_an_oversized_single_url_is_never_truncated(self):
+        source = SF.replace("https://lu.ma/sf-test", "https://lu.ma/" + "a" * 4100)
+        with self.assertRaisesRegex(ValueError, "complete RSVP link"):
+            events._prepare_region_linkedin_post(source, "", "Bay Area")
 
     def test_plain_text_api_encoding_preserves_reserved_punctuation(self):
         text = "AI [Agents] (RAG) | @host #AI <demo> {tools} \\ * _ ~\nRSVP: https://lu.ma/ai_event#details"
@@ -252,7 +350,6 @@ class LinkedInFormattingTests(unittest.TestCase):
         self.assertIn(r"ai\_event\#details", sent)
         self.assertIn("\nRSVP:", sent)
         # LinkedIn consumes one escape character, leaving the same text as Copy.
-        import re
         self.assertEqual(re.sub(r"\\([|{}@\[\]()<>#\\*_~])", r"\1", sent), text)
 
 
@@ -394,6 +491,9 @@ class PublishingUITests(unittest.TestCase):
                 self.assertNotIn(other, image.call_args.args[0])
                 copy_button.assert_any_call(
                     post.call_args.args[0], f"publish-{region.lower().replace(' ', '-')}", label="📋 Copy for LinkedIn",
+                    html_content=events._build_organized_events_html(
+                        events._extract_organize_candidate_events(SF if region == "Bay Area" else NY),
+                    ),
                 )
                 self.assertTrue(element(app.button, f"Publish {region} events").disabled)
             app.run()
@@ -421,6 +521,7 @@ class PublishingUITests(unittest.TestCase):
             element(app.button, "Publish Bay Area events").click().run()
             self.assertFalse(app.exception)
             self.assertTrue(element(app.button, "Publish Bay Area events").disabled)
+
             app.run()
             post.assert_called_once()
             element(app.button, "No Bay Area post exists — allow retry").click().run()
@@ -432,6 +533,33 @@ class PublishingUITests(unittest.TestCase):
             self.assertFalse(app.exception)
             self.assertEqual(post.call_count, 2)
             self.assertTrue(element(app.button, "Publish Bay Area events").disabled)
+
+    def test_existing_oversized_rejection_can_be_retried_and_full_agenda_can_be_copied(self):
+        source = long_agenda_source()
+        organized = events._build_organized_events_fallback(events._extract_organize_candidate_events(source))
+        with patch.object(events, "_scrape_region_for_publishing") as scrape, \
+             patch.object(events, "render_copy_button", wraps=events.render_copy_button) as copy_button, \
+             patch.object(publishing.services, "post_to_linkedin") as post:
+            app = self.app(connected=True)
+            app.session_state.events_publish_runs = {
+                publishing.run_key("New York", 8, ACCOUNT): {
+                    "region": "New York", "source": source, "organized": organized,
+                    "text": publishing.linkedin_plain_text(organized), "status": "uncertain",
+                    "fingerprint": "legacy-rejected",
+                    "error": 'LinkedIn did not confirm publication: 400: {"message":"ShareCommentary text length (22051 characters) exceeded the maximum allowed (4000 characters)"}',
+                },
+            }
+            app.session_state.events_linkedin_attempts = {"legacy-rejected": {"status": "uncertain"}}
+            app.run()
+            self.assertFalse(app.exception)
+            self.assertFalse(element(app.button, "Publish New York events").disabled)
+            self.assertNotIn("legacy-rejected", app.session_state.events_linkedin_attempts)
+            run = app.session_state.events_publish_runs[publishing.run_key("New York", 8, ACCOUNT)]
+            self.assertLessEqual(publishing.linkedin_commentary_length(run["text"]), 4000)
+            copy_button.assert_any_call(run["full_text"], "full-agenda-new-york",
+                                        label="📋 Copy full agenda", html_content=run["full_html"])
+            scrape.assert_not_called()
+            post.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from youtube_publishing import post_fingerprint, validate_callback
 
 
 REGION_TIMEZONES = {"Bay Area": "America/Los_Angeles", "New York": "America/New_York"}
+LINKEDIN_POST_LIMIT = 4000
 WORKSPACE_KEYS = (
     "days_to_scrape", "luma_region_results", "cv_region_results", "evion_region_results",
     "meetup_region_results", "region_combined_events", "combined_events", "selected_event_region",
@@ -189,9 +190,33 @@ def linkedin_plain_text(organized):
         line = re.sub(r"^#{1,6}\s+", "", line)
         line = re.sub(r"^\s*[-*]\s+", "• ", line)
         if urls:
-            line += " - RSVP: " + ", ".join(dict.fromkeys(urls))
+            if not line.startswith("• "):
+                line = "• " + line
+            line += "\nRSVP: " + ", ".join(dict.fromkeys(urls)) + "\n"
         lines.append(line.rstrip())
+        if urls:
+            lines.append("")
     return "\n".join(lines).strip()
+
+
+def linkedin_commentary_length(text):
+    # Count the encoded API value conservatively, including UTF-16 emoji pairs.
+    return len(services.encode_linkedin_plain_text(text).encode("utf-16-le")) // 2
+
+
+def _prepare_post(run, source, region, prepare_post):
+    full_text = linkedin_plain_text(run["organized"])
+    run.update(text=full_text, full_text=full_text)
+    if prepare_post:
+        run.update(prepare_post(source, run["organized"], region))
+    if linkedin_commentary_length(run["text"]) > LINKEDIN_POST_LIMIT:
+        raise ValueError("The event agenda is too long for one LinkedIn post. Nothing was published.")
+
+
+def _is_length_rejection(error):
+    return bool(re.match(r"^(?:LinkedIn did not confirm publication: )?400:", str(error))) and (
+        "text length" in str(error) and "maximum allowed" in str(error)
+    )
 
 
 def run_key(region, days, account):
@@ -199,7 +224,7 @@ def run_key(region, days, account):
     return post_fingerprint(f"{region}|{day}|{days}", None, account["author"])
 
 
-def run_pipeline(region, days, account, state, scrape, organize, generate_image, progress):
+def run_pipeline(region, days, account, state, scrape, organize, generate_image, progress, prepare_post=None):
     """Use only this run's region content; mark the post attempt before sending it."""
     key = run_key(region, days, account)
     runs = state.setdefault("events_publish_runs", {})
@@ -214,6 +239,7 @@ def run_pipeline(region, days, account, state, scrape, organize, generate_image,
         source = scrape(region, days, progress)
         if not source or not source.strip():
             raise ValueError(f"No upcoming {region} events found. Nothing was published.")
+        run["source"] = source
 
         run["stage"] = "organizing"
         progress(f"Organizing {region} events…")
@@ -221,11 +247,11 @@ def run_pipeline(region, days, account, state, scrape, organize, generate_image,
         if not ok or not organized or not organized.strip():
             raise ValueError("Could not organize the scraped events. Nothing was published.")
         run["organized"] = organized
-        run["text"] = linkedin_plain_text(organized)
+        _prepare_post(run, source, region, prepare_post)
 
         run["stage"] = "image generation"
         progress(f"Generating the {region} event image…")
-        ok, image, error = generate_image(f"{region} AI Events\n\n{organized}")
+        ok, image, error = generate_image(f"{region} AI Events\n\n{run['text']}")
         if not ok or not image or not image.get("bytes"):
             raise ValueError(error or "No image was generated. Nothing was published.")
         image = {**image, "alt_text": f"Upcoming {region} AI events"}
@@ -236,7 +262,7 @@ def run_pipeline(region, days, account, state, scrape, organize, generate_image,
         fingerprint = post_fingerprint(run["text"], image, account["author"])
         attempts = state.setdefault("events_linkedin_attempts", {})
         run["fingerprint"] = fingerprint
-        if fingerprint in attempts:
+        if attempts.get(fingerprint, {}).get("status") in {"published", "uncertain"}:
             run.update(attempts[fingerprint])
             return run
 
@@ -250,6 +276,8 @@ def run_pipeline(region, days, account, state, scrape, organize, generate_image,
         )
         if ok:
             run.update(status="published", url=services.build_linkedin_post_url(result.get("id", "")))
+        elif _is_length_rejection(result):
+            run.update(status="failed", error="LinkedIn rejected the post length. The full agenda is available below.")
         else:
             run["error"] = f"LinkedIn did not confirm publication: {result}"
         attempts[fingerprint] = {field: run[field] for field in ("status", "url", "error") if field in run}
@@ -264,7 +292,7 @@ def run_pipeline(region, days, account, state, scrape, organize, generate_image,
     return run
 
 
-def render_publishing(days, scrape, organize, generate_image, copy_button):
+def render_publishing(days, scrape, organize, generate_image, copy_button, prepare_post=None, render_preview=None):
     st.subheader("Publish events to LinkedIn")
     account = render_connection()
     st.caption("Each button scrapes Lu.ma, Cerebral Valley, Evion, and Meetup, organizes upcoming "
@@ -275,6 +303,15 @@ def render_publishing(days, scrape, organize, generate_image, copy_button):
         with column:
             key = run_key(region, days, account) if account else ""
             run = runs.get(key, {})
+            if run.get("status") == "uncertain" and _is_length_rejection(run.get("error", "")):
+                st.session_state.get("events_linkedin_attempts", {}).pop(run.get("fingerprint"), None)
+                run.update(status="failed", error="LinkedIn rejected the full agenda. Publish again to create one concise post.")
+                source = run.get("source") or (st.session_state.get("region_combined_events") or {}).get(region)
+                if source and run.get("organized"):
+                    try:
+                        _prepare_post(run, source, region, prepare_post)
+                    except ValueError:
+                        pass
             if run.get("status") == "running":
                 run.update(status="failed", error="Preparation was interrupted. You can try again.")
             blocked = run.get("status") in {"published", "uncertain"}
@@ -284,6 +321,7 @@ def render_publishing(days, scrape, organize, generate_image, copy_button):
                     result = run_pipeline(
                         region, days, account, st.session_state, scrape, organize, generate_image,
                         lambda label: status.update(label=label),
+                        prepare_post=prepare_post,
                     )
                     status.update(state="complete" if result["status"] == "published" else "error")
                 st.rerun()
@@ -300,8 +338,21 @@ def render_publishing(days, scrape, organize, generate_image, copy_button):
                     runs.pop(key, None)
                     st.rerun()
             if run.get("organized"):
-                copy_button(run["text"], f"publish-{region.lower().replace(' ', '-')}", label="📋 Copy for LinkedIn")
+                copy_button(run["text"], f"publish-{region.lower().replace(' ', '-')}",
+                            label="📋 Copy for LinkedIn", html_content=run.get("html"))
                 with st.expander(f"{region} organized events and image"):
-                    st.text(run["text"])
+                    if render_preview and run.get("html"):
+                        render_preview(run["html"])
+                    else:
+                        st.text(run["text"])
                     if run.get("image"):
                         st.image(run["image"]["bytes"], caption=f"{region} event image", width="stretch")
+                if run.get("full_text") and run["full_text"] != run["text"]:
+                    st.caption("Condensed to one LinkedIn post. The full agenda is preserved below.")
+                    with st.expander(f"Full {region} agenda"):
+                        copy_button(run["full_text"], f"full-agenda-{region.lower().replace(' ', '-')}",
+                                    label="📋 Copy full agenda", html_content=run.get("full_html"))
+                        if render_preview and run.get("full_html"):
+                            render_preview(run["full_html"])
+                        else:
+                            st.text(run["full_text"])

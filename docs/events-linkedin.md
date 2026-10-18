@@ -32,11 +32,18 @@ failed organization, or failed image generation stops publication. An image
 upload failure never falls back to a text-only post. The completed post link and
 its organized text and image remain visible on the page.
 
-Use **Copy for LinkedIn** below either regional result to copy its exact plain-text
-post. Day headings, event details, and full RSVP links match the manual Organize
-Events flow. The preview, clipboard text, and published post share that content;
-Markdown link and bold markers are removed. Reserved API characters are escaped
-only when sending the post, so copied text retains readable punctuation and URLs.
+Regional post previews use the same day headings, bulleted event list, and linked
+titles as **Organize Events → LinkedIn Preview**. **Copy for LinkedIn** copies both
+rich HTML and plain text, as in that flow. The plain-text/API version places each
+complete RSVP URL on its own line and separates event blocks with blank lines.
+
+Publishing creates one post within the observed 4,000-character API limit,
+including reserved-character escaping and emoji accounting. If the full agenda
+is too long, remove descriptions and hosts, then include the earliest complete
+event entries that fit, with a count when some events are omitted. **Full agenda**
+and **Copy full agenda** retain every event. The image is generated from the
+concise post that will actually be published. Existing oversized 400 rejections
+are unlocked for an explicit retry; rerendering the page never posts by itself.
 
 Published runs are blocked from repeating for the same region, account, day, and
 date window within the session. A timeout or unconfirmed create request requires

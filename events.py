@@ -24,7 +24,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from events_publishing import (
-    LINKEDIN_POST_LIMIT, handle_authorization_callback, linkedin_commentary_length, render_preparation,
+    handle_authorization_callback, render_preparation,
 )
 
 logger = logging.getLogger(__name__)
@@ -3860,45 +3860,16 @@ def _scrape_region_for_publishing(region_name: str, days: int, progress) -> str:
     )
 
 
-def _prepare_region_linkedin_post(source: str, organized: str, region: str) -> Dict:
-    """Use the Organize Events renderers for both full and concise agendas."""
+def _prepare_region_agenda(source: str, organized: str, region: str) -> Dict:
+    """Render every event using the Organize Events preview and Copy format."""
     candidates = _extract_organize_candidate_events(source)
     if not candidates:
-        raise ValueError("No dated events with RSVP links were available to publish.")
-
-    def _render(items):
-        return _build_organized_events_text(items, use_markdown_links=False, include_plain_rsvp_link=True)
-
-    full_text = _render(candidates)
-    full_html = _build_organized_events_html(candidates)
-    if linkedin_commentary_length(full_text) <= LINKEDIN_POST_LIMIT:
-        return {"text": full_text, "html": full_html, "full_text": full_text, "full_html": full_html}
-
-    compact = []
-    for event in candidates:
-        title = event["title"]
-        if len(title) > 160:
-            title = title[:157].rsplit(" ", 1)[0].rstrip() + "..."
-        compact.append({**event, "title": title, "host": "", "description": ""})
-
-    selected = []
-    for event in compact:
-        proposed = selected + [event]
-        footer = "" if len(proposed) == len(compact) else (
-            f"\n\nShowing {len(proposed)} of {len(compact)} upcoming {region} events."
-        )
-        if linkedin_commentary_length(_render(proposed) + footer) > LINKEDIN_POST_LIMIT:
-            break
-        selected = proposed
-    if not selected:
-        raise ValueError("An event entry is too long to fit with its complete RSVP link. Nothing was published.")
-    footer = "" if len(selected) == len(compact) else (
-        f"\n\nShowing {len(selected)} of {len(compact)} upcoming {region} events."
-    )
+        raise ValueError("No dated events with RSVP links were available to prepare.")
     return {
-        "text": _render(selected) + footer,
-        "html": _build_organized_events_html(selected) + (f"<p>{html_escape(footer.strip())}</p>" if footer else ""),
-        "full_text": full_text, "full_html": full_html,
+        "text": _build_organized_events_text(
+            candidates, use_markdown_links=False, include_plain_rsvp_link=True,
+        ),
+        "html": _build_organized_events_html(candidates),
     }
 
 
@@ -3917,7 +3888,7 @@ def main():
     render_preparation(
         days_to_scrape, _scrape_region_for_publishing, generate_organized_events, generate_event_image,
         render_copy_button,
-        prepare_post=_prepare_region_linkedin_post, render_preview=_render_linkedin_post_preview,
+        prepare_agenda=_prepare_region_agenda, render_preview=_render_linkedin_post_preview,
     )
     st.divider()
 

@@ -7,8 +7,8 @@ Click **Prepare Bay Area events** or **Prepare New York events**. Each button:
 
 1. Scrapes Lu.ma, Cerebral Valley, Evion, and Meetup for fresh events in that region.
 2. Organizes upcoming events into a daily agenda, starting tomorrow.
-3. Prepares one concise LinkedIn-ready text and generates an image from it.
-4. Displays the organized preview, image, and **Copy for LinkedIn** button.
+3. Prepares the full organized agenda and generates an image from it.
+4. Displays the organized preview, image, and **Copy full agenda** button.
 
 No earlier scrape, organize, or image-generation step is required. **Days to
 scrape** controls the date window. Image generation incurs provider usage.
@@ -21,16 +21,14 @@ stops preparation before image generation. If image generation fails, the prepar
 text remains available to copy and the button allows another attempt.
 
 Regional previews use the same day headings, bulleted event list, and linked
-titles as **Organize Events → LinkedIn Preview**. **Copy for LinkedIn** copies both
+titles as **Organize Events → LinkedIn Preview**. **Copy full agenda** copies both
 rich HTML and plain text, as in that flow. Plain text places each complete RSVP
 URL on its own line and separates event blocks with blank lines.
 
-The prepared text fits the observed 4,000-character API limit, including
-reserved-character escaping and emoji accounting. If the full agenda is too long,
-remove descriptions and hosts, then include the earliest complete event entries
-that fit, with a count when some events are omitted. **Full agenda** and **Copy
-full agenda** retain every event. The image uses the concise text shown in the
-preview. Results remain available after disconnecting LinkedIn.
+The page shows one full agenda and image per region. Every event, host,
+description, and complete RSVP link from the organized agenda is retained; there
+is no shorter version or publication-length cutoff. The image is generated from
+the full agenda. Results remain available after disconnecting LinkedIn.
 
 ## Optional LinkedIn connection
 

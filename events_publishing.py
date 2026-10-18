@@ -18,7 +18,6 @@ from youtube_publishing import validate_callback
 
 
 REGION_TIMEZONES = {"Bay Area": "America/Los_Angeles", "New York": "America/New_York"}
-LINKEDIN_POST_LIMIT = 4000
 WORKSPACE_KEYS = (
     "days_to_scrape", "luma_region_results", "cv_region_results", "evion_region_results",
     "meetup_region_results", "region_combined_events", "combined_events", "selected_event_region",
@@ -199,18 +198,10 @@ def linkedin_plain_text(organized):
     return "\n".join(lines).strip()
 
 
-def linkedin_commentary_length(text):
-    # Count the encoded API value conservatively, including UTF-16 emoji pairs.
-    return len(services.encode_linkedin_plain_text(text).encode("utf-16-le")) // 2
-
-
-def _prepare_post(run, source, region, prepare_post):
-    full_text = linkedin_plain_text(run["organized"])
-    run.update(text=full_text, full_text=full_text)
-    if prepare_post:
-        run.update(prepare_post(source, run["organized"], region))
-    if linkedin_commentary_length(run["text"]) > LINKEDIN_POST_LIMIT:
-        raise ValueError("The event agenda is too long for one LinkedIn post. Nothing was published.")
+def _prepare_agenda(run, source, region, prepare_agenda):
+    run["text"] = linkedin_plain_text(run["organized"])
+    if prepare_agenda:
+        run.update(prepare_agenda(source, run["organized"], region))
 
 
 def run_key(region, days):
@@ -218,7 +209,7 @@ def run_key(region, days):
     return f"{region}|{day}|{days}"
 
 
-def run_pipeline(region, days, state, scrape, organize, generate_image, progress, prepare_post=None):
+def run_pipeline(region, days, state, scrape, organize, generate_image, progress, prepare_agenda=None):
     """Prepare fresh regional text and an image without uploading or publishing."""
     run = {"region": region, "status": "running", "stage": "scraping"}
     state.setdefault("events_prepared_runs", {})[run_key(region, days)] = run
@@ -234,7 +225,7 @@ def run_pipeline(region, days, state, scrape, organize, generate_image, progress
         if not ok or not organized or not organized.strip():
             raise ValueError("Could not organize the scraped events.")
         run["organized"] = organized
-        _prepare_post(run, source, region, prepare_post)
+        _prepare_agenda(run, source, region, prepare_agenda)
 
         run["stage"] = "image generation"
         progress(f"Generating the {region} event image…")
@@ -251,7 +242,7 @@ def run_pipeline(region, days, state, scrape, organize, generate_image, progress
     return run
 
 
-def render_preparation(days, scrape, organize, generate_image, copy_button, prepare_post=None, render_preview=None):
+def render_preparation(days, scrape, organize, generate_image, copy_button, prepare_agenda=None, render_preview=None):
     st.subheader("Prepare events for LinkedIn")
     render_connection()
     st.caption("Each button scrapes Lu.ma, Cerebral Valley, Evion, and Meetup, organizes upcoming "
@@ -270,7 +261,7 @@ def render_preparation(days, scrape, organize, generate_image, copy_button, prep
                     result = run_pipeline(
                         region, days, st.session_state, scrape, organize, generate_image,
                         lambda label: status.update(label=label),
-                        prepare_post=prepare_post,
+                        prepare_agenda=prepare_agenda,
                     )
                     status.update(state="complete" if result["status"] == "prepared" else "error")
                 st.rerun()
@@ -279,21 +270,16 @@ def render_preparation(days, scrape, organize, generate_image, copy_button, prep
             if run.get("status") == "prepared":
                 st.success(f"{region} events prepared!")
             if run.get("organized"):
+                # Existing sessions may contain both concise and full versions.
+                run["text"] = run.pop("full_text", run["text"])
+                if "full_html" in run:
+                    run["html"] = run.pop("full_html")
                 copy_button(run["text"], f"prepare-{region.lower().replace(' ', '-')}",
-                            label="📋 Copy for LinkedIn", html_content=run.get("html"))
-                with st.expander(f"{region} organized events and image"):
+                            label="📋 Copy full agenda", html_content=run.get("html"))
+                with st.expander(f"Full {region} agenda and image", expanded=True):
                     if render_preview and run.get("html"):
                         render_preview(run["html"])
                     else:
                         st.text(run["text"])
                     if run.get("image"):
                         st.image(run["image"]["bytes"], caption=f"{region} event image", width="stretch")
-                if run.get("full_text") and run["full_text"] != run["text"]:
-                    st.caption("Condensed to one LinkedIn post. The full agenda is preserved below.")
-                    with st.expander(f"Full {region} agenda"):
-                        copy_button(run["full_text"], f"full-agenda-{region.lower().replace(' ', '-')}",
-                                    label="📋 Copy full agenda", html_content=run.get("full_html"))
-                        if render_preview and run.get("full_html"):
-                            render_preview(run["full_html"])
-                        else:
-                            st.text(run["full_text"])

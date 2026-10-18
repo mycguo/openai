@@ -75,9 +75,9 @@ class PipelineTests(unittest.TestCase):
         self.publish.assert_not_called()
         self.upload.assert_not_called()
 
-    def run_region(self, region="Bay Area", prepare_post=None):
+    def run_region(self, region="Bay Area", prepare_agenda=None):
         return publishing.run_pipeline(region, 8, self.state,
-                                       self.scrape, self.organize, self.image, Mock(), prepare_post=prepare_post)
+                                       self.scrape, self.organize, self.image, Mock(), prepare_agenda=prepare_agenda)
 
     def test_full_workflow_uses_fresh_region_agenda_and_image_without_account(self):
         for region in ("Bay Area", "New York"):
@@ -132,14 +132,14 @@ class PipelineTests(unittest.TestCase):
         self.state["events_linkedin"] = {**ACCOUNT, "expires": 1}
         self.assertEqual(self.run_region()["status"], "prepared")
 
-    def test_unstructured_oversized_agenda_stops_before_image_generation(self):
+    def test_long_agenda_without_formatter_still_generates_image(self):
         self.organize.side_effect = None
         self.organize.return_value = (True, "x" * 5000)
         result = self.run_region()
-        self.assertEqual(result["status"], "failed")
-        self.image.assert_not_called()
+        self.assertEqual(result["status"], "prepared")
+        self.assertIn("x" * 5000, self.image.call_args.args[0])
 
-    def test_long_agenda_prepares_concise_text_and_preserves_the_full_agenda(self):
+    def test_long_agenda_uses_every_event_for_preview_copy_and_image(self):
         source = long_agenda_source(130)
         self.scrape.side_effect = None
         self.scrape.return_value = source
@@ -147,19 +147,19 @@ class PipelineTests(unittest.TestCase):
         self.organize.return_value = True, events._build_organized_events_fallback(
             events._extract_organize_candidate_events(source),
         )
-        result = self.run_region("New York", prepare_post=events._prepare_region_linkedin_post)
+        result = self.run_region("New York", prepare_agenda=events._prepare_region_agenda)
         self.assertEqual(result["status"], "prepared")
-        self.assertGreater(len(result["full_text"]), 22051)
-        self.assertLessEqual(publishing.linkedin_commentary_length(result["text"]), 4000)
-        self.assertIn("AI meetup 129", result["full_text"])
-        self.assertNotIn("AI meetup 129", result["text"])
+        self.assertGreater(len(result["text"]), 22051)
+        self.assertEqual(result["text"].count("RSVP:"), 130)
+        self.assertIn("AI meetup 129", result["text"])
+        self.assertIn("NYC AI community and local builders", result["text"])
         self.assertIn(result["text"], self.image.call_args.args[0])
-        self.assertNotIn("AI meetup 129", self.image.call_args.args[0])
+        self.assertIn("AI meetup 129", self.image.call_args.args[0])
         self.assertIn("<ul>", result["html"])
         self.assertIn('href="https://lu.ma/event-000"', result["html"])
         self.publish.assert_not_called()
 
-    def test_unfittable_url_preserves_a_copyable_agenda_without_generation(self):
+    def test_long_url_remains_copyable_and_does_not_block_generation(self):
         url = "https://lu.ma/" + "a" * 4100
         source = SF.replace("https://lu.ma/sf-test", url)
         self.scrape.side_effect = None
@@ -168,10 +168,10 @@ class PipelineTests(unittest.TestCase):
         self.organize.return_value = True, events._build_organized_events_fallback(
             events._extract_organize_candidate_events(source),
         )
-        result = self.run_region(prepare_post=events._prepare_region_linkedin_post)
-        self.assertEqual(result["status"], "failed")
+        result = self.run_region(prepare_agenda=events._prepare_region_agenda)
+        self.assertEqual(result["status"], "prepared")
         self.assertIn(url, result["text"])
-        self.image.assert_not_called()
+        self.image.assert_called_once()
         self.publish.assert_not_called()
 
 
@@ -260,40 +260,32 @@ class LinkedInFormattingTests(unittest.TestCase):
         self.assertNotIn("https://lu.ma/ny-test\n6", text)
         self.assertTrue(all(line.startswith("https://") for line in re.findall(r"^RSVP: (.+)$", text, re.M)))
 
-    def test_concise_post_keeps_complete_events_and_urls(self):
+    def test_full_agenda_keeps_all_events_details_and_complete_urls(self):
         source = long_agenda_source()
-        prepared = events._prepare_region_linkedin_post(source, "", "New York")
+        prepared = events._prepare_region_agenda(source, "", "New York")
         urls = re.findall(r"^RSVP: (https?://\S+)$", prepared["text"], re.M)
-        self.assertTrue(urls)
-        self.assertEqual(urls, [f"https://lu.ma/event-{index:03d}" for index in range(len(urls))])
-        self.assertIn(f"Showing {len(urls)} of 110 upcoming New York events.", prepared["text"])
-        self.assertEqual(prepared["html"].count("<li>"), len(urls))
-        self.assertLessEqual(publishing.linkedin_commentary_length(prepared["text"]), 4000)
-
-    def test_compaction_keeps_all_events_when_details_alone_exceed_the_limit(self):
-        prepared = events._prepare_region_linkedin_post(long_agenda_source(30), "", "New York")
-        self.assertGreater(publishing.linkedin_commentary_length(prepared["full_text"]), 4000)
-        self.assertEqual(prepared["text"].count("RSVP:"), 30)
+        self.assertEqual(urls, [f"https://lu.ma/event-{index:03d}" for index in range(110)])
+        self.assertEqual(prepared["html"].count("<li>"), 110)
+        self.assertIn("Host: NYC AI community and local builders", prepared["text"])
+        self.assertIn("Meet local AI builders", prepared["text"])
         self.assertNotIn("Showing", prepared["text"])
-        self.assertLessEqual(publishing.linkedin_commentary_length(prepared["text"]), 4000)
 
-    def test_concise_post_counts_api_escapes_and_emoji_pairs(self):
-        source = long_agenda_source(30, "🚀 [Agents] #AI " * 10)
-        prepared = events._prepare_region_linkedin_post(source, "", "New York")
-        self.assertLessEqual(publishing.linkedin_commentary_length(prepared["text"]), 4000)
-        self.assertIn("🚀", prepared["text"])
-        self.assertIn("RSVP: https://lu.ma/event-000", prepared["text"])
+    def test_full_agenda_preserves_long_titles_and_punctuation(self):
+        title_suffix = "🚀 [Agents] #AI " * 10
+        prepared = events._prepare_region_agenda(long_agenda_source(30, title_suffix), "", "New York")
+        self.assertIn(title_suffix.strip(), prepared["text"])
+        self.assertEqual(prepared["text"].count("RSVP:"), 30)
 
-    def test_short_post_uses_exact_organized_events_html(self):
-        prepared = events._prepare_region_linkedin_post(SF, "", "Bay Area")
+    def test_full_agenda_uses_exact_organized_events_html(self):
+        prepared = events._prepare_region_agenda(SF, "", "Bay Area")
         expected = events._build_organized_events_html(events._extract_organize_candidate_events(SF))
         self.assertEqual(prepared["html"], expected)
-        self.assertEqual(prepared["text"], prepared["full_text"])
 
-    def test_an_oversized_single_url_is_never_truncated(self):
-        source = SF.replace("https://lu.ma/sf-test", "https://lu.ma/" + "a" * 4100)
-        with self.assertRaisesRegex(ValueError, "complete RSVP link"):
-            events._prepare_region_linkedin_post(source, "", "Bay Area")
+    def test_a_long_single_url_is_never_truncated(self):
+        url = "https://lu.ma/" + "a" * 4100
+        prepared = events._prepare_region_agenda(SF.replace("https://lu.ma/sf-test", url), "", "Bay Area")
+        self.assertIn(url, prepared["text"])
+        self.assertIn(url, prepared["html"])
 
     def test_plain_text_api_encoding_preserves_reserved_punctuation(self):
         text = "AI [Agents] (RAG) | @host #AI <demo> {tools} \\ * _ ~\nRSVP: https://lu.ma/ai_event#details"
@@ -449,7 +441,7 @@ class PublishingUITests(unittest.TestCase):
                 self.assertIn(own, image.call_args.args[0])
                 self.assertNotIn(other, image.call_args.args[0])
                 copy_button.assert_any_call(
-                    run["text"], f"prepare-{region.lower().replace(' ', '-')}", label="📋 Copy for LinkedIn",
+                    run["text"], f"prepare-{region.lower().replace(' ', '-')}", label="📋 Copy full agenda",
                     html_content=events._build_organized_events_html(
                         events._extract_organize_candidate_events(SF if region == "Bay Area" else NY),
                     ),
@@ -510,11 +502,35 @@ class PublishingUITests(unittest.TestCase):
             self.assertFalse(app.exception)
             run = app.session_state.events_prepared_runs[publishing.run_key("New York", 8)]
             self.assertEqual(run["status"], "prepared")
-            self.assertLessEqual(publishing.linkedin_commentary_length(run["text"]), 4000)
-            copy_button.assert_any_call(run["full_text"], "full-agenda-new-york",
-                                        label="📋 Copy full agenda", html_content=run["full_html"])
+            self.assertEqual(run["text"].count("RSVP:"), 110)
+            copy_button.assert_any_call(run["text"], "prepare-new-york",
+                                        label="📋 Copy full agenda", html_content=run["html"])
+            self.assertEqual([item.label for item in app.expander if "agenda" in item.label], ["Full New York agenda and image"])
             scrape.assert_called_once()
             post.assert_not_called()
+
+    def test_cached_concise_result_shows_only_full_agenda_without_regenerating(self):
+        with patch.object(events, "_scrape_region_for_publishing") as scrape, \
+             patch.object(events, "generate_event_image") as image, \
+             patch.object(events, "render_copy_button") as copy_button, \
+             patch.object(events, "_render_linkedin_post_preview") as preview:
+            app = self.app()
+            app.session_state.events_prepared_runs = {
+                publishing.run_key("New York", 8): {
+                    "status": "prepared", "organized": "full organized agenda",
+                    "text": "short version", "html": "<p>short version</p>",
+                    "full_text": "full agenda", "full_html": "<p>full agenda</p>",
+                    "image": {"bytes": PNG},
+                },
+            }
+            app.run()
+            self.assertFalse(app.exception)
+            copy_button.assert_called_once_with("full agenda", "prepare-new-york",
+                                               label="📋 Copy full agenda", html_content="<p>full agenda</p>")
+            preview.assert_called_once_with("<p>full agenda</p>")
+            self.assertEqual([item.label for item in app.expander if "agenda" in item.label], ["Full New York agenda and image"])
+            scrape.assert_not_called()
+            image.assert_not_called()
 
 
 if __name__ == "__main__":

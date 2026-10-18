@@ -23,7 +23,9 @@ from google.genai import types
 import requests
 from bs4 import BeautifulSoup
 
-from events_publishing import handle_authorization_callback, render_publishing
+from events_publishing import (
+    handle_authorization_callback, render_preparation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -3529,7 +3531,7 @@ def _format_linkedin_event_line(
     if trailing_parts:
         line = f"{line} - {' - '.join(trailing_parts)}"
     if include_plain_rsvp_link and not use_markdown_links:
-        line = f"{line} - RSVP: {event['rsvp_link']}"
+        line = f"• {line}\nRSVP: {event['rsvp_link']}"
     return line
 
 
@@ -3562,6 +3564,8 @@ def _build_organized_events_text(
                         include_plain_rsvp_link=include_plain_rsvp_link,
                     )
                 )
+                if include_plain_rsvp_link and not use_markdown_links:
+                    lines.append("")
             lines.append("")
 
     return "\n".join(lines).strip()
@@ -3856,6 +3860,23 @@ def _scrape_region_for_publishing(region_name: str, days: int, progress) -> str:
     )
 
 
+def _prepare_region_agenda(source: str, organized: str, region: str) -> Dict:
+    """Render every event using the Organize Events preview and Copy format."""
+    candidates = _extract_organize_candidate_events(source)
+    if not candidates:
+        raise ValueError("No dated events with RSVP links were available to prepare.")
+    return {
+        "text": _build_organized_events_text(
+            candidates, use_markdown_links=False, include_plain_rsvp_link=True,
+        ),
+        "html": _build_organized_events_html(candidates),
+    }
+
+
+def _render_linkedin_post_preview(html_content: str) -> None:
+    st_components.html(_build_organized_events_preview_html(html_content), height=560, scrolling=True)
+
+
 def main():
     handle_authorization_callback()
     st.title("AI Events Scraper")
@@ -3864,8 +3885,10 @@ def main():
     st.divider()
     days_to_scrape = int(st.session_state.get("days_to_scrape", 8))
 
-    render_publishing(
+    render_preparation(
         days_to_scrape, _scrape_region_for_publishing, generate_organized_events, generate_event_image,
+        render_copy_button,
+        prepare_agenda=_prepare_region_agenda, render_preview=_render_linkedin_post_preview,
     )
     st.divider()
 
@@ -4055,11 +4078,7 @@ def main():
 
             st.markdown("**LinkedIn Preview**")
             if organized_html:
-                st_components.html(
-                    _build_organized_events_preview_html(organized_html),
-                    height=560,
-                    scrolling=True,
-                )
+                _render_linkedin_post_preview(organized_html)
                 st.caption("This copy button uses rich HTML so pasting into LinkedIn keeps bullets and links when the browser allows it.")
             else:
                 st.markdown(organized_text)

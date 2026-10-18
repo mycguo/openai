@@ -68,114 +68,78 @@ class PipelineTests(unittest.TestCase):
         self.scrape = Mock(side_effect=lambda region, days, progress: f"{region} fresh source")
         self.organize = Mock(side_effect=lambda source: (True, f"**Agenda**\n{source}\n[RSVP](https://lu.ma/test)"))
         self.image = Mock(return_value=(True, {"bytes": PNG, "mime_type": "image/png"}, None))
-        self.publish_patch = patch.object(publishing.services, "post_to_linkedin", return_value=(True, {"id": "urn:li:share:123"}))
-        self.publish = self.publish_patch.start()
-        self.addCleanup(self.publish_patch.stop)
+        self.publish = self.enterContext(patch.object(publishing.services, "post_to_linkedin", side_effect=AssertionError("Must not publish")))
+        self.upload = self.enterContext(patch.object(publishing.services, "initialize_linkedin_image_upload", side_effect=AssertionError("Must not upload")))
 
-    def run_region(self, region="Bay Area", account=None, prepare_post=None):
-        return publishing.run_pipeline(region, 8, account or ACCOUNT, self.state,
+    def tearDown(self):
+        self.publish.assert_not_called()
+        self.upload.assert_not_called()
+
+    def run_region(self, region="Bay Area", prepare_post=None):
+        return publishing.run_pipeline(region, 8, self.state,
                                        self.scrape, self.organize, self.image, Mock(), prepare_post=prepare_post)
 
-    def test_full_workflow_uses_fresh_region_agenda_and_image(self):
+    def test_full_workflow_uses_fresh_region_agenda_and_image_without_account(self):
         for region in ("Bay Area", "New York"):
             result = self.run_region(region)
-            self.assertEqual(result["status"], "published")
+            self.assertEqual(result["status"], "prepared")
+            self.assertEqual(result["stage"], "complete")
             self.scrape.assert_called_with(region, 8, unittest.mock.ANY)
             self.organize.assert_called_with(f"{region} fresh source")
             self.assertIn(region, self.image.call_args.args[0])
             self.assertIn(result["text"], self.image.call_args.args[0])
-            self.publish.assert_called_with(
-                result["text"], ACCOUNT["token"], ACCOUNT["author"],
-                image_payload=result["image"], allow_image_fallback=False, plain_text=True,
-            )
+            self.assertEqual(result["image"]["bytes"], PNG)
             self.assertNotIn("**", result["text"])
             self.assertIn("RSVP: https://lu.ma/test", result["text"])
-        self.assertEqual(len(self.state["events_publish_runs"]), 2)
+        self.assertEqual(len(self.state["events_prepared_runs"]), 2)
 
-    def test_success_is_not_repeated(self):
+    def test_explicit_preparation_refreshes_results(self):
         first = self.run_region()
-        self.assertIs(self.run_region(), first)
-        self.scrape.assert_called_once()
-        self.publish.assert_called_once()
-
-    def test_identical_content_is_not_posted_again_for_another_window(self):
-        self.run_region()
-        result = publishing.run_pipeline("Bay Area", 9, ACCOUNT, self.state,
-                                         self.scrape, self.organize, self.image, Mock())
-        self.assertEqual(result["status"], "published")
-        self.publish.assert_called_once()
-
-    def test_no_events_does_not_generate_or_publish(self):
-        self.scrape.return_value = ""
         self.scrape.side_effect = None
+        self.scrape.return_value = "Bay Area newer source"
+        second = self.run_region()
+        self.assertIsNot(first, second)
+        self.assertEqual(second["status"], "prepared")
+        self.assertIn("newer source", second["text"])
+        self.assertEqual(self.scrape.call_count, 2)
+
+    def test_no_events_does_not_generate(self):
+        self.scrape.side_effect = None
+        self.scrape.return_value = ""
         self.assertEqual(self.run_region()["status"], "failed")
         self.organize.assert_not_called()
         self.image.assert_not_called()
-        self.publish.assert_not_called()
 
     def test_organization_failure_stops_before_image(self):
-        self.organize.return_value = (False, None)
         self.organize.side_effect = None
+        self.organize.return_value = (False, None)
         self.assertEqual(self.run_region()["status"], "failed")
         self.image.assert_not_called()
-        self.publish.assert_not_called()
 
-    def test_image_failure_stops_publication_and_allows_retry(self):
+    def test_image_failure_preserves_copyable_text_and_allows_retry(self):
         self.image.return_value = (False, None, "Image provider unavailable")
-        self.assertEqual(self.run_region()["status"], "failed")
-        self.publish.assert_not_called()
+        failed = self.run_region()
+        self.assertEqual(failed["status"], "failed")
+        self.assertTrue(failed["text"])
         self.image.return_value = (True, {"bytes": PNG}, None)
-        self.assertEqual(self.run_region()["status"], "published")
-        self.publish.assert_called_once()
+        self.assertEqual(self.run_region()["status"], "prepared")
 
-    def test_empty_image_is_not_a_text_only_post(self):
+    def test_empty_image_does_not_report_prepared(self):
         self.image.return_value = (True, {"bytes": b""}, None)
         self.assertEqual(self.run_region()["status"], "failed")
-        self.publish.assert_not_called()
 
-    def test_expired_connection_does_not_start(self):
-        self.assertEqual(self.run_region(account={**ACCOUNT, "expires": 1})["status"], "failed")
-        self.scrape.assert_not_called()
-        self.publish.assert_not_called()
+    def test_expired_connection_does_not_block_preparation(self):
+        self.state["events_linkedin"] = {**ACCOUNT, "expires": 1}
+        self.assertEqual(self.run_region()["status"], "prepared")
 
-    def test_expiry_during_preparation_does_not_publish(self):
-        account = dict(ACCOUNT)
-        def generate(_):
-            account["expires"] = 1
-            return True, {"bytes": PNG}, None
-        self.image.side_effect = generate
-        self.assertEqual(self.run_region(account=account)["status"], "failed")
-        self.publish.assert_not_called()
-
-    def test_ambiguous_create_is_not_automatically_retried(self):
-        for response in (TimeoutError(), (False, "503: unavailable")):
-            with self.subTest(response=type(response).__name__):
-                self.state.clear()
-                self.publish.reset_mock(side_effect=True)
-                if isinstance(response, Exception):
-                    self.publish.side_effect = response
-                else:
-                    self.publish.return_value = response
-                self.assertEqual(self.run_region()["status"], "uncertain")
-                self.assertEqual(self.run_region()["status"], "uncertain")
-                self.publish.assert_called_once()
-
-    def test_image_upload_failure_never_creates_public_post(self):
-        self.publish_patch.stop()
-        with patch.object(publishing.services, "initialize_linkedin_image_upload", return_value=(False, None, None, "upload failed")), \
-             patch.object(publishing.services.requests, "post") as create:
-            self.assertEqual(self.run_region()["status"], "uncertain")
-            create.assert_not_called()
-
-    def test_unstructured_oversized_agenda_stops_before_generation_or_publication(self):
+    def test_unstructured_oversized_agenda_stops_before_image_generation(self):
         self.organize.side_effect = None
         self.organize.return_value = (True, "x" * 5000)
         result = self.run_region()
         self.assertEqual(result["status"], "failed")
         self.image.assert_not_called()
-        self.publish.assert_not_called()
 
-    def test_long_agenda_creates_one_concise_post_and_preserves_the_full_agenda(self):
+    def test_long_agenda_prepares_concise_text_and_preserves_the_full_agenda(self):
         source = long_agenda_source(130)
         self.scrape.side_effect = None
         self.scrape.return_value = source
@@ -184,7 +148,7 @@ class PipelineTests(unittest.TestCase):
             events._extract_organize_candidate_events(source),
         )
         result = self.run_region("New York", prepare_post=events._prepare_region_linkedin_post)
-        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["status"], "prepared")
         self.assertGreater(len(result["full_text"]), 22051)
         self.assertLessEqual(publishing.linkedin_commentary_length(result["text"]), 4000)
         self.assertIn("AI meetup 129", result["full_text"])
@@ -193,14 +157,7 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("AI meetup 129", self.image.call_args.args[0])
         self.assertIn("<ul>", result["html"])
         self.assertIn('href="https://lu.ma/event-000"', result["html"])
-        self.publish.assert_called_once()
-
-    def test_definitive_length_rejection_allows_an_explicit_retry(self):
-        self.publish.return_value = False, '400: {"message":"ShareCommentary text length exceeded the maximum allowed"}'
-        self.assertEqual(self.run_region()["status"], "failed")
-        self.publish.return_value = True, {"id": "urn:li:share:retry"}
-        self.assertEqual(self.run_region()["status"], "published")
-        self.assertEqual(self.publish.call_count, 2)
+        self.publish.assert_not_called()
 
     def test_unfittable_url_preserves_a_copyable_agenda_without_generation(self):
         url = "https://lu.ma/" + "a" * 4100
@@ -277,7 +234,7 @@ class BrowserBindingTests(unittest.TestCase):
 
 
 class LinkedInFormattingTests(unittest.TestCase):
-    def test_published_agenda_matches_existing_organize_copy_format(self):
+    def test_prepared_agenda_matches_existing_organize_copy_format(self):
         candidates = events._extract_organize_candidate_events(SF + NY)
         organized = events._build_organized_events_fallback(candidates)
         expected = events._build_organized_events_text(
@@ -365,14 +322,14 @@ class PublishingUITests(unittest.TestCase):
             app.session_state.events_linkedin = dict(ACCOUNT)
         return app.run()
 
-    def test_disconnected_page_has_connection_and_two_disabled_publish_buttons(self):
+    def test_disconnected_page_has_connection_and_two_enabled_prepare_buttons(self):
         with patch.object(publishing, "linkedin_config", return_value=CONFIG), \
              patch.object(publishing.services, "post_to_linkedin") as post:
             app = self.app()
             self.assertFalse(app.exception)
             self.assertFalse(element(app.button, "Connect to LinkedIn").disabled)
             for region in ("Bay Area", "New York"):
-                self.assertTrue(element(app.button, f"Publish {region} events").disabled)
+                self.assertFalse(element(app.button, f"Prepare {region} events").disabled)
             post.assert_not_called()
 
     def test_automatic_connection_restores_workspace_after_redirect_and_exchanges_once(self):
@@ -383,7 +340,7 @@ class PublishingUITests(unittest.TestCase):
             app.session_state.combined_events = SF
             app.session_state.generated_image = {"bytes": PNG}
             app.session_state.days_to_scrape = 12
-            app.session_state.events_linkedin_attempts = {"previous": {"status": "published"}}
+            app.session_state.events_prepared_runs = {"previous": {"status": "prepared"}}
             app.run()
             element(app.button, "Connect to LinkedIn").click().run()
             pending = app.session_state.events_oauth_pending
@@ -401,7 +358,7 @@ class PublishingUITests(unittest.TestCase):
             self.assertEqual(app.session_state.combined_events, SF)
             self.assertEqual(app.session_state.generated_image["bytes"], PNG)
             self.assertEqual(app.session_state.days_to_scrape, 12)
-            self.assertIn("previous", app.session_state.events_linkedin_attempts)
+            self.assertIn("previous", app.session_state.events_prepared_runs)
             self.assertNotIn("events_oauth_pending", app.session_state)
             self.assertNotIn("code", app.query_params)
             self.assertNotIn("state", app.query_params)
@@ -409,7 +366,7 @@ class PublishingUITests(unittest.TestCase):
             exchange.assert_called_once()
             element(app.button, "Disconnect LinkedIn").click().run()
             self.assertNotIn("events_linkedin", app.session_state)
-            self.assertTrue(element(app.button, "Publish Bay Area events").disabled)
+            self.assertFalse(element(app.button, "Prepare Bay Area events").disabled)
 
     def test_automatic_connection_rejects_unknown_expired_and_other_browser_requests(self):
         with patch.object(publishing, "linkedin_config", return_value=CONFIG), \
@@ -463,7 +420,7 @@ class PublishingUITests(unittest.TestCase):
             self.assertNotIn(state, requests)
             self.assertNotIn("events_auth_url", app.session_state)
 
-    def test_publish_buttons_run_all_steps_and_keep_regions_separate(self):
+    def test_prepare_buttons_run_all_steps_without_connection_and_keep_regions_separate(self):
         def store(key):
             def scrape(region, days):
                 events.st.session_state.setdefault(key, {})[region] = {
@@ -479,25 +436,29 @@ class PublishingUITests(unittest.TestCase):
              patch.object(events, "generate_event_image", return_value=(True, {"bytes": PNG}, None)) as image, \
              patch.object(events, "render_copy_button", wraps=events.render_copy_button) as copy_button, \
              patch.object(publishing.services, "post_to_linkedin", return_value=(True, {"id": "urn:li:share:test"})) as post:
-            app = self.app(connected=True)
+            app = self.app()
             for region, own, other in (("Bay Area", "SF AI meetup", "NY AI meetup"), ("New York", "NY AI meetup", "SF AI meetup")):
-                element(app.button, f"Publish {region} events").click().run()
+                element(app.button, f"Prepare {region} events").click().run()
                 self.assertFalse(app.exception)
                 for mock in (luma, cv, evion, meetup):
                     mock.assert_called_with(region, 8)
-                self.assertIn(own, post.call_args.args[0])
-                self.assertNotIn(other, post.call_args.args[0])
+                run = app.session_state.events_prepared_runs[publishing.run_key(region, 8)]
+                self.assertEqual(run["status"], "prepared")
+                self.assertIn(own, run["text"])
+                self.assertNotIn(other, run["text"])
                 self.assertIn(own, image.call_args.args[0])
                 self.assertNotIn(other, image.call_args.args[0])
                 copy_button.assert_any_call(
-                    post.call_args.args[0], f"publish-{region.lower().replace(' ', '-')}", label="📋 Copy for LinkedIn",
+                    run["text"], f"prepare-{region.lower().replace(' ', '-')}", label="📋 Copy for LinkedIn",
                     html_content=events._build_organized_events_html(
                         events._extract_organize_candidate_events(SF if region == "Bay Area" else NY),
                     ),
                 )
-                self.assertTrue(element(app.button, f"Publish {region} events").disabled)
+                self.assertFalse(element(app.button, f"Prepare {region} events").disabled)
             app.run()
-            self.assertEqual(post.call_count, 2)
+            post.assert_not_called()
+            self.assertEqual(image.call_count, 2)
+            self.assertEqual(luma.call_count, 2)
 
     def test_expired_connection_is_cleared(self):
         with patch.object(publishing, "linkedin_config", return_value=CONFIG):
@@ -505,60 +466,54 @@ class PublishingUITests(unittest.TestCase):
             app.session_state.events_linkedin = {**ACCOUNT, "expires": 1}
             app.run()
             self.assertNotIn("events_linkedin", app.session_state)
-            self.assertTrue(element(app.button, "Publish New York events").disabled)
+            self.assertFalse(element(app.button, "Prepare New York events").disabled)
 
     def test_missing_configuration_disables_connection(self):
         with patch.object(publishing, "linkedin_config", return_value={field: "" for field in CONFIG}):
             app = self.app()
             self.assertFalse(app.exception)
             self.assertTrue(element(app.button, "Connect to LinkedIn").disabled)
+            self.assertFalse(element(app.button, "Prepare Bay Area events").disabled)
+            self.assertFalse(element(app.button, "Prepare New York events").disabled)
 
-    def test_timeout_requires_explicit_retry_and_reruns_do_not_publish(self):
-        with patch.object(events, "_scrape_region_for_publishing", return_value=SF), \
-             patch.object(events, "generate_event_image", return_value=(True, {"bytes": PNG}, None)), \
-             patch.object(publishing.services, "post_to_linkedin", side_effect=TimeoutError) as post:
-            app = self.app(connected=True)
-            element(app.button, "Publish Bay Area events").click().run()
+    def test_preparation_failure_can_be_retried_and_rerenders_do_not_repeat_work(self):
+        with patch.object(events, "_scrape_region_for_publishing", return_value=SF) as scrape, \
+             patch.object(events, "generate_event_image", side_effect=TimeoutError) as image, \
+             patch.object(publishing.services, "post_to_linkedin") as post:
+            app = self.app()
+            element(app.button, "Prepare Bay Area events").click().run()
             self.assertFalse(app.exception)
-            self.assertTrue(element(app.button, "Publish Bay Area events").disabled)
-
+            self.assertFalse(element(app.button, "Prepare Bay Area events").disabled)
+            self.assertTrue(app.error)
             app.run()
-            post.assert_called_once()
-            element(app.button, "No Bay Area post exists — allow retry").click().run()
-            self.assertFalse(element(app.button, "Publish Bay Area events").disabled)
-            post.assert_called_once()
-            post.side_effect = None
-            post.return_value = True, {"id": "urn:li:share:retry"}
-            element(app.button, "Publish Bay Area events").click().run()
+            image.assert_called_once()
+            image.side_effect = None
+            image.return_value = True, {"bytes": PNG}, None
+            element(app.button, "Prepare Bay Area events").click().run()
             self.assertFalse(app.exception)
-            self.assertEqual(post.call_count, 2)
-            self.assertTrue(element(app.button, "Publish Bay Area events").disabled)
+            self.assertEqual(image.call_count, 2)
+            self.assertEqual(scrape.call_count, 2)
+            self.assertEqual(app.session_state.events_prepared_runs[publishing.run_key("Bay Area", 8)]["status"], "prepared")
+            app.run()
+            self.assertEqual(image.call_count, 2)
+            post.assert_not_called()
 
-    def test_existing_oversized_rejection_can_be_retried_and_full_agenda_can_be_copied(self):
+    def test_prepared_full_agenda_remains_copyable_after_disconnect(self):
         source = long_agenda_source()
-        organized = events._build_organized_events_fallback(events._extract_organize_candidate_events(source))
-        with patch.object(events, "_scrape_region_for_publishing") as scrape, \
+        with patch.object(events, "_scrape_region_for_publishing", return_value=source) as scrape, \
+             patch.object(events, "generate_event_image", return_value=(True, {"bytes": PNG}, None)), \
              patch.object(events, "render_copy_button", wraps=events.render_copy_button) as copy_button, \
              patch.object(publishing.services, "post_to_linkedin") as post:
             app = self.app(connected=True)
-            app.session_state.events_publish_runs = {
-                publishing.run_key("New York", 8, ACCOUNT): {
-                    "region": "New York", "source": source, "organized": organized,
-                    "text": publishing.linkedin_plain_text(organized), "status": "uncertain",
-                    "fingerprint": "legacy-rejected",
-                    "error": 'LinkedIn did not confirm publication: 400: {"message":"ShareCommentary text length (22051 characters) exceeded the maximum allowed (4000 characters)"}',
-                },
-            }
-            app.session_state.events_linkedin_attempts = {"legacy-rejected": {"status": "uncertain"}}
-            app.run()
+            element(app.button, "Prepare New York events").click().run()
+            element(app.button, "Disconnect LinkedIn").click().run()
             self.assertFalse(app.exception)
-            self.assertFalse(element(app.button, "Publish New York events").disabled)
-            self.assertNotIn("legacy-rejected", app.session_state.events_linkedin_attempts)
-            run = app.session_state.events_publish_runs[publishing.run_key("New York", 8, ACCOUNT)]
+            run = app.session_state.events_prepared_runs[publishing.run_key("New York", 8)]
+            self.assertEqual(run["status"], "prepared")
             self.assertLessEqual(publishing.linkedin_commentary_length(run["text"]), 4000)
             copy_button.assert_any_call(run["full_text"], "full-agenda-new-york",
                                         label="📋 Copy full agenda", html_content=run["full_html"])
-            scrape.assert_not_called()
+            scrape.assert_called_once()
             post.assert_not_called()
 
 

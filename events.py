@@ -24,7 +24,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from events_publishing import (
-    LINKEDIN_POST_LIMIT, handle_authorization_callback, linkedin_commentary_length, render_publishing,
+    LINKEDIN_POST_LIMIT, handle_authorization_callback, linkedin_commentary_length, render_preparation,
 )
 
 logger = logging.getLogger(__name__)
@@ -3914,7 +3914,7 @@ def main():
     st.divider()
     days_to_scrape = int(st.session_state.get("days_to_scrape", 8))
 
-    render_publishing(
+    render_preparation(
         days_to_scrape, _scrape_region_for_publishing, generate_organized_events, generate_event_image,
         render_copy_button,
         prepare_post=_prepare_region_linkedin_post, render_preview=_render_linkedin_post_preview,

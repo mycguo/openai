@@ -2,5 +2,6 @@
   "dependencies": {
     "@neon/config": "^1.8.4",
     "@neon/env": "^1.5.1"
-  }
+  },
+  "packageManager": "pnpm@10.26.2"
 }

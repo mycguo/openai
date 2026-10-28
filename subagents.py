@@ -391,18 +391,19 @@ Research methodology:
                 ]
             )
         },
-        # Note: Playwright requires Node.js and Chrome to be installed!
+        # Note: Browser MCP servers require pnpm, Node.js, and Chrome on PATH.
         mcp_servers={
             "Playwright": {
-                "command": "npx",
+                "command": "pnpm",
                 "args": [
-                    "-y",
+                    "dlx",
                     "@playwright/mcp@latest"
                 ]
             },
             "chrome-devtools": {
-                "command": "npx",
+                "command": "pnpm",
                 "args": [
+                    "dlx",
                     "chrome-devtools-mcp@latest"
                 ]
             }

@@ -1,3 +1,6 @@
+# Project setup
+
+See [Node.js tooling](node-tooling.md) for pnpm dependency installation and browser MCP setup.
 
 
 ## 1. Getting Access to Google Drive and Google Docs
